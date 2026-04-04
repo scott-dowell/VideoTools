@@ -46,25 +46,25 @@
   <div class="row g-3 mb-3">
     <div class="col-6 col-md-3">
       <div class="stat-card">
-        <div class="stat-value">10</div>
+        <div class="stat-value" id="statTotal">—</div>
         <div class="stat-label"><i class="bi bi-files me-1"></i>Total files</div>
       </div>
     </div>
     <div class="col-6 col-md-3">
       <div class="stat-card">
-        <div class="stat-value" style="color:#3fb950">3</div>
+        <div class="stat-value" id="statDone" style="color:#3fb950">—</div>
         <div class="stat-label"><i class="bi bi-check-circle me-1"></i>Converted</div>
       </div>
     </div>
     <div class="col-6 col-md-3">
       <div class="stat-card">
-        <div class="stat-value" style="color:#d29922">6.0 GB</div>
+        <div class="stat-value" id="statSaved" style="color:#d29922">—</div>
         <div class="stat-label"><i class="bi bi-arrow-down-circle me-1"></i>Saved so far</div>
       </div>
     </div>
     <div class="col-6 col-md-3">
       <div class="stat-card">
-        <div class="stat-value" style="color:#f85149">1</div>
+        <div class="stat-value" id="statFailed" style="color:#f85149">—</div>
         <div class="stat-label"><i class="bi bi-x-circle me-1"></i>Failed</div>
       </div>
     </div>
@@ -77,31 +77,22 @@
       <div class="card h-100">
         <div class="card-header d-flex justify-content-between align-items-center">
           <span><i class="bi bi-table me-2"></i>Video Queue</span>
-          <span class="badge bg-secondary">33.2 GB total</span>
+          <span class="badge bg-secondary" id="totalSizeLabel">—</span>
         </div>
         <div class="card-body p-0">
           <div class="table-responsive">
             <table class="table table-borderless mb-0">
               <thead>
                 <tr>
-                  <th>Filename</th><th>Size</th><th>Codec</th>
+                  <th>Folder</th><th>Filename</th><th>Size</th><th>Codec</th>
                   <th>Duration</th><th>Status</th>
                   <th>Output</th><th>Saved</th><th>%</th>
                 </tr>
               </thead>
               <tbody id="queueBody">
-                {% for f in files %}
-                <tr id="row-{{ loop.index0 }}">
-                  <td class="text-truncate" style="max-width:280px" title="{{ f.name }}">{{ f.name }}</td>
-                  <td class="text-end text-secondary">{{ f.size }} MB</td>
-                  <td><span class="codec-{{ f.codec|lower }}">{{ f.codec }}</span></td>
-                  <td class="text-secondary">{{ f.duration }}</td>
-                  <td><span class="badge badge-{{ f.status }}">{{ f.status }}</span></td>
-                  <td class="text-end">{% if f.output %}{{ f.output }} MB{% endif %}</td>
-                  <td class="text-end text-success">{% if f.saved %}{{ f.saved }} MB{% endif %}</td>
-                  <td class="text-end">{% if f.pct %}<strong>{{ f.pct }}%</strong>{% endif %}</td>
+                <tr id="emptyRow">
+                  <td colspan="9" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
                 </tr>
-                {% endfor %}
               </tbody>
             </table>
           </div>
@@ -116,22 +107,22 @@
       <div class="card">
         <div class="card-header"><i class="bi bi-play-circle me-2"></i>Controls</div>
         <div class="card-body d-grid gap-2">
-          <button class="btn btn-start text-white" onclick="startConversion()">
+          <button class="btn btn-start text-white" id="startBtn" onclick="startConversion()" disabled>
             <i class="bi bi-play-fill me-2"></i>Start Conversion
           </button>
           <div class="row g-2">
             <div class="col-6">
-              <button class="btn btn-pause text-white w-100" onclick="pauseSim()">
+              <button class="btn btn-pause text-white w-100" id="pauseBtn" onclick="pauseConversion()" disabled>
                 <i class="bi bi-pause-fill me-1"></i>Pause
               </button>
             </div>
             <div class="col-6">
-              <button class="btn btn-stop text-white w-100">
+              <button class="btn btn-stop text-white w-100" id="stopBtn" disabled>
                 <i class="bi bi-stop-fill me-1"></i>Stop
               </button>
             </div>
           </div>
-          <button class="btn btn-hstop text-white">
+          <button class="btn btn-hstop text-white" id="hstopBtn" disabled>
             <i class="bi bi-x-octagon-fill me-2"></i>Hard Stop (kill)
           </button>
         </div>
@@ -154,10 +145,10 @@
           <div class="mb-3">
             <div class="d-flex justify-content-between mb-1">
               <small class="text-secondary">Overall</small>
-              <small>30%</small>
+              <small id="overallPct">0%</small>
             </div>
             <div class="progress">
-              <div class="progress-bar overall" style="width:30%"></div>
+              <div class="progress-bar overall" id="overallBar" style="width:0%"></div>
             </div>
           </div>
           <div class="row text-center">
@@ -170,7 +161,7 @@
               <div class="text-secondary" style="font-size:.72rem">ETA</div>
             </div>
             <div class="col-4">
-              <div class="fw-bold text-success" id="savedVal">6.0 GB</div>
+              <div class="fw-bold text-success" id="savedVal">—</div>
               <div class="text-secondary" style="font-size:.72rem">saved</div>
             </div>
           </div>
@@ -183,10 +174,6 @@
         <div class="card-body p-2">
           <div class="log-box" id="logBox">
             <div class="log-ok">▸ Application started.</div>
-            <div class="log-info">▸ Found 10 video files — 33.2 GB total</div>
-            <div class="log-ok">▸ One.Piece.E1050.mp4 → 312 MB (saved 793 MB, 71.8%)</div>
-            <div class="log-warn">▸ Vinland.Saga: FFmpeg exit code 1 (failed)</div>
-            <div class="log-ok">▸ Steins.Gate.E01.mkv → 701 MB (saved 1,502 MB, 68.2%)</div>
           </div>
         </div>
       </div>

@@ -32,14 +32,14 @@ td, th { vertical-align: middle; border-color: #21262d; }
 .stat-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px 18px; }
 .stat-value { font-size: 1.6rem; font-weight:700; color:#58a6ff; }
 .stat-label { color:#8b949e; font-size:0.78rem; }
-.btn-start  { background:#1d6de0; border:none; }
-.btn-start:hover { background:#1a62c7; }
-.btn-stop   { background:#b91c1c; border:none; }
-.btn-stop:hover  { background:#991b1b; }
-.btn-hstop  { background:#7c3aed; border:none; }
-.btn-hstop:hover { background:#6d28d9; }
-.btn-pause  { background:#374151; border:none; }
-.btn-pause:hover { background:#4b5563; }
+.btn-start  { background:#1d6de0 !important; border:none; }
+.btn-start:hover:not(:disabled) { background:#1a62c7 !important; }
+.btn-stop   { background:#b91c1c !important; border:none; }
+.btn-stop:hover:not(:disabled)  { background:#991b1b !important; }
+.btn-hstop  { background:#7c3aed !important; border:none; }
+.btn-hstop:hover:not(:disabled) { background:#6d28d9 !important; }
+.btn-pause  { background:#374151 !important; border:none; }
+.btn-pause:hover:not(:disabled) { background:#4b5563 !important; }
 .codec-hevc { color: #3fb950; font-weight:600; }
 .codec-h264 { color: #58a6ff; }
 .folder-path { font-family: Consolas, monospace; font-size:0.78rem; color:#8b949e; }

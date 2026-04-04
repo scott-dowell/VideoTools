@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Converter</title>
+  <link rel="icon" href="/static/favicon.ico">
+  <link href="/static/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/bootstrap-icons.min.css" rel="stylesheet">
+  <link href="/static/style.css" rel="stylesheet">
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar navbar-expand-lg px-4 py-2 mb-4">
+  <span class="navbar-brand fw-bold"><i class="bi bi-film me-2 text-primary"></i>Video Converter</span>
+  <div class="ms-auto d-flex align-items-center gap-3">
+    <div class="form-check form-switch mb-0">
+      <input class="form-check-input" type="checkbox" id="animeMode" checked>
+      <label class="form-check-label text-secondary" for="animeMode">Anime mode</label>
+    </div>
+    <div class="form-check form-switch mb-0">
+      <input class="form-check-input" type="checkbox" id="consMode">
+      <label class="form-check-label text-secondary" for="consMode">Conservative</label>
+    </div>
+    <button class="btn btn-sm btn-outline-secondary" onclick="toggleTheme()" title="Toggle dark/light mode">
+      <i class="bi bi-moon-stars-fill" id="themeIcon"></i>
+    </button>
+  </div>
+</nav>
+
+<div class="container-fluid px-4">
+
+  <!-- Folder bar -->
+  <div class="card mb-3">
+    <div class="card-body py-2 d-flex align-items-center gap-3">
+      <i class="bi bi-folder2-open text-warning fs-5"></i>
+      <span class="folder-path flex-grow-1" id="folderPath">No folder selected</span>
+      <button class="btn btn-sm btn-outline-secondary" onclick="openBrowser()">
+        <i class="bi bi-folder me-1"></i>Browse
+      </button>
+    </div>
+  </div>
+
+  <!-- Stat cards -->
+  <div class="row g-3 mb-3">
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-value">10</div>
+        <div class="stat-label"><i class="bi bi-files me-1"></i>Total files</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-value" style="color:#3fb950">3</div>
+        <div class="stat-label"><i class="bi bi-check-circle me-1"></i>Converted</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-value" style="color:#d29922">6.0 GB</div>
+        <div class="stat-label"><i class="bi bi-arrow-down-circle me-1"></i>Saved so far</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-value" style="color:#f85149">1</div>
+        <div class="stat-label"><i class="bi bi-x-circle me-1"></i>Failed</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+
+    <!-- Video table -->
+    <div class="col-lg-8">
+      <div class="card h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-table me-2"></i>Video Queue</span>
+          <span class="badge bg-secondary">33.2 GB total</span>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-borderless mb-0">
+              <thead>
+                <tr>
+                  <th>Filename</th><th>Size</th><th>Codec</th>
+                  <th>Duration</th><th>Status</th>
+                  <th>Output</th><th>Saved</th><th>%</th>
+                </tr>
+              </thead>
+              <tbody id="queueBody">
+                {% for f in files %}
+                <tr id="row-{{ loop.index0 }}">
+                  <td class="text-truncate" style="max-width:280px" title="{{ f.name }}">{{ f.name }}</td>
+                  <td class="text-end text-secondary">{{ f.size }} MB</td>
+                  <td><span class="codec-{{ f.codec|lower }}">{{ f.codec }}</span></td>
+                  <td class="text-secondary">{{ f.duration }}</td>
+                  <td><span class="badge badge-{{ f.status }}">{{ f.status }}</span></td>
+                  <td class="text-end">{% if f.output %}{{ f.output }} MB{% endif %}</td>
+                  <td class="text-end text-success">{% if f.saved %}{{ f.saved }} MB{% endif %}</td>
+                  <td class="text-end">{% if f.pct %}<strong>{{ f.pct }}%</strong>{% endif %}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right panel -->
+    <div class="col-lg-4 d-flex flex-column gap-3">
+
+      <!-- Controls -->
+      <div class="card">
+        <div class="card-header"><i class="bi bi-play-circle me-2"></i>Controls</div>
+        <div class="card-body d-grid gap-2">
+          <button class="btn btn-start text-white" onclick="startConversion()">
+            <i class="bi bi-play-fill me-2"></i>Start Conversion
+          </button>
+          <div class="row g-2">
+            <div class="col-6">
+              <button class="btn btn-pause text-white w-100" onclick="pauseSim()">
+                <i class="bi bi-pause-fill me-1"></i>Pause
+              </button>
+            </div>
+            <div class="col-6">
+              <button class="btn btn-stop text-white w-100">
+                <i class="bi bi-stop-fill me-1"></i>Stop
+              </button>
+            </div>
+          </div>
+          <button class="btn btn-hstop text-white">
+            <i class="bi bi-x-octagon-fill me-2"></i>Hard Stop (kill)
+          </button>
+        </div>
+      </div>
+
+      <!-- Progress -->
+      <div class="card">
+        <div class="card-header"><i class="bi bi-activity me-2"></i>Progress</div>
+        <div class="card-body">
+          <div class="mb-3">
+            <div class="d-flex justify-content-between mb-1">
+              <small class="text-secondary">Current file</small>
+              <small id="filePct">0%</small>
+            </div>
+            <div class="progress">
+              <div class="progress-bar" id="fileBar" style="width:0%"></div>
+            </div>
+            <small class="text-secondary mt-1 d-block" id="currentFilename">—</small>
+          </div>
+          <div class="mb-3">
+            <div class="d-flex justify-content-between mb-1">
+              <small class="text-secondary">Overall</small>
+              <small>30%</small>
+            </div>
+            <div class="progress">
+              <div class="progress-bar overall" style="width:30%"></div>
+            </div>
+          </div>
+          <div class="row text-center">
+            <div class="col-4">
+              <div class="fw-bold text-primary" id="fpsVal">—</div>
+              <div class="text-secondary" style="font-size:.72rem">fps</div>
+            </div>
+            <div class="col-4">
+              <div class="fw-bold text-warning" id="etaVal">—</div>
+              <div class="text-secondary" style="font-size:.72rem">ETA</div>
+            </div>
+            <div class="col-4">
+              <div class="fw-bold text-success" id="savedVal">6.0 GB</div>
+              <div class="text-secondary" style="font-size:.72rem">saved</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div class="card flex-grow-1">
+        <div class="card-header"><i class="bi bi-terminal me-2"></i>Log</div>
+        <div class="card-body p-2">
+          <div class="log-box" id="logBox">
+            <div class="log-ok">▸ Application started.</div>
+            <div class="log-info">▸ Found 10 video files — 33.2 GB total</div>
+            <div class="log-ok">▸ One.Piece.E1050.mp4 → 312 MB (saved 793 MB, 71.8%)</div>
+            <div class="log-warn">▸ Vinland.Saga: FFmpeg exit code 1 (failed)</div>
+            <div class="log-ok">▸ Steins.Gate.E01.mkv → 701 MB (saved 1,502 MB, 68.2%)</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Folder Browser Modal -->
+<div class="modal fade" id="folderModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">
+          <i class="bi bi-folder2-open me-2 text-warning"></i>Select Folder
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0">
+        <div class="px-3 py-2 border-bottom">
+          <ol class="breadcrumb mb-0 small" id="breadcrumb"></ol>
+        </div>
+        <div id="dirListing" style="min-height:320px; max-height:420px; overflow-y:auto;">
+          <div class="text-center text-secondary py-5">
+            <div class="spinner-border spinner-border-sm"></div> Loading…
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer d-flex align-items-center">
+        <div class="flex-grow-1 text-secondary small" id="selectedPathDisplay">No folder selected</div>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="confirmFolderBtn" onclick="confirmFolder()" disabled>
+          Select This Folder
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/bootstrap.bundle.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

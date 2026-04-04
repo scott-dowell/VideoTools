@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Logs
+*.log
+logs/
+
+# Temp working files
+C:/Temp/vc_working/
+
+# OS
+Thumbs.db
+desktop.ini

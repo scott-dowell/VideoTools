@@ -178,9 +178,53 @@ FileEntry
   duration_secs Integer
   status        String        — pending | converting | done | skipped | failed
   output_bytes  Integer nullable
-  error_msg     Text nullable
+  exit_code     Integer nullable
+  ffmpeg_cmd    Text nullable  — exact command run (for reproduction)
+  error_tail    Text nullable  — last 50 lines of stderr, set on failure only
   started_at    DateTime nullable
   finished_at   DateTime nullable
 ```
 
 Add `Flask-SQLAlchemy` to `requirements.txt` when implementing the backend.
+
+---
+
+## Failure Diagnostics / Logging Strategy (decided April 2026)
+
+**Problem:** FFmpeg failures are hard to diagnose after the fact — the Flask log scrolls away
+and once the server restarts the error is gone entirely.
+
+**Decision: hybrid approach — structured summary in DB, full output on disk.**
+
+### What the DB stores (on `FileEntry`)
+
+| Column | Type | Notes |
+|---|---|---|
+| `ffmpeg_cmd` | Text | Exact command string — allows manual reproduction |
+| `error_tail` | Text | Last 50 lines of FFmpeg stderr, captured **only on failure** |
+| `exit_code` | Integer | FFmpeg process exit code |
+
+Storing only the tail keeps the DB lightweight. The actual error is always in the last few
+lines — the thousands of frame-counter lines before it are not useful to store.
+
+### Full log file on disk
+
+Every encode writes its complete FFmpeg stderr to:
+
+```
+C:\Temp\vc_working\logs\<filename_stem>_<YYYYMMDD_HHMMSS>.log
+```
+
+This file is not cleaned up automatically and is available for deep diagnosis (frame-by-frame
+bitrate, QSV init messages, etc.). If the temp dir is wiped, the DB `error_tail` still has
+the critical lines.
+
+### UI surface
+
+- Failed rows in the queue table get a **"View Log"** button (small, in the Status cell or
+  as a row action)
+- Clicking opens a modal showing:
+  - The FFmpeg command
+  - The `error_tail` (monospace, scrollable)
+  - A note with the full log file path for reference
+- No digging through files needed for 99% of failure diagnosis

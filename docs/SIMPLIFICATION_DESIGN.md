@@ -144,3 +144,43 @@ Rough estimate: **400–600 lines** removed from the hot path.
 
 3. **`validate_audio_subtitle_preservation`**: ✅ Keep, gated behind anime mode only. Not  
    called in normal mode (tracks are copied unchanged, nothing to validate).
+
+---
+
+## Job State Database (decided during UI build — April 2026)
+
+Use **Flask-SQLAlchemy with SQLite** (same pattern as SimpleMoney) to persist job state.
+
+Why:
+- In-memory state is lost if the server restarts mid-queue
+- A persistent DB gives free job history, restartability, and makes `/api/status` trivial
+- SQLAlchemy removes all raw SQL; route handlers stay 5–15 lines each
+- SQLite needs zero infrastructure — single file on disk
+
+Proposed models:
+
+```
+Job
+  id          Integer PK
+  root_path   String        — the folder that was scanned
+  anime_mode  Boolean
+  created_at  DateTime
+  status      String        — idle | running | paused | done
+
+FileEntry
+  id            Integer PK
+  job_id        Integer FK → Job
+  folder        String        — relative subfolder (empty = root)
+  filename      String
+  full_path     String
+  size_bytes    Integer
+  codec         String
+  duration_secs Integer
+  status        String        — pending | converting | done | skipped | failed
+  output_bytes  Integer nullable
+  error_msg     Text nullable
+  started_at    DateTime nullable
+  finished_at   DateTime nullable
+```
+
+Add `Flask-SQLAlchemy` to `requirements.txt` when implementing the backend.

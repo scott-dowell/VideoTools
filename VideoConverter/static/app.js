@@ -34,6 +34,11 @@ function buildRow(f, index) {
   const tr = document.createElement('tr');
   tr.id = 'row-' + index;
 
+  // Apply pre-baked state class
+  if (f.status === 'done')    tr.classList.add('tr-done');
+  if (f.status === 'failed')  tr.classList.add('tr-failed');
+  if (f.status === 'converting') tr.classList.add('tr-converting');
+
   // col 0 — Folder
   const tdFolder = document.createElement('td');
   tdFolder.className = 'text-secondary text-truncate';
@@ -70,22 +75,31 @@ function buildRow(f, index) {
   tdDur.textContent = f.duration || '\u2014';
   tr.appendChild(tdDur);
 
-  // col 5 — Status
+  // col 5 — Status badge
   const tdStatus = document.createElement('td');
-  tdStatus.innerHTML = '<span class="badge badge-pending">pending</span>';
+  const badgeClass = f.status === 'done' ? 'badge-done'
+                   : f.status === 'failed' ? 'badge-failed'
+                   : f.status === 'converting' ? 'badge-converting'
+                   : 'badge-pending';
+  tdStatus.innerHTML = '<span class="badge ' + badgeClass + '">' + (f.status || 'pending') + '</span>';
   tr.appendChild(tdStatus);
 
-  // col 6 — Output (empty until done)
-  tr.appendChild(document.createElement('td'));
+  // col 6 — Output
+  const tdOut = document.createElement('td');
+  tdOut.className = 'text-end';
+  tdOut.textContent = f.output ? f.output + ' MB' : '';
+  tr.appendChild(tdOut);
 
-  // col 7 — Saved (empty until done)
+  // col 7 — Saved
   const tdSaved = document.createElement('td');
   tdSaved.className = 'text-end text-success';
+  tdSaved.textContent = f.saved ? f.saved + ' MB' : '';
   tr.appendChild(tdSaved);
 
-  // col 8 — % (empty until done)
+  // col 8 — %
   const tdPct = document.createElement('td');
   tdPct.className = 'text-end';
+  if (f.pct) tdPct.innerHTML = '<strong>' + f.pct + '%</strong>';
   tr.appendChild(tdPct);
 
   return tr;
@@ -102,14 +116,18 @@ function populateTable(files) {
 }
 
 function updateStats(files) {
+  const totalMB  = files.reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
+  const done     = files.filter(f => f.status === 'done').length;
+  const failed   = files.filter(f => f.status === 'failed').length;
+  const savedMB  = files.reduce((s, f) => s + (f.saved ? parseFloat(f.saved.replace(/,/g, '')) || 0 : 0), 0);
   document.getElementById('statTotal').textContent  = files.length;
-  document.getElementById('statDone').textContent   = '0';
-  document.getElementById('statSaved').textContent  = '0 GB';
-  document.getElementById('statFailed').textContent = '0';
-  document.getElementById('savedVal').textContent   = '\u2014';
-  document.getElementById('overallPct').textContent = '0%';
-  document.getElementById('overallBar').style.width = '0%';
-  const totalMB  = files.reduce((s, f) => s + parseFloat(f.size.replace(/,/g, '')) || 0, 0);
+  document.getElementById('statDone').textContent   = done;
+  document.getElementById('statFailed').textContent = failed;
+  document.getElementById('statSaved').textContent  = savedMB > 0 ? (savedMB / 1024).toFixed(1) + ' GB' : '—';
+  document.getElementById('savedVal').textContent   = savedMB > 0 ? (savedMB / 1024).toFixed(1) + ' GB' : '—';
+  const overallPct = files.length ? Math.round((done + failed) / files.length * 100) : 0;
+  document.getElementById('overallPct').textContent = overallPct + '%';
+  document.getElementById('overallBar').style.width = overallPct + '%';
   document.getElementById('totalSizeLabel').textContent = (totalMB / 1024).toFixed(1) + ' GB total';
 }
 
@@ -117,16 +135,16 @@ function updateStats(files) {
 // Scan  (simulated — swap for fetch('/api/scan') later)
 // ============================================================
 const DEMO_FILES = [
-  { folder: '',          name: 'One.Piece.E1050.mp4',      size: '1,105', codec: 'H264', duration: '24:12' },
-  { folder: '',          name: 'One.Piece.E1051.mp4',      size: '1,098', codec: 'H264', duration: '24:05' },
-  { folder: 'Season 2', name: 'Blue.Lock.E24.mp4',         size: '1,876', codec: 'H264', duration: '23:45' },
-  { folder: 'Season 2', name: 'Blue.Lock.E25.mp4',         size: '1,743', codec: 'H265', duration: '22:58' },
-  { folder: 'Season 2', name: 'Blue.Lock.E26.mp4',         size: '1,811', codec: 'H264', duration: '24:01' },
-  { folder: 'Movies',   name: 'Vinland.Saga.Movie.mkv',    size: '8,231', codec: 'H264', duration: '1:52:04' },
-  { folder: 'Movies',   name: 'Steins.Gate.Movie.mkv',     size: '6,504', codec: 'H264', duration: '1:32:44' },
-  { folder: 'Extras',   name: 'Steins.Gate.E01.mkv',       size: '2,203', codec: 'H264', duration: '23:23' },
-  { folder: 'Extras',   name: 'Steins.Gate.E02.mkv',       size: '2,187', codec: 'H264', duration: '23:15' },
-  { folder: '',          name: 'Jujutsu.Kaisen.E01.mkv',   size: '1,456', codec: 'H264', duration: '24:30' },
+  { folder: '',          name: 'One.Piece.E1050.mp4',      size: '1,105', codec: 'H264', duration: '24:12', status: 'done',    output: '298',   saved: '807',   pct: '73' },
+  { folder: '',          name: 'One.Piece.E1051.mp4',      size: '1,098', codec: 'H264', duration: '24:05', status: 'done',    output: '312',   saved: '786',   pct: '72' },
+  { folder: 'Season 2', name: 'Blue.Lock.E24.mp4',         size: '1,876', codec: 'H264', duration: '23:45', status: 'done',    output: '521',   saved: '1,355', pct: '72' },
+  { folder: 'Season 2', name: 'Blue.Lock.E25.mp4',         size: '1,743', codec: 'HEVC', duration: '22:58', status: 'done',    output: '501',   saved: '1,242', pct: '71' },
+  { folder: 'Season 2', name: 'Blue.Lock.E26.mp4',         size: '1,811', codec: 'H264', duration: '24:01', status: 'failed',  output: null,    saved: null,    pct: null },
+  { folder: 'Movies',   name: 'Vinland.Saga.Movie.mkv',    size: '8,231', codec: 'H264', duration: '1:52:04', status: 'pending', output: null,    saved: null,    pct: null },
+  { folder: 'Movies',   name: 'Steins.Gate.Movie.mkv',     size: '6,504', codec: 'H264', duration: '1:32:44', status: 'pending', output: null,    saved: null,    pct: null },
+  { folder: 'Extras',   name: 'Steins.Gate.E01.mkv',       size: '2,203', codec: 'H264', duration: '23:23', status: 'pending', output: null,    saved: null,    pct: null },
+  { folder: 'Extras',   name: 'Steins.Gate.E02.mkv',       size: '2,187', codec: 'H264', duration: '23:15', status: 'pending', output: null,    saved: null,    pct: null },
+  { folder: '',          name: 'Jujutsu.Kaisen.E01.mkv',   size: '1,456', codec: 'H264', duration: '24:30', status: 'pending', output: null,    saved: null,    pct: null },
 ];
 
 function scanFolder(path) {
@@ -174,6 +192,12 @@ function _startNextFile() {
     return;
   }
   const f = _files[_simIndex];
+  // Mark active row
+  const activeRow = document.getElementById('row-' + _simIndex);
+  if (activeRow) {
+    activeRow.classList.add('tr-converting');
+    activeRow.cells[5].innerHTML = '<span class="badge badge-converting">converting</span>';
+  }
   document.getElementById('currentFilename').textContent = f.name;
   document.getElementById('fpsVal').textContent = (40 + Math.random() * 20).toFixed(1);
   document.getElementById('etaVal').textContent = '\u2014';
@@ -200,6 +224,8 @@ function _simTick() {
     const pct    = Math.round(savedMB / srcMB * 100);
     const row    = document.getElementById('row-' + _simIndex);
     if (row) {
+      row.classList.remove('tr-converting');
+      row.classList.add('tr-done');
       row.cells[5].innerHTML    = '<span class="badge badge-done">done</span>';
       row.cells[6].textContent  = outMB.toLocaleString() + ' MB';
       row.cells[7].textContent  = savedMB.toLocaleString() + ' MB';

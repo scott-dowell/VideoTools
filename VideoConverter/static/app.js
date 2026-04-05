@@ -302,10 +302,6 @@ function showRowMenu(index, btn) {
     _rowMenu.appendChild(_menuItem('bi-play-circle-fill text-success',
       isDone ? 'Play Converted' : 'Play Original',
       () => apiOpen(targetPath, 'play')));
-    if (isDone) {
-      _rowMenu.appendChild(_menuItem('bi-play-circle',
-        'Play Original', () => apiOpen(f.full_path, 'play')));
-    }
     _rowMenu.appendChild(_menuDivider());
   }
 

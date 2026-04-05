@@ -8,6 +8,8 @@ let _simValue   = 0;
 let _paused     = false;
 let _activeFilter = 'all';
 let _searchQuery  = '';
+let _appState     = 'idle';  // idle | scanning | ready | running | done
+let _dragSrcIndex = null;
 
 // ============================================================
 // UI helpers
@@ -23,10 +25,18 @@ function addLog(msg, cls) {
 
 // state: 'idle' | 'scanning' | 'ready' | 'running' | 'done'
 function setButtonStates(state) {
+  _appState = state;
   document.getElementById('startBtn').disabled  = state !== 'ready';
   document.getElementById('pauseBtn').disabled  = state !== 'running';
   document.getElementById('stopBtn').disabled   = !(state === 'running' || state === 'scanning');
   document.getElementById('hstopBtn').disabled  = state !== 'running';
+  // Enable drag handles only when queue is ready and not running
+  const canDrag = (state === 'ready');
+  document.querySelectorAll('#queueBody tr[id^="row-"]').forEach(tr => {
+    tr.draggable = canDrag;
+    const handle = tr.querySelector('.drag-handle');
+    if (handle) handle.style.opacity = canDrag ? '1' : '0.15';
+  });
 }
 
 // ============================================================
@@ -41,7 +51,47 @@ function buildRow(f, index) {
   if (f.status === 'failed')  tr.classList.add('tr-failed');
   if (f.status === 'converting') tr.classList.add('tr-converting');
 
-  // col 0 — Folder
+  // Drag events
+  tr.addEventListener('dragstart', e => {
+    _dragSrcIndex = index;
+    tr.classList.add('drag-dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  tr.addEventListener('dragend', () => {
+    tr.classList.remove('drag-dragging');
+    document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+  });
+  tr.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+    tr.classList.add('drag-over');
+  });
+  tr.addEventListener('dragleave', () => tr.classList.remove('drag-over'));
+  tr.addEventListener('drop', e => {
+    e.preventDefault();
+    tr.classList.remove('drag-over');
+    if (_dragSrcIndex === null || _dragSrcIndex === index) return;
+    // Reorder _files array
+    const moved = _files.splice(_dragSrcIndex, 1)[0];
+    _files.splice(index, 0, moved);
+    _dragSrcIndex = null;
+    populateTable(_files);
+    // Re-apply drag state
+    document.querySelectorAll('#queueBody tr[id^="row-"]').forEach(row => {
+      row.draggable = true;
+      const h = row.querySelector('.drag-handle');
+      if (h) h.style.opacity = '1';
+    });
+  });
+
+  // col 0 — Drag handle
+  const tdHandle = document.createElement('td');
+  tdHandle.style.width = '20px';
+  tdHandle.innerHTML = '<i class="bi bi-grip-vertical drag-handle"></i>';
+  tr.appendChild(tdHandle);
+
+  // col 1 — Folder
   const tdFolder = document.createElement('td');
   tdFolder.className = 'text-secondary text-truncate';
   tdFolder.style.maxWidth = '130px';
@@ -115,6 +165,9 @@ function buildRow(f, index) {
   tdAct.appendChild(btn);
   tr.appendChild(tdAct);
 
+  // Disable drag until state is ready
+  tr.draggable = (_appState === 'ready');
+
   return tr;
 }
 
@@ -122,7 +175,7 @@ function populateTable(files) {
   const tbody = document.getElementById('queueBody');
   tbody.innerHTML = '';
   if (files.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
     return;
   }
   files.forEach((f, i) => tbody.appendChild(buildRow(f, i)));
@@ -260,8 +313,8 @@ function scanFolder(path) {
   if (chipAll) chipAll.classList.add('active');
   setButtonStates('scanning');
   document.getElementById('queueBody').innerHTML =
-    '<tr><td colspan="9" class="text-center text-secondary py-4">' +
-    '<div class="spinner-border spinner-border-sm me-2"></div>Scanning for video files\u2026</td></tr>';
+    '<tr><td colspan="11" class="text-center text-secondary py-4">' +
+    '<div class="spinner-border spinner-border-sm me-2"></div>Scanning for video files…</td></tr>';
   document.getElementById('totalSizeLabel').textContent = 'Scanning\u2026';
   addLog('Scanning: ' + path, 'info');
 

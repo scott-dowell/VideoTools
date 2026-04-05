@@ -198,9 +198,11 @@ function scanFolder(path) {
   _files = [];
   _activeFilter = 'all';
   _searchQuery  = '';
-  document.getElementById('searchBox').value = '';
+  const sb = document.getElementById('searchBox');
+  if (sb) sb.value = '';
   document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-  document.getElementById('chip-all').classList.add('active');
+  const chipAll = document.getElementById('chip-all');
+  if (chipAll) chipAll.classList.add('active');
   setButtonStates('scanning');
   document.getElementById('queueBody').innerHTML =
     '<tr><td colspan="9" class="text-center text-secondary py-4">' +

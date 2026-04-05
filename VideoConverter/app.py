@@ -115,6 +115,33 @@ def api_status():
     return jsonify({"status": "idle", "queue": []})
 
 
+@app.route("/api/open")
+def api_open():
+    """Open a file in its default app, or reveal it in Explorer."""
+    path    = request.args.get("path", "").strip()
+    action  = request.args.get("action", "play")   # play | folder
+
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    path = os.path.normpath(path)
+    if not os.path.exists(path):
+        return jsonify({"error": "Path not found"}), 404
+
+    try:
+        if action == "folder":
+            if os.path.isfile(path):
+                import subprocess
+                subprocess.Popen(["explorer", "/select,", path])
+            else:
+                os.startfile(path)
+        else:
+            os.startfile(path)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

@@ -87,12 +87,12 @@
                 <tr>
                   <th>Folder</th><th>Filename</th><th>Size</th><th>Codec</th>
                   <th>Duration</th><th>Status</th>
-                  <th>Output</th><th>Saved</th><th>%</th>
+                  <th>Output</th><th>Saved</th><th>%</th><th></th>
                 </tr>
               </thead>
               <tbody id="queueBody">
                 <tr id="emptyRow">
-                  <td colspan="9" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
+                  <td colspan="10" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
                 </tr>
               </tbody>
             </table>
@@ -216,5 +216,50 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/app.js"></script>
+
+<!-- Shared row action menu (body-level to avoid table overflow clipping) -->
+<div id="rowMenu" style="position:fixed;z-index:9999;display:none;min-width:190px;" class="dropdown-menu shadow"></div>
+
+<!-- Error Log Modal -->
+<div class="modal fade" id="errorLogModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-exclamation-triangle text-danger me-2"></i>Conversion Error</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-secondary small mb-1">File</p>
+        <p class="fw-semibold" id="errModalFilename">—</p>
+        <p class="text-secondary small mb-1 mt-3">FFmpeg command</p>
+        <pre class="bg-body-secondary rounded p-2 small" style="white-space:pre-wrap;word-break:break-all;" id="errModalCmd">—</pre>
+        <p class="text-secondary small mb-1 mt-3">Error output (last 50 lines)</p>
+        <pre class="bg-body-secondary rounded p-2 small" style="height:260px;overflow-y:auto;" id="errModalTail">—</pre>
+      </div>
+      <div class="modal-footer">
+        <small class="text-secondary flex-grow-1" id="errModalLogPath"></small>
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Video Details Modal -->
+<div class="modal fade" id="detailsModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-info-circle text-primary me-2"></i>Video Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="detailsModalBody">
+        <div class="text-center text-secondary py-4"><div class="spinner-border spinner-border-sm"></div> Loading…</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>

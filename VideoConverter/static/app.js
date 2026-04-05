@@ -102,6 +102,17 @@ function buildRow(f, index) {
   if (f.pct) tdPct.innerHTML = '<strong>' + f.pct + '%</strong>';
   tr.appendChild(tdPct);
 
+  // col 9 — Actions
+  const tdAct = document.createElement('td');
+  tdAct.style.width = '32px';
+  const btn = document.createElement('button');
+  btn.className = 'row-menu-btn';
+  btn.title = 'Actions';
+  btn.innerHTML = '<i class="bi bi-three-dots-vertical"></i>';
+  btn.addEventListener('click', e => { e.stopPropagation(); showRowMenu(index, btn); });
+  tdAct.appendChild(btn);
+  tr.appendChild(tdAct);
+
   return tr;
 }
 
@@ -135,16 +146,16 @@ function updateStats(files) {
 // Scan  (simulated — swap for fetch('/api/scan') later)
 // ============================================================
 const DEMO_FILES = [
-  { folder: '',          name: 'One.Piece.E1050.mp4',      size: '1,105', codec: 'H264', duration: '24:12', status: 'done',    output: '298',   saved: '807',   pct: '73' },
-  { folder: '',          name: 'One.Piece.E1051.mp4',      size: '1,098', codec: 'H264', duration: '24:05', status: 'done',    output: '312',   saved: '786',   pct: '72' },
-  { folder: 'Season 2', name: 'Blue.Lock.E24.mp4',         size: '1,876', codec: 'H264', duration: '23:45', status: 'done',    output: '521',   saved: '1,355', pct: '72' },
-  { folder: 'Season 2', name: 'Blue.Lock.E25.mp4',         size: '1,743', codec: 'HEVC', duration: '22:58', status: 'done',    output: '501',   saved: '1,242', pct: '71' },
-  { folder: 'Season 2', name: 'Blue.Lock.E26.mp4',         size: '1,811', codec: 'H264', duration: '24:01', status: 'failed',  output: null,    saved: null,    pct: null },
-  { folder: 'Movies',   name: 'Vinland.Saga.Movie.mkv',    size: '8,231', codec: 'H264', duration: '1:52:04', status: 'pending', output: null,    saved: null,    pct: null },
-  { folder: 'Movies',   name: 'Steins.Gate.Movie.mkv',     size: '6,504', codec: 'H264', duration: '1:32:44', status: 'pending', output: null,    saved: null,    pct: null },
-  { folder: 'Extras',   name: 'Steins.Gate.E01.mkv',       size: '2,203', codec: 'H264', duration: '23:23', status: 'pending', output: null,    saved: null,    pct: null },
-  { folder: 'Extras',   name: 'Steins.Gate.E02.mkv',       size: '2,187', codec: 'H264', duration: '23:15', status: 'pending', output: null,    saved: null,    pct: null },
-  { folder: '',          name: 'Jujutsu.Kaisen.E01.mkv',   size: '1,456', codec: 'H264', duration: '24:30', status: 'pending', output: null,    saved: null,    pct: null },
+  { folder: '',         name: 'One.Piece.E1050.mp4',    size: '1,105', codec: 'H264', duration: '24:12', status: 'done',    output: '298',   saved: '807',   pct: '73', full_path: 'D:/Anime/One.Piece.E1050.mp4',    output_path: 'D:/Anime/One.Piece.E1050_hevc.mp4' },
+  { folder: '',         name: 'One.Piece.E1051.mp4',    size: '1,098', codec: 'H264', duration: '24:05', status: 'done',    output: '312',   saved: '786',   pct: '72', full_path: 'D:/Anime/One.Piece.E1051.mp4',    output_path: 'D:/Anime/One.Piece.E1051_hevc.mp4' },
+  { folder: 'Season 2', name: 'Blue.Lock.E24.mp4',      size: '1,876', codec: 'H264', duration: '23:45', status: 'done',    output: '521',   saved: '1,355', pct: '72', full_path: 'D:/Anime/Season 2/Blue.Lock.E24.mp4', output_path: 'D:/Anime/Season 2/Blue.Lock.E24_hevc.mp4' },
+  { folder: 'Season 2', name: 'Blue.Lock.E25.mp4',      size: '1,743', codec: 'HEVC', duration: '22:58', status: 'done',    output: '501',   saved: '1,242', pct: '71', full_path: 'D:/Anime/Season 2/Blue.Lock.E25.mp4', output_path: 'D:/Anime/Season 2/Blue.Lock.E25_hevc.mp4' },
+  { folder: 'Season 2', name: 'Blue.Lock.E26.mp4',      size: '1,811', codec: 'H264', duration: '24:01', status: 'failed',  output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Season 2/Blue.Lock.E26.mp4', output_path: null, ffmpeg_cmd: 'ffmpeg -y -i "D:/Anime/Season 2/Blue.Lock.E26.mp4" -c:v hevc_qsv ...', error_tail: 'Error initializing output stream 0:0 -- Error while opening encoder\nConversion failed!' },
+  { folder: 'Movies',  name: 'Vinland.Saga.Movie.mkv', size: '8,231', codec: 'H264', duration: '1:52:04', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Movies/Vinland.Saga.Movie.mkv', output_path: null },
+  { folder: 'Movies',  name: 'Steins.Gate.Movie.mkv',  size: '6,504', codec: 'H264', duration: '1:32:44', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Movies/Steins.Gate.Movie.mkv',  output_path: null },
+  { folder: 'Extras',  name: 'Steins.Gate.E01.mkv',    size: '2,203', codec: 'H264', duration: '23:23', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Extras/Steins.Gate.E01.mkv', output_path: null },
+  { folder: 'Extras',  name: 'Steins.Gate.E02.mkv',    size: '2,187', codec: 'H264', duration: '23:15', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Extras/Steins.Gate.E02.mkv', output_path: null },
+  { folder: '',         name: 'Jujutsu.Kaisen.E01.mkv', size: '1,456', codec: 'H264', duration: '24:30', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Jujutsu.Kaisen.E01.mkv',   output_path: null },
 ];
 
 function scanFolder(path) {
@@ -242,6 +253,156 @@ function _simTick() {
 function pauseConversion() {
   _paused = !_paused;
   addLog(_paused ? 'Paused.' : 'Resumed.', 'warn');
+}
+
+// ============================================================
+// Row action menu
+// ============================================================
+const _rowMenu = document.getElementById('rowMenu');
+let _rowMenuIndex = -1;
+
+// Close menu on any outside click
+document.addEventListener('click', () => { _rowMenu.style.display = 'none'; });
+
+function _menuItem(icon, label, handler, extraClass) {
+  const a = document.createElement('a');
+  a.className = 'dropdown-item' + (extraClass ? ' ' + extraClass : '');
+  a.href = '#';
+  a.innerHTML = '<i class="bi ' + icon + ' me-2"></i>' + label;
+  a.addEventListener('click', e => { e.preventDefault(); _rowMenu.style.display = 'none'; handler(); });
+  return a;
+}
+
+function _menuDivider() {
+  const d = document.createElement('hr');
+  d.className = 'dropdown-divider';
+  return d;
+}
+
+function showRowMenu(index, btn) {
+  _rowMenuIndex = index;
+  const f = _files[index];
+  _rowMenu.innerHTML = '';
+
+  const isDone       = f.status === 'done';
+  const isFailed     = f.status === 'failed';
+  const isPending    = f.status === 'pending';
+  const isConverting = f.status === 'converting';
+
+  // Target path: converted output if done, otherwise source
+  const targetPath = isDone && f.output_path ? f.output_path : f.full_path;
+
+  if (!isConverting) {
+    _rowMenu.appendChild(_menuItem('bi-play-circle-fill text-success',
+      isDone ? 'Play Converted' : 'Play Original',
+      () => apiOpen(targetPath, 'play')));
+    if (isDone) {
+      _rowMenu.appendChild(_menuItem('bi-play-circle',
+        'Play Original', () => apiOpen(f.full_path, 'play')));
+    }
+    _rowMenu.appendChild(_menuDivider());
+  }
+
+  _rowMenu.appendChild(_menuItem('bi-folder2-open', 'Open Folder',
+    () => apiOpen(isDone && f.output_path ? f.output_path : f.full_path, 'folder')));
+  _rowMenu.appendChild(_menuItem('bi-clipboard', 'Copy Path',
+    () => copyPath(targetPath)));
+
+  if (isFailed) {
+    _rowMenu.appendChild(_menuDivider());
+    _rowMenu.appendChild(_menuItem('bi-exclamation-triangle text-danger', 'View Error Log',
+      () => viewErrorLog(index)));
+    _rowMenu.appendChild(_menuItem('bi-arrow-clockwise', 'Retry',
+      () => retryFile(index)));
+  }
+
+  if (isDone) {
+    _rowMenu.appendChild(_menuDivider());
+    _rowMenu.appendChild(_menuItem('bi-info-circle', 'Video Details',
+      () => viewDetails(index)));
+  }
+
+  if (isPending) {
+    _rowMenu.appendChild(_menuDivider());
+    _rowMenu.appendChild(_menuItem('bi-x-circle text-danger', 'Remove from Queue',
+      () => removeFromQueue(index)));
+  }
+
+  // Position: align right of button, flip up if near bottom
+  _rowMenu.style.display = 'block';
+  const rect    = btn.getBoundingClientRect();
+  const menuW   = _rowMenu.offsetWidth;
+  const menuH   = _rowMenu.offsetHeight;
+  let top  = rect.bottom + 2;
+  let left = rect.right - menuW;
+  if (top + menuH > window.innerHeight - 8) top = rect.top - menuH - 2;
+  if (left < 4) left = rect.left;
+  _rowMenu.style.top  = top + 'px';
+  _rowMenu.style.left = left + 'px';
+}
+
+// ============================================================
+// Row actions
+// ============================================================
+function apiOpen(path, action) {
+  if (!path) { addLog('No path available.', 'warn'); return; }
+  fetch('/api/open?path=' + encodeURIComponent(path) + '&action=' + action)
+    .then(r => r.json())
+    .then(d => { if (d.error) addLog('Error: ' + d.error, 'err'); })
+    .catch(() => addLog('Could not reach server.', 'err'));
+}
+
+function copyPath(path) {
+  if (!path) return;
+  navigator.clipboard.writeText(path)
+    .then(() => addLog('Copied: ' + path, 'info'))
+    .catch(() => addLog('Clipboard write failed.', 'err'));
+}
+
+function viewErrorLog(index) {
+  const f = _files[index];
+  document.getElementById('errModalFilename').textContent = f.name;
+  document.getElementById('errModalCmd').textContent      = f.ffmpeg_cmd  || '(not yet recorded — backend not connected)';
+  document.getElementById('errModalTail').textContent     = f.error_tail  || '(not yet recorded — backend not connected)';
+  document.getElementById('errModalLogPath').textContent  = f.log_path    ? 'Full log: ' + f.log_path : '';
+  new bootstrap.Modal(document.getElementById('errorLogModal')).show();
+}
+
+function viewDetails(index) {
+  const f = _files[index];
+  const body = document.getElementById('detailsModalBody');
+  // Stub — will call /api/details?id=... when backend is ready
+  body.innerHTML =
+    '<table class="table table-sm table-borderless mb-0">' +
+    '<tr><td class="text-secondary" style="width:140px">Filename</td><td class="fw-semibold">' + f.name + '</td></tr>' +
+    '<tr><td class="text-secondary">Folder</td><td>' + (f.folder || '—') + '</td></tr>' +
+    '<tr><td class="text-secondary">Size</td><td>' + f.size + ' MB</td></tr>' +
+    '<tr><td class="text-secondary">Codec</td><td>' + (f.codec || '—') + '</td></tr>' +
+    '<tr><td class="text-secondary">Duration</td><td>' + (f.duration || '—') + '</td></tr>' +
+    (f.output ? '<tr><td class="text-secondary">Output size</td><td>' + f.output + ' MB</td></tr>' : '') +
+    (f.saved  ? '<tr><td class="text-secondary">Saved</td><td class="text-success">' + f.saved + ' MB (' + f.pct + '%)</td></tr>' : '') +
+    '</table>' +
+    '<p class="text-secondary small mt-3 mb-0"><i class="bi bi-info-circle me-1"></i>Full stream details (resolution, bitrate, audio/subtitle tracks) available once backend is connected.</p>';
+  new bootstrap.Modal(document.getElementById('detailsModal')).show();
+}
+
+function retryFile(index) {
+  const f = _files[index];
+  const row = document.getElementById('row-' + index);
+  if (row) {
+    row.classList.remove('tr-failed');
+    row.cells[5].innerHTML = '<span class="badge badge-pending">pending</span>';
+  }
+  _files[index].status = 'pending';
+  addLog('Queued for retry: ' + f.name, 'info');
+}
+
+function removeFromQueue(index) {
+  _files.splice(index, 1);
+  populateTable(_files);
+  updateStats(_files);
+  addLog('Removed from queue.', 'info');
+  if (_files.length === 0) setButtonStates('idle');
 }
 
 // ============================================================

@@ -114,19 +114,21 @@
           </button>
           <div class="row g-2">
             <div class="col-6">
-              <button class="btn btn-pause text-white w-100" id="pauseBtn" onclick="pauseConversion()" disabled>
+              <button class="btn btn-pause w-100" id="pauseBtn" onclick="pauseConversion()" disabled>
                 <i class="bi bi-pause-fill me-1"></i>Pause
               </button>
             </div>
             <div class="col-6">
-              <button class="btn btn-stop text-white w-100" id="stopBtn" disabled>
+              <button class="btn btn-stop w-100" id="stopBtn" disabled>
                 <i class="bi bi-stop-fill me-1"></i>Stop
               </button>
             </div>
           </div>
-          <button class="btn btn-hstop text-white" id="hstopBtn" disabled>
-            <i class="bi bi-x-octagon-fill me-2"></i>Hard Stop (kill)
-          </button>
+          <div class="text-center mt-1">
+            <button class="btn btn-hstop" id="hstopBtn" disabled>
+              <i class="bi bi-x-octagon me-1"></i>Hard Stop (kill)
+            </button>
+          </div>
         </div>
       </div>
 

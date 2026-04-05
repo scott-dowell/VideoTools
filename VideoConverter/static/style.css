@@ -45,12 +45,15 @@ td, th { vertical-align: middle; border-color: #21262d; }
 .stat-label { color:#8b949e; font-size:0.78rem; }
 .btn-start  { background:#1d6de0 !important; border:none; }
 .btn-start:hover:not(:disabled) { background:#1a62c7 !important; }
-.btn-stop   { background:#b91c1c !important; border:none; }
-.btn-stop:hover:not(:disabled)  { background:#991b1b !important; }
-.btn-hstop  { background:#7c3aed !important; border:none; }
-.btn-hstop:hover:not(:disabled) { background:#6d28d9 !important; }
-.btn-pause  { background:#374151 !important; border:none; }
-.btn-pause:hover:not(:disabled) { background:#4b5563 !important; }
+/* Outlined secondary actions */
+.btn-pause  { background:transparent !important; border:1px solid #6b7280 !important; color:#6b7280 !important; }
+.btn-pause:hover:not(:disabled)  { background:#6b7280 !important; color:#fff !important; }
+.btn-stop   { background:transparent !important; border:1px solid #b91c1c !important; color:#b91c1c !important; }
+.btn-stop:hover:not(:disabled)   { background:#b91c1c !important; color:#fff !important; }
+/* Hard stop — de-emphasised, destructive label only */
+.btn-hstop  { background:transparent !important; border:none !important; color:#9ca3af !important;
+              font-size:0.78rem !important; padding:.25rem .5rem !important; }
+.btn-hstop:hover:not(:disabled)  { color:#f85149 !important; background:transparent !important; text-decoration:underline; }
 .codec-hevc { color: #3fb950; font-weight:600; }
 .codec-h264 { color: #58a6ff; }
 .folder-path { font-family: Consolas, monospace; font-size:0.78rem; color:#8b949e; }

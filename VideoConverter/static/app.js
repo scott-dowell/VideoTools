@@ -450,7 +450,8 @@ function viewErrorLog(index) {
 function viewDetails(index) {
   const f = _files[index];
   const body = document.getElementById('detailsModalBody');
-  document.getElementById('detailsModalTitle').textContent = f.name;
+  const titleEl = document.getElementById('detailsModalTitle');
+  if (titleEl) titleEl.textContent = f.name;
 
   const s = f.streams || null;
   const v = s ? s.video : null;

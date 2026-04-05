@@ -114,6 +114,11 @@
             <span class="input-group-text border-end-0 bg-transparent"><i class="bi bi-search text-secondary"></i></span>
             <input type="text" class="form-control border-start-0 ps-0" id="searchBox" placeholder="Search…" oninput="onSearchInput(this.value)">
           </div>
+          <select class="form-select form-select-sm" style="max-width:160px" onchange="setSortBy(this.value)" id="sortSelect">
+            <option value="bitrate" selected>⇅ Bitrate (smart)</option>
+            <option value="size">⇅ File size</option>
+            <option value="name">⇅ Filename</option>
+          </select>
           <div class="ms-auto d-flex gap-1 flex-wrap">
             <button class="chip active" id="chip-all" onclick="setFilter('all')">All <span class="chip-count" id="chipCount-all">—</span></button>
             <button class="chip chip-pending" id="chip-pending" onclick="setFilter('pending')">Pending <span class="chip-count" id="chipCount-pending">—</span></button>
@@ -127,14 +132,14 @@
               <thead>
                 <tr>
                   <th style="width:20px"></th>
-                  <th>Folder</th><th>Filename</th><th>Size</th><th>Codec</th>
+                  <th>Folder</th><th>Filename</th><th class="text-end">Size</th><th class="text-end">Bitrate</th><th>Codec</th>
                   <th>Duration</th><th>Status</th>
                   <th>Output</th><th>Saved</th><th>%</th><th></th>
                 </tr>
               </thead>
               <tbody id="queueBody">
                 <tr id="emptyRow">
-                  <td colspan="11" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
+                  <td colspan="12" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
                 </tr>
               </tbody>
             </table>

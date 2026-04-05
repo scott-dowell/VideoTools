@@ -10,6 +10,48 @@ let _activeFilter = 'all';
 let _searchQuery  = '';
 let _appState     = 'idle';  // idle | scanning | ready | running | done
 let _dragSrcIndex = null;
+let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name'
+
+// Parse "H:MM:SS" or "MM:SS" → seconds
+function _parseDuration(d) {
+  if (!d) return 0;
+  const parts = d.split(':').map(Number);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return 0;
+}
+
+// Compute bitrate in kbps from file object
+function _fileBitrate(f) {
+  const mb   = parseFloat((f.size || '0').replace(/,/g, '')) || 0;
+  const secs = _parseDuration(f.duration);
+  return secs > 0 ? Math.round(mb * 8192 / secs) : 0;
+}
+
+function _sortFiles(files) {
+  const arr = [...files];
+  if (_sortBy === 'bitrate') arr.sort((a, b) => _fileBitrate(b) - _fileBitrate(a));
+  else if (_sortBy === 'size') arr.sort((a, b) => (parseFloat((b.size||'0').replace(/,/g,''))||0) - (parseFloat((a.size||'0').replace(/,/g,''))||0));
+  else if (_sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name));
+  return arr;
+}
+
+function setSortBy(val) {
+  _sortBy = val;
+  // Re-sort and re-render, preserving current _files order in _files
+  const sorted = _sortFiles(_files);
+  // Push sort order back into _files so drag picks up from here
+  _files.length = 0;
+  sorted.forEach(f => _files.push(f));
+  populateTable(_files);
+  if (_appState === 'ready') {
+    document.querySelectorAll('#queueBody tr[id^="row-"]').forEach(row => {
+      row.draggable = true;
+      const h = row.querySelector('.drag-handle');
+      if (h) h.style.opacity = '1';
+    });
+  }
+}
 
 // ============================================================
 // UI helpers
@@ -113,7 +155,14 @@ function buildRow(f, index) {
   tdSize.textContent = f.size + ' MB';
   tr.appendChild(tdSize);
 
-  // col 3 — Codec
+  // col 3 — Bitrate
+  const tdBr = document.createElement('td');
+  tdBr.className = 'text-end text-secondary';
+  const brVal = f.bitrate_kbps || _fileBitrate(f);
+  tdBr.textContent = brVal > 0 ? (brVal >= 1000 ? (brVal/1000).toFixed(1)+' Mbps' : brVal+' kbps') : '—';
+  tr.appendChild(tdBr);
+
+  // col 4 — Codec
   const tdCodec = document.createElement('td');
   const span = document.createElement('span');
   span.className = 'codec-' + (f.codec || '').toLowerCase();
@@ -175,9 +224,11 @@ function populateTable(files) {
   const tbody = document.getElementById('queueBody');
   tbody.innerHTML = '';
   if (files.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
     return;
   }
+  // Attach computed bitrate
+  files.forEach(f => { if (!f.bitrate_kbps) f.bitrate_kbps = _fileBitrate(f); });
   files.forEach((f, i) => tbody.appendChild(buildRow(f, i)));
   applyFilter();
 }
@@ -308,19 +359,22 @@ function scanFolder(path) {
   _searchQuery  = '';
   const sb = document.getElementById('searchBox');
   if (sb) sb.value = '';
+  const ss = document.getElementById('sortSelect');
+  if (ss) ss.value = _sortBy;
   document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
   const chipAll = document.getElementById('chip-all');
   if (chipAll) chipAll.classList.add('active');
   setButtonStates('scanning');
   document.getElementById('queueBody').innerHTML =
-    '<tr><td colspan="11" class="text-center text-secondary py-4">' +
-    '<div class="spinner-border spinner-border-sm me-2"></div>Scanning for video files…</td></tr>';
+    '<tr><td colspan="12" class="text-center text-secondary py-4">' +
+    '<div class="spinner-border spinner-border-sm me-2"></div>Scanning for video files\u2026</td></tr>';
   document.getElementById('totalSizeLabel').textContent = 'Scanning\u2026';
   addLog('Scanning: ' + path, 'info');
 
   // Replace setTimeout block with fetch('/api/scan?path=...') when backend is ready
   setTimeout(() => {
-    _files = DEMO_FILES;
+    const sorted = _sortFiles(DEMO_FILES);
+    sorted.forEach(f => _files.push(f));
     populateTable(_files);
     updateStats(_files);
     addLog('Found ' + _files.length + ' video files \u2014 ' + document.getElementById('totalSizeLabel').textContent, 'ok');

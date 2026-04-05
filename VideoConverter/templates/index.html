@@ -48,26 +48,54 @@
   <div class="row g-3 mb-3">
     <div class="col-6 col-md-3">
       <div class="stat-card">
-        <div class="stat-value" id="statTotal">—</div>
-        <div class="stat-label"><i class="bi bi-files me-1"></i>Total files</div>
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <div class="stat-value" id="statTotal">—</div>
+            <div class="stat-label"><i class="bi bi-files me-1"></i>Total files</div>
+          </div>
+          <i class="bi bi-collection stat-icon"></i>
+        </div>
+        <div class="stat-sub" id="statTotalSub">—</div>
+        <div class="stat-bar-track mt-2"><div class="stat-bar" id="statTotalBar" style="width:0%"></div></div>
       </div>
     </div>
     <div class="col-6 col-md-3">
       <div class="stat-card">
-        <div class="stat-value" id="statDone" style="color:#3fb950">—</div>
-        <div class="stat-label"><i class="bi bi-check-circle me-1"></i>Converted</div>
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <div class="stat-value" id="statDone" style="color:#3fb950">—</div>
+            <div class="stat-label"><i class="bi bi-check-circle me-1"></i>Converted</div>
+          </div>
+          <i class="bi bi-check-circle-fill stat-icon" style="color:#3fb950"></i>
+        </div>
+        <div class="stat-sub" id="statDoneSub">—</div>
+        <div class="stat-bar-track mt-2"><div class="stat-bar stat-bar-done" id="statDoneBar" style="width:0%"></div></div>
       </div>
     </div>
     <div class="col-6 col-md-3">
       <div class="stat-card">
-        <div class="stat-value" id="statSaved" style="color:#d29922">—</div>
-        <div class="stat-label"><i class="bi bi-arrow-down-circle me-1"></i>Saved so far</div>
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <div class="stat-value" id="statSaved" style="color:#d29922">—</div>
+            <div class="stat-label"><i class="bi bi-arrow-down-circle me-1"></i>Space saved</div>
+          </div>
+          <i class="bi bi-hdd stat-icon" style="color:#d29922"></i>
+        </div>
+        <div class="stat-sub" id="statSavedSub">—</div>
+        <div class="stat-bar-track mt-2"><div class="stat-bar stat-bar-saved" id="statSavedBar" style="width:0%"></div></div>
       </div>
     </div>
     <div class="col-6 col-md-3">
       <div class="stat-card">
-        <div class="stat-value" id="statFailed" style="color:#f85149">—</div>
-        <div class="stat-label"><i class="bi bi-x-circle me-1"></i>Failed</div>
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <div class="stat-value" id="statFailed" style="color:#f85149">—</div>
+            <div class="stat-label"><i class="bi bi-x-circle me-1"></i>Failed</div>
+          </div>
+          <i class="bi bi-x-octagon stat-icon" style="color:#f85149"></i>
+        </div>
+        <div class="stat-sub" id="statFailedSub">—</div>
+        <div class="stat-bar-track mt-2"><div class="stat-bar stat-bar-failed" id="statFailedBar" style="width:0%"></div></div>
       </div>
     </div>
   </div>

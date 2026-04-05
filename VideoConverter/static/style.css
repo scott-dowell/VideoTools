@@ -41,8 +41,16 @@ td, th { vertical-align: middle; border-color: #21262d; }
 .log-warn  { color: #d29922; }
 .log-err   { color: #f85149; }
 .stat-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px 18px; }
-.stat-value { font-size: 1.6rem; font-weight:700; color:#58a6ff; }
-.stat-label { color:#8b949e; font-size:0.78rem; }
+.stat-value { font-size: 1.6rem; font-weight:700; color:#58a6ff; line-height:1.1; }
+.stat-label { color:#8b949e; font-size:0.78rem; margin-top:2px; }
+.stat-sub   { color:#8b949e; font-size:0.72rem; margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.stat-icon  { font-size:1.4rem; opacity:.18; margin-top:2px; }
+.stat-bar-track { height:3px; background:rgba(255,255,255,.08); border-radius:2px; overflow:hidden; }
+.stat-bar       { height:3px; border-radius:2px; background:#58a6ff; transition:width .5s ease; }
+.stat-bar-done  { background:#3fb950; }
+.stat-bar-saved { background:#d29922; }
+.stat-bar-failed{ background:#f85149; }
+[data-bs-theme="light"] .stat-bar-track { background:rgba(0,0,0,.08); }
 .btn-start  { background:#1d6de0 !important; border:none; }
 .btn-start:hover:not(:disabled) { background:#1a62c7 !important; }
 /* Outlined secondary actions */

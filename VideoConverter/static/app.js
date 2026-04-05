@@ -133,11 +133,33 @@ function updateStats(files) {
   const totalMB  = files.reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
   const done     = files.filter(f => f.status === 'done').length;
   const failed   = files.filter(f => f.status === 'failed').length;
-  const savedMB  = files.reduce((s, f) => s + (f.saved ? parseFloat(f.saved.replace(/,/g, '')) || 0 : 0), 0);
+  const pending  = files.filter(f => f.status === 'pending').length;
+  const savedMB  = files.reduce((s, f) => s + (f.saved  ? parseFloat(f.saved.replace(/,/g, ''))  || 0 : 0), 0);
+  const origMB   = files.filter(f => f.status === 'done')
+                        .reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
+  const donePct  = files.length ? Math.round(done   / files.length * 100) : 0;
+  const failPct  = files.length ? Math.round(failed / files.length * 100) : 0;
+  const avgRatio = origMB > 0    ? Math.round(savedMB / origMB * 100) : 0;
+
+  // Values
   document.getElementById('statTotal').textContent  = files.length;
   document.getElementById('statDone').textContent   = done;
   document.getElementById('statFailed').textContent = failed;
   document.getElementById('statSaved').textContent  = savedMB > 0 ? (savedMB / 1024).toFixed(1) + ' GB' : '—';
+
+  // Sub-labels
+  document.getElementById('statTotalSub').textContent  = totalMB > 0 ? (totalMB / 1024).toFixed(1) + ' GB · ' + pending + ' remaining' : '—';
+  document.getElementById('statDoneSub').textContent   = donePct  > 0 ? donePct  + '% of queue complete' : '—';
+  document.getElementById('statSavedSub').textContent  = avgRatio > 0 ? 'avg ' + avgRatio + '% compression ratio' : '—';
+  document.getElementById('statFailedSub').textContent = failed   > 0 ? failPct + '% failure rate' : 'No failures';
+
+  // Progress strips
+  document.getElementById('statTotalBar').style.width  = files.length ? '100%'       : '0%';
+  document.getElementById('statDoneBar').style.width   = donePct + '%';
+  document.getElementById('statSavedBar').style.width  = avgRatio + '%';
+  document.getElementById('statFailedBar').style.width = failPct  + '%';
+
+  // Right panel
   document.getElementById('savedVal').textContent   = savedMB > 0 ? (savedMB / 1024).toFixed(1) + ' GB' : '—';
   const overallPct = files.length ? Math.round((done + failed) / files.length * 100) : 0;
   document.getElementById('overallPct').textContent = overallPct + '%';

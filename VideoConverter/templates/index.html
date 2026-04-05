@@ -10,7 +10,8 @@
   <link href="/static/style.css" rel="stylesheet">
   <!-- Apply saved theme before first paint to avoid flash -->
   <script>(function(){
-    var t = localStorage.getItem('vc-theme') || 'light';
+    try { var t = localStorage.getItem('vc-theme') || 'light'; }
+    catch(e) { var t = 'light'; }
     document.documentElement.setAttribute('data-bs-theme', t);
   })();</script>
 </head>

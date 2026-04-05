@@ -258,11 +258,15 @@ function pauseConversion() {
 // ============================================================
 // Row action menu
 // ============================================================
-const _rowMenu = document.getElementById('rowMenu');
 let _rowMenuIndex = -1;
 
+function _getRowMenu() { return document.getElementById('rowMenu'); }
+
 // Close menu on any outside click
-document.addEventListener('click', () => { _rowMenu.style.display = 'none'; });
+document.addEventListener('click', () => {
+  const m = _getRowMenu();
+  if (m) m.style.display = 'none';
+});
 
 function _menuItem(icon, label, handler, extraClass) {
   const a = document.createElement('a');
@@ -281,6 +285,8 @@ function _menuDivider() {
 
 function showRowMenu(index, btn) {
   _rowMenuIndex = index;
+  const _rowMenu = _getRowMenu();
+  if (!_rowMenu) return;
   const f = _files[index];
   _rowMenu.innerHTML = '';
 
@@ -408,6 +414,14 @@ function removeFromQueue(index) {
 // ============================================================
 // Theme toggle
 // ============================================================
+function _storedTheme() {
+  try { return localStorage.getItem('vc-theme') || 'light'; }
+  catch(e) { return 'light'; }
+}
+function _saveTheme(t) {
+  try { localStorage.setItem('vc-theme', t); } catch(e) {}
+}
+
 function toggleTheme() {
   const html = document.documentElement;
   const icon = document.getElementById('themeIcon');
@@ -415,12 +429,12 @@ function toggleTheme() {
   const next = isDark ? 'light' : 'dark';
   html.setAttribute('data-bs-theme', next);
   icon.className = isDark ? 'bi bi-sun-fill' : 'bi bi-moon-stars-fill';
-  localStorage.setItem('vc-theme', next);
+  _saveTheme(next);
 }
 
 // Sync icon to whatever theme was applied before paint
 (function() {
-  const saved = localStorage.getItem('vc-theme') || 'light';
+  const saved = _storedTheme();
   const icon = document.getElementById('themeIcon');
   if (icon) icon.className = saved === 'dark' ? 'bi bi-moon-stars-fill' : 'bi bi-sun-fill';
 })();

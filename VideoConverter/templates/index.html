@@ -28,6 +28,9 @@
     <button class="btn btn-sm btn-outline-secondary" onclick="toggleTheme()" title="Toggle dark/light mode">
       <i class="bi bi-sun-fill" id="themeIcon"></i>
     </button>
+    <button class="btn btn-sm btn-outline-secondary" onclick="openSettings()" title="Settings">
+      <i class="bi bi-gear-fill"></i>
+    </button>
   </div>
 </nav>
 
@@ -275,6 +278,64 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal fade" id="settingsModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-scrollable" style="max-width:480px">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-gear-fill me-2 text-secondary"></i>Settings</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+
+        <h6 class="details-section-head">Encoding Quality</h6>
+        <div class="mb-3">
+          <label class="form-label d-flex justify-content-between">
+            <span>QSV Quality <small class="text-secondary">(hevc_qsv global_quality)</small></span>
+            <strong id="qsvQualityVal">30</strong>
+          </label>
+          <input type="range" class="form-range" id="qsvQuality" min="18" max="45" step="1" value="30"
+            oninput="document.getElementById('qsvQualityVal').textContent=this.value">
+          <div class="d-flex justify-content-between"><small class="text-secondary">18 — best quality</small><small class="text-secondary">45 — smallest file</small></div>
+        </div>
+        <div class="mb-4">
+          <label class="form-label d-flex justify-content-between">
+            <span>Software CRF <small class="text-secondary">(libx265 fallback)</small></span>
+            <strong id="swCrfVal">28</strong>
+          </label>
+          <input type="range" class="form-range" id="swCrf" min="18" max="40" step="1" value="28"
+            oninput="document.getElementById('swCrfVal').textContent=this.value">
+          <div class="d-flex justify-content-between"><small class="text-secondary">18 — best quality</small><small class="text-secondary">40 — smallest file</small></div>
+        </div>
+
+        <h6 class="details-section-head">Queue</h6>
+        <div class="mb-4">
+          <label class="form-label">Default sort order</label>
+          <select class="form-select form-select-sm" id="settingsDefaultSort">
+            <option value="bitrate">Bitrate (smart) — highest compression opportunity first</option>
+            <option value="size">File size — largest first</option>
+            <option value="name">Filename — alphabetical</option>
+          </select>
+        </div>
+
+        <h6 class="details-section-head">Paths</h6>
+        <div class="mb-2">
+          <label class="form-label">Temp working directory</label>
+          <input type="text" class="form-control form-control-sm font-monospace" id="settingsTempDir" placeholder="C:\Temp\vc_working">
+          <div class="form-text">FFmpeg stages files here during encode to keep work off network/OneDrive paths.</div>
+        </div>
+
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="saveSettings()">
+          <i class="bi bi-check-lg me-1"></i>Save
+        </button>
       </div>
     </div>
   </div>

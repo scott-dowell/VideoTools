@@ -691,6 +691,72 @@ function toggleTheme() {
 })();
 
 // ============================================================
+// Settings
+// ============================================================
+let _settingsModal = null;
+
+function openSettings() {
+  fetch('/api/settings')
+    .then(r => r.json())
+    .then(s => {
+      document.getElementById('qsvQuality').value    = s.qsv_quality;
+      document.getElementById('qsvQualityVal').textContent = s.qsv_quality;
+      document.getElementById('swCrf').value         = s.sw_hevc_crf;
+      document.getElementById('swCrfVal').textContent = s.sw_hevc_crf;
+      document.getElementById('settingsTempDir').value      = s.local_temp_dir;
+      document.getElementById('settingsDefaultSort').value  = s.default_sort || 'bitrate';
+    })
+    .catch(() => {}); // show modal even if fetch fails — defaults already in HTML
+  _settingsModal = new bootstrap.Modal(document.getElementById('settingsModal'));
+  _settingsModal.show();
+}
+
+function saveSettings() {
+  const payload = {
+    qsv_quality:    parseInt(document.getElementById('qsvQuality').value, 10),
+    sw_hevc_crf:    parseInt(document.getElementById('swCrf').value, 10),
+    local_temp_dir: document.getElementById('settingsTempDir').value.trim(),
+    default_sort:   document.getElementById('settingsDefaultSort').value,
+  };
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  .then(r => r.json())
+  .then(() => {
+    // Apply sort change immediately if queue is loaded
+    if (_files.length > 0 && payload.default_sort !== _sortBy) {
+      _sortBy = payload.default_sort;
+      const ss = document.getElementById('sortSelect');
+      if (ss) ss.value = _sortBy;
+      setSortBy(_sortBy);
+    }
+    addLog('Settings saved.', 'ok');
+    if (_settingsModal) _settingsModal.hide();
+  })
+  .catch(e => addLog('Failed to save settings: ' + e, 'err'));
+}
+
+// Load settings on startup and apply defaults
+(function _applyStartupSettings() {
+  fetch('/api/settings')
+    .then(r => r.json())
+    .then(s => {
+      if (s.default_sort) {
+        _sortBy = s.default_sort;
+        const ss = document.getElementById('sortSelect');
+        if (ss) ss.value = _sortBy;
+      }
+      if (s.anime_mode !== undefined) {
+        const am = document.getElementById('animeMode');
+        if (am) am.checked = s.anime_mode;
+      }
+    })
+    .catch(() => {});
+})();
+
+// ============================================================
 // Folder browser
 // ============================================================
 let _selectedPath = null;

@@ -3,6 +3,7 @@ VideoConverter — Flask application entry point.
 Routes only; no business logic here.
 """
 import ctypes
+import json
 import os
 import string
 
@@ -11,6 +12,32 @@ from flask import Flask, jsonify, render_template, request
 import config
 
 app = Flask(__name__)
+
+_SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
+
+_SETTINGS_DEFAULTS = {
+    "qsv_quality":   config.QSV_QUALITY,
+    "sw_hevc_crf":   config.SW_HEVC_CRF,
+    "local_temp_dir": config.LOCAL_TEMP_DIR,
+    "default_sort":  "bitrate",   # bitrate | size | name
+    "anime_mode":    False,
+}
+
+def _load_settings() -> dict:
+    if os.path.exists(_SETTINGS_PATH):
+        try:
+            with open(_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Merge with defaults so new keys are always present
+            return {**_SETTINGS_DEFAULTS, **data}
+        except Exception:
+            pass
+    return dict(_SETTINGS_DEFAULTS)
+
+def _save_settings(data: dict):
+    merged = {**_SETTINGS_DEFAULTS, **data}
+    with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +134,25 @@ def api_browse():
         "parent": parent.replace("\\", "/") if parent else None,
         "dirs": dirs,
     })
+
+
+@app.route("/api/settings", methods=["GET"])
+def api_settings_get():
+    return jsonify(_load_settings())
+
+@app.route("/api/settings", methods=["POST"])
+def api_settings_post():
+    data = request.get_json(force=True, silent=True) or {}
+    # Validate numeric fields
+    try:
+        if "qsv_quality" in data:
+            data["qsv_quality"] = max(1, min(51, int(data["qsv_quality"])))
+        if "sw_hevc_crf" in data:
+            data["sw_hevc_crf"] = max(0, min(51, int(data["sw_hevc_crf"])))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid numeric value"}), 400
+    _save_settings({**_load_settings(), **data})
+    return jsonify({"ok": True})
 
 
 @app.route("/api/status")

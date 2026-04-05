@@ -166,7 +166,6 @@ function updateStats(files) {
   document.getElementById('overallBar').style.width = overallPct + '%';
   document.getElementById('totalSizeLabel').textContent = (totalMB / 1024).toFixed(1) + ' GB total';
   // Filter chip counts
-  const pending = files.filter(f => f.status === 'pending').length;
   document.getElementById('chipCount-all').textContent     = files.length;
   document.getElementById('chipCount-pending').textContent = pending;
   document.getElementById('chipCount-done').textContent    = done;

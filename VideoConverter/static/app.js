@@ -6,6 +6,8 @@ let _simInterval = null;
 let _simIndex   = 0;
 let _simValue   = 0;
 let _paused     = false;
+let _activeFilter = 'all';
+let _searchQuery  = '';
 
 // ============================================================
 // UI helpers
@@ -124,6 +126,7 @@ function populateTable(files) {
     return;
   }
   files.forEach((f, i) => tbody.appendChild(buildRow(f, i)));
+  applyFilter();
 }
 
 function updateStats(files) {
@@ -140,6 +143,39 @@ function updateStats(files) {
   document.getElementById('overallPct').textContent = overallPct + '%';
   document.getElementById('overallBar').style.width = overallPct + '%';
   document.getElementById('totalSizeLabel').textContent = (totalMB / 1024).toFixed(1) + ' GB total';
+  // Filter chip counts
+  const pending = files.filter(f => f.status === 'pending').length;
+  document.getElementById('chipCount-all').textContent     = files.length;
+  document.getElementById('chipCount-pending').textContent = pending;
+  document.getElementById('chipCount-done').textContent    = done;
+  document.getElementById('chipCount-failed').textContent  = failed;
+}
+
+// ============================================================
+// Filter + Search
+// ============================================================
+function setFilter(f) {
+  _activeFilter = f;
+  document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+  document.getElementById('chip-' + f).classList.add('active');
+  applyFilter();
+}
+
+function onSearchInput(val) {
+  _searchQuery = val.toLowerCase().trim();
+  applyFilter();
+}
+
+function applyFilter() {
+  _files.forEach((f, i) => {
+    const row = document.getElementById('row-' + i);
+    if (!row) return;
+    const matchStatus = _activeFilter === 'all' || f.status === _activeFilter;
+    const matchSearch = !_searchQuery ||
+      f.name.toLowerCase().includes(_searchQuery) ||
+      (f.folder || '').toLowerCase().includes(_searchQuery);
+    row.style.display = (matchStatus && matchSearch) ? '' : 'none';
+  });
 }
 
 // ============================================================
@@ -160,6 +196,11 @@ const DEMO_FILES = [
 
 function scanFolder(path) {
   _files = [];
+  _activeFilter = 'all';
+  _searchQuery  = '';
+  document.getElementById('searchBox').value = '';
+  document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+  document.getElementById('chip-all').classList.add('active');
   setButtonStates('scanning');
   document.getElementById('queueBody').innerHTML =
     '<tr><td colspan="9" class="text-center text-secondary py-4">' +

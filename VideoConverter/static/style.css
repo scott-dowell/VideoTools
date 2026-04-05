@@ -54,6 +54,17 @@ td, th { vertical-align: middle; border-color: #21262d; }
 .btn-hstop  { background:transparent !important; border:none !important; color:#9ca3af !important;
               font-size:0.78rem !important; padding:.25rem .5rem !important; }
 .btn-hstop:hover:not(:disabled)  { color:#f85149 !important; background:transparent !important; text-decoration:underline; }
+/* Filter chips */
+.chip { display:inline-flex; align-items:center; gap:.35rem; font-size:.75rem;
+  padding:.22rem .65rem; border-radius:2rem; border:1px solid var(--bs-border-color);
+  background:transparent; color:var(--bs-secondary-color); cursor:pointer;
+  transition:all .15s; white-space:nowrap; line-height:1.4; }
+.chip:hover { border-color:var(--bs-emphasis-color); color:var(--bs-emphasis-color); }
+.chip.active           { border-color:#1d6de0; color:#1d6de0; background:rgba(29,109,224,.1); }
+.chip-done.active      { border-color:#3fb950; color:#3fb950; background:rgba(63,185,80,.1); }
+.chip-failed.active    { border-color:#f85149; color:#f85149; background:rgba(248,81,73,.1); }
+.chip-pending.active   { border-color:#d29922; color:#d29922; background:rgba(210,153,34,.1); }
+.chip-count { font-variant-numeric:tabular-nums; opacity:.75; font-size:.7rem; }
 .codec-hevc { color: #3fb950; font-weight:600; }
 .codec-h264 { color: #58a6ff; }
 .folder-path { font-family: Consolas, monospace; font-size:0.78rem; color:#8b949e; }

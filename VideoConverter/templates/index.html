@@ -81,6 +81,18 @@
           <span><i class="bi bi-table me-2"></i>Video Queue</span>
           <span class="badge bg-secondary" id="totalSizeLabel">—</span>
         </div>
+        <div class="queue-toolbar d-flex align-items-center gap-2 px-3 py-2 border-bottom">
+          <div class="input-group input-group-sm" style="max-width:200px">
+            <span class="input-group-text border-end-0 bg-transparent"><i class="bi bi-search text-secondary"></i></span>
+            <input type="text" class="form-control border-start-0 ps-0" id="searchBox" placeholder="Search…" oninput="onSearchInput(this.value)">
+          </div>
+          <div class="ms-auto d-flex gap-1 flex-wrap">
+            <button class="chip active" id="chip-all" onclick="setFilter('all')">All <span class="chip-count" id="chipCount-all">—</span></button>
+            <button class="chip chip-pending" id="chip-pending" onclick="setFilter('pending')">Pending <span class="chip-count" id="chipCount-pending">—</span></button>
+            <button class="chip chip-done" id="chip-done" onclick="setFilter('done')">Done <span class="chip-count" id="chipCount-done">—</span></button>
+            <button class="chip chip-failed" id="chip-failed" onclick="setFilter('failed')">Failed <span class="chip-count" id="chipCount-failed">—</span></button>
+          </div>
+        </div>
         <div class="card-body p-0">
           <div class="table-responsive">
             <table class="table table-borderless mb-0">

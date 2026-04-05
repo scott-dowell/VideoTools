@@ -350,7 +350,7 @@ function _menuItem(icon, label, handler, extraClass) {
   a.className = 'dropdown-item' + (extraClass ? ' ' + extraClass : '');
   a.href = '#';
   a.innerHTML = '<i class="bi ' + icon + ' me-2"></i>' + label;
-  a.addEventListener('click', e => { e.preventDefault(); _rowMenu.style.display = 'none'; handler(); });
+  a.addEventListener('click', e => { e.preventDefault(); const m = _getRowMenu(); if (m) m.style.display = 'none'; handler(); });
   return a;
 }
 
@@ -395,11 +395,9 @@ function showRowMenu(index, btn) {
       () => retryFile(index)));
   }
 
-  if (isDone) {
-    _rowMenu.appendChild(_menuDivider());
-    _rowMenu.appendChild(_menuItem('bi-info-circle', 'Video Details',
-      () => viewDetails(index)));
-  }
+  _rowMenu.appendChild(_menuDivider());
+  _rowMenu.appendChild(_menuItem('bi-info-circle', 'Video Details',
+    () => viewDetails(index)));
 
   if (isPending) {
     _rowMenu.appendChild(_menuDivider());

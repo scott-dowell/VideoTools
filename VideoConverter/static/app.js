@@ -250,14 +250,19 @@ function pauseConversion() {
 function toggleTheme() {
   const html = document.documentElement;
   const icon = document.getElementById('themeIcon');
-  if (html.getAttribute('data-bs-theme') === 'dark') {
-    html.setAttribute('data-bs-theme', 'light');
-    icon.className = 'bi bi-sun-fill';
-  } else {
-    html.setAttribute('data-bs-theme', 'dark');
-    icon.className = 'bi bi-moon-stars-fill';
-  }
+  const isDark = html.getAttribute('data-bs-theme') === 'dark';
+  const next = isDark ? 'light' : 'dark';
+  html.setAttribute('data-bs-theme', next);
+  icon.className = isDark ? 'bi bi-sun-fill' : 'bi bi-moon-stars-fill';
+  localStorage.setItem('vc-theme', next);
 }
+
+// Sync icon to whatever theme was applied before paint
+(function() {
+  const saved = localStorage.getItem('vc-theme') || 'light';
+  const icon = document.getElementById('themeIcon');
+  if (icon) icon.className = saved === 'dark' ? 'bi bi-moon-stars-fill' : 'bi bi-sun-fill';
+})();
 
 // ============================================================
 // Folder browser

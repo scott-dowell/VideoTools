@@ -181,17 +181,51 @@ function applyFilter() {
 // ============================================================
 // Scan  (simulated — swap for fetch('/api/scan') later)
 // ============================================================
+const DEMO_STREAMS = {
+  h264_typical: {
+    video: { codec: 'h264', profile: 'High', level: '4.1', resolution: '1920×1080', fps: '23.976', bitrate: '5,800 kbps', color: 'yuv420p', hdr: false },
+    audio: [
+      { track: 1, codec: 'AAC', channels: '2.0 Stereo', language: 'jpn', bitrate: '160 kbps', title: 'Japanese' },
+      { track: 2, codec: 'AAC', channels: '2.0 Stereo', language: 'eng', bitrate: '160 kbps', title: 'English Dub' },
+    ],
+    subs: [
+      { track: 1, codec: 'ASS', language: 'eng', title: 'English (Full)' },
+      { track: 2, codec: 'ASS', language: 'eng', title: 'English (Signs)' },
+    ],
+  },
+  hevc_done: {
+    video: { codec: 'hevc', profile: 'Main', level: '4.1', resolution: '1920×1080', fps: '23.976', bitrate: '2,400 kbps', color: 'yuv420p', hdr: false },
+    audio: [
+      { track: 1, codec: 'AAC', channels: '2.0 Stereo', language: 'jpn', bitrate: '160 kbps', title: 'Japanese' },
+    ],
+    subs: [
+      { track: 1, codec: 'ASS', language: 'eng', title: 'English (Full)' },
+    ],
+  },
+  movie_mkv: {
+    video: { codec: 'h264', profile: 'High', level: '5.1', resolution: '1920×1080', fps: '23.976', bitrate: '12,400 kbps', color: 'yuv420p', hdr: false },
+    audio: [
+      { track: 1, codec: 'DTS-HD MA', channels: '5.1 Surround', language: 'jpn', bitrate: '3,072 kbps', title: 'Japanese' },
+      { track: 2, codec: 'AC3',       channels: '5.1 Surround', language: 'eng', bitrate: '640 kbps',   title: 'English Dub' },
+    ],
+    subs: [
+      { track: 1, codec: 'PGS', language: 'eng', title: 'English' },
+      { track: 2, codec: 'PGS', language: 'spa', title: 'Spanish' },
+    ],
+  },
+};
+
 const DEMO_FILES = [
-  { folder: '',         name: 'One.Piece.E1050.mp4',    size: '1,105', codec: 'H264', duration: '24:12', status: 'done',    output: '298',   saved: '807',   pct: '73', full_path: 'D:/Anime/One.Piece.E1050.mp4',    output_path: 'D:/Anime/One.Piece.E1050_hevc.mp4' },
-  { folder: '',         name: 'One.Piece.E1051.mp4',    size: '1,098', codec: 'H264', duration: '24:05', status: 'done',    output: '312',   saved: '786',   pct: '72', full_path: 'D:/Anime/One.Piece.E1051.mp4',    output_path: 'D:/Anime/One.Piece.E1051_hevc.mp4' },
-  { folder: 'Season 2', name: 'Blue.Lock.E24.mp4',      size: '1,876', codec: 'H264', duration: '23:45', status: 'done',    output: '521',   saved: '1,355', pct: '72', full_path: 'D:/Anime/Season 2/Blue.Lock.E24.mp4', output_path: 'D:/Anime/Season 2/Blue.Lock.E24_hevc.mp4' },
-  { folder: 'Season 2', name: 'Blue.Lock.E25.mp4',      size: '1,743', codec: 'HEVC', duration: '22:58', status: 'done',    output: '501',   saved: '1,242', pct: '71', full_path: 'D:/Anime/Season 2/Blue.Lock.E25.mp4', output_path: 'D:/Anime/Season 2/Blue.Lock.E25_hevc.mp4' },
-  { folder: 'Season 2', name: 'Blue.Lock.E26.mp4',      size: '1,811', codec: 'H264', duration: '24:01', status: 'failed',  output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Season 2/Blue.Lock.E26.mp4', output_path: null, ffmpeg_cmd: 'ffmpeg -y -i "D:/Anime/Season 2/Blue.Lock.E26.mp4" -c:v hevc_qsv ...', error_tail: 'Error initializing output stream 0:0 -- Error while opening encoder\nConversion failed!' },
-  { folder: 'Movies',  name: 'Vinland.Saga.Movie.mkv', size: '8,231', codec: 'H264', duration: '1:52:04', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Movies/Vinland.Saga.Movie.mkv', output_path: null },
-  { folder: 'Movies',  name: 'Steins.Gate.Movie.mkv',  size: '6,504', codec: 'H264', duration: '1:32:44', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Movies/Steins.Gate.Movie.mkv',  output_path: null },
-  { folder: 'Extras',  name: 'Steins.Gate.E01.mkv',    size: '2,203', codec: 'H264', duration: '23:23', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Extras/Steins.Gate.E01.mkv', output_path: null },
-  { folder: 'Extras',  name: 'Steins.Gate.E02.mkv',    size: '2,187', codec: 'H264', duration: '23:15', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Extras/Steins.Gate.E02.mkv', output_path: null },
-  { folder: '',         name: 'Jujutsu.Kaisen.E01.mkv', size: '1,456', codec: 'H264', duration: '24:30', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Jujutsu.Kaisen.E01.mkv',   output_path: null },
+  { folder: '',         name: 'One.Piece.E1050.mp4',    size: '1,105', codec: 'H264', duration: '24:12', status: 'done',    output: '298',   saved: '807',   pct: '73', full_path: 'D:/Anime/One.Piece.E1050.mp4',    output_path: 'D:/Anime/One.Piece.E1050_hevc.mp4', streams: DEMO_STREAMS.h264_typical },
+  { folder: '',         name: 'One.Piece.E1051.mp4',    size: '1,098', codec: 'H264', duration: '24:05', status: 'done',    output: '312',   saved: '786',   pct: '72', full_path: 'D:/Anime/One.Piece.E1051.mp4',    output_path: 'D:/Anime/One.Piece.E1051_hevc.mp4', streams: DEMO_STREAMS.h264_typical },
+  { folder: 'Season 2', name: 'Blue.Lock.E24.mp4',      size: '1,876', codec: 'H264', duration: '23:45', status: 'done',    output: '521',   saved: '1,355', pct: '72', full_path: 'D:/Anime/Season 2/Blue.Lock.E24.mp4', output_path: 'D:/Anime/Season 2/Blue.Lock.E24_hevc.mp4', streams: DEMO_STREAMS.h264_typical },
+  { folder: 'Season 2', name: 'Blue.Lock.E25.mp4',      size: '1,743', codec: 'HEVC', duration: '22:58', status: 'done',    output: '501',   saved: '1,242', pct: '71', full_path: 'D:/Anime/Season 2/Blue.Lock.E25.mp4', output_path: 'D:/Anime/Season 2/Blue.Lock.E25_hevc.mp4', streams: DEMO_STREAMS.hevc_done },
+  { folder: 'Season 2', name: 'Blue.Lock.E26.mp4',      size: '1,811', codec: 'H264', duration: '24:01', status: 'failed',  output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Season 2/Blue.Lock.E26.mp4', output_path: null, ffmpeg_cmd: 'ffmpeg -y -i "D:/Anime/Season 2/Blue.Lock.E26.mp4" -c:v hevc_qsv ...', error_tail: 'Error initializing output stream 0:0 -- Error while opening encoder\nConversion failed!', streams: DEMO_STREAMS.h264_typical },
+  { folder: 'Movies',  name: 'Vinland.Saga.Movie.mkv', size: '8,231', codec: 'H264', duration: '1:52:04', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Movies/Vinland.Saga.Movie.mkv', output_path: null, streams: DEMO_STREAMS.movie_mkv },
+  { folder: 'Movies',  name: 'Steins.Gate.Movie.mkv',  size: '6,504', codec: 'H264', duration: '1:32:44', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Movies/Steins.Gate.Movie.mkv',  output_path: null, streams: DEMO_STREAMS.movie_mkv },
+  { folder: 'Extras',  name: 'Steins.Gate.E01.mkv',    size: '2,203', codec: 'H264', duration: '23:23', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Extras/Steins.Gate.E01.mkv', output_path: null, streams: DEMO_STREAMS.h264_typical },
+  { folder: 'Extras',  name: 'Steins.Gate.E02.mkv',    size: '2,187', codec: 'H264', duration: '23:15', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Extras/Steins.Gate.E02.mkv', output_path: null, streams: DEMO_STREAMS.h264_typical },
+  { folder: '',         name: 'Jujutsu.Kaisen.E01.mkv', size: '1,456', codec: 'H264', duration: '24:30', status: 'pending', output: null,    saved: null,    pct: null, full_path: 'D:/Anime/Jujutsu.Kaisen.E01.mkv',   output_path: null, streams: DEMO_STREAMS.h264_typical },
 ];
 
 function scanFolder(path) {
@@ -416,18 +450,69 @@ function viewErrorLog(index) {
 function viewDetails(index) {
   const f = _files[index];
   const body = document.getElementById('detailsModalBody');
-  // Stub — will call /api/details?id=... when backend is ready
-  body.innerHTML =
-    '<table class="table table-sm table-borderless mb-0">' +
-    '<tr><td class="text-secondary" style="width:140px">Filename</td><td class="fw-semibold">' + f.name + '</td></tr>' +
-    '<tr><td class="text-secondary">Folder</td><td>' + (f.folder || '—') + '</td></tr>' +
-    '<tr><td class="text-secondary">Size</td><td>' + f.size + ' MB</td></tr>' +
-    '<tr><td class="text-secondary">Codec</td><td>' + (f.codec || '—') + '</td></tr>' +
-    '<tr><td class="text-secondary">Duration</td><td>' + (f.duration || '—') + '</td></tr>' +
-    (f.output ? '<tr><td class="text-secondary">Output size</td><td>' + f.output + ' MB</td></tr>' : '') +
-    (f.saved  ? '<tr><td class="text-secondary">Saved</td><td class="text-success">' + f.saved + ' MB (' + f.pct + '%)</td></tr>' : '') +
-    '</table>' +
-    '<p class="text-secondary small mt-3 mb-0"><i class="bi bi-info-circle me-1"></i>Full stream details (resolution, bitrate, audio/subtitle tracks) available once backend is connected.</p>';
+  document.getElementById('detailsModalTitle').textContent = f.name;
+
+  const s = f.streams || null;
+  const v = s ? s.video : null;
+
+  // ---- Video section ----
+  const codecBadge = v ? `<span class="details-codec-badge details-codec-${(v.codec||'').toLowerCase()}">${v.codec.toUpperCase()}</span>` : '—';
+  const hdrBadge   = (v && v.hdr) ? '<span class="badge bg-warning text-dark ms-1 small">HDR</span>' : '';
+
+  let html = `
+    <h6 class="details-section-head"><i class="bi bi-camera-video me-2"></i>Video Stream</h6>
+    <table class="table table-sm details-table mb-3">
+      <tr><td>Codec</td><td>${v ? codecBadge + hdrBadge : '—'}</td></tr>
+      <tr><td>Profile / Level</td><td>${v ? v.profile + ' / L' + v.level : '—'}</td></tr>
+      <tr><td>Resolution</td><td>${v ? v.resolution : '—'}</td></tr>
+      <tr><td>Frame rate</td><td>${v ? v.fps + ' fps' : '—'}</td></tr>
+      <tr><td>Bitrate</td><td>${v ? v.bitrate : '—'}</td></tr>
+      <tr><td>Pixel format</td><td>${v ? v.color : '—'}</td></tr>
+    </table>`;
+
+  // ---- File info ----
+  html += `
+    <h6 class="details-section-head"><i class="bi bi-file-earmark me-2"></i>File</h6>
+    <table class="table table-sm details-table mb-3">
+      <tr><td>Filename</td><td class="fw-semibold">${f.name}</td></tr>
+      <tr><td>Folder</td><td>${f.folder || '<span class="text-secondary">(root)</span>'}</td></tr>
+      <tr><td>File size</td><td>${f.size} MB</td></tr>
+      <tr><td>Duration</td><td>${f.duration || '—'}</td></tr>
+      ${f.status === 'done' ? `<tr><td>Output size</td><td>${f.output} MB</td></tr>
+      <tr><td>Space saved</td><td class="text-success fw-semibold">${f.saved} MB (${f.pct}%)</td></tr>` : ''}
+    </table>`;
+
+  // ---- Audio tracks ----
+  const audioTracks = s ? s.audio : [];
+  html += `<h6 class="details-section-head"><i class="bi bi-music-note-list me-2"></i>Audio Tracks <span class="badge bg-secondary ms-1">${audioTracks.length}</span></h6>`;
+  if (audioTracks.length) {
+    html += '<table class="table table-sm details-table mb-3"><thead><tr><th>#</th><th>Codec</th><th>Channels</th><th>Language</th><th>Bitrate</th><th>Title</th></tr></thead><tbody>';
+    audioTracks.forEach(a => {
+      html += `<tr><td class="text-secondary">${a.track}</td><td>${a.codec}</td><td>${a.channels}</td><td><span class="badge bg-secondary">${a.language}</span></td><td class="text-secondary">${a.bitrate}</td><td>${a.title || '—'}</td></tr>`;
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<p class="text-secondary small mb-3">No audio tracks found.</p>';
+  }
+
+  // ---- Subtitle tracks ----
+  const subTracks = s ? s.subs : [];
+  html += `<h6 class="details-section-head"><i class="bi bi-badge-cc me-2"></i>Subtitle Tracks <span class="badge bg-secondary ms-1">${subTracks.length}</span></h6>`;
+  if (subTracks.length) {
+    html += '<table class="table table-sm details-table mb-0"><thead><tr><th>#</th><th>Format</th><th>Language</th><th>Title</th></tr></thead><tbody>';
+    subTracks.forEach(sub => {
+      const isImage = ['PGS','VOBSUB','DVDSUB'].includes(sub.codec.toUpperCase());
+      const fmtBadge = isImage
+        ? `<span class="badge details-sub-image">${sub.codec}</span>`
+        : `<span class="badge details-sub-text">${sub.codec}</span>`;
+      html += `<tr><td class="text-secondary">${sub.track}</td><td>${fmtBadge}</td><td><span class="badge bg-secondary">${sub.language}</span></td><td>${sub.title || '—'}</td></tr>`;
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<p class="text-secondary small mb-0">No subtitle tracks found.</p>';
+  }
+
+  body.innerHTML = html;
   new bootstrap.Modal(document.getElementById('detailsModal')).show();
 }
 

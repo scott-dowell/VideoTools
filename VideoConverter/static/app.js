@@ -12,6 +12,15 @@ let _appState     = 'idle';  // idle | scanning | ready | running | done
 let _dragSrcIndex = null;
 let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name'
 
+// Estimation background task state
+let _estUserPaused  = false;  // user clicked the strip
+let _estAutoPaused  = false;  // conversion is running
+let _estCancelled   = false;  // new scan started
+let _estRunning     = false;  // chain is live (not dormant)
+let _estDone        = 0;
+let _estTotal       = 0;
+let _estLastFolder  = null;
+
 // Parse "H:MM:SS" or "MM:SS" → seconds
 function _parseDuration(d) {
   if (!d) return 0;
@@ -67,6 +76,7 @@ function addLog(msg, cls) {
 
 // state: 'idle' | 'scanning' | 'ready' | 'running' | 'done'
 function setButtonStates(state) {
+  const prev = _appState;
   _appState = state;
   document.getElementById('startBtn').disabled  = state !== 'ready';
   document.getElementById('pauseBtn').disabled  = state !== 'running';
@@ -79,6 +89,17 @@ function setButtonStates(state) {
     const handle = tr.querySelector('.drag-handle');
     if (handle) handle.style.opacity = canDrag ? '1' : '0.15';
   });
+  // Auto-pause estimation during conversion; resume when done/paused/ready
+  if (state === 'running' && !_estAutoPaused) {
+    _estAutoPaused = true;
+    _updateEstStrip();
+  } else if (state !== 'running' && prev === 'running' && _estAutoPaused) {
+    _estAutoPaused = false;
+    if (!_estRunning && !_estUserPaused && _estTotal > 0 && _estDone < _estTotal) {
+      _estTick(_estPendingFiles, _estPendingIndex);
+    }
+    _updateEstStrip();
+  }
 }
 
 // ============================================================
@@ -185,6 +206,17 @@ function buildRow(f, index) {
   tdStatus.innerHTML = '<span class="badge ' + badgeClass + '">' + (f.status || 'pending') + '</span>';
   tr.appendChild(tdStatus);
 
+  // col 5b — Est. saving
+  const tdEst = document.createElement('td');
+  tdEst.className = 'text-end';
+  tdEst.id = 'est-' + index;
+  if (f.status === 'done' || f.status === 'failed') {
+    tdEst.textContent = '\u2014';
+  } else {
+    tdEst.innerHTML = '<span class="text-secondary" style="font-size:.75rem">…</span>';
+  }
+  tr.appendChild(tdEst);
+
   // col 6 — Output
   const tdOut = document.createElement('td');
   tdOut.className = 'text-end';
@@ -224,7 +256,7 @@ function populateTable(files) {
   const tbody = document.getElementById('queueBody');
   tbody.innerHTML = '';
   if (files.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="12" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
     return;
   }
   // Attach computed bitrate
@@ -354,6 +386,12 @@ const DEMO_FILES = [
 ];
 
 function scanFolder(path) {
+  _estCancelled  = true;   // stop any in-flight estimation from previous scan
+  _estUserPaused = false;
+  _estAutoPaused = false;
+  _estRunning    = false;
+  const estStrip = document.getElementById('estStrip');
+  if (estStrip) estStrip.classList.add('d-none');
   _files = [];
   _activeFilter = 'all';
   _searchQuery  = '';
@@ -366,7 +404,7 @@ function scanFolder(path) {
   if (chipAll) chipAll.classList.add('active');
   setButtonStates('scanning');
   document.getElementById('queueBody').innerHTML =
-    '<tr><td colspan="12" class="text-center text-secondary py-4">' +
+    '<tr><td colspan="13" class="text-center text-secondary py-4">' +
     '<div class="spinner-border spinner-border-sm me-2"></div>Scanning for video files\u2026</td></tr>';
   document.getElementById('totalSizeLabel').textContent = 'Scanning\u2026';
   addLog('Scanning: ' + path, 'info');
@@ -379,7 +417,111 @@ function scanFolder(path) {
     updateStats(_files);
     addLog('Found ' + _files.length + ' video files \u2014 ' + document.getElementById('totalSizeLabel').textContent, 'ok');
     setButtonStates('ready');
+    runEstimation(_files);
   }, 1200);
+}
+
+// ============================================================
+// Estimation background task
+// ============================================================
+function _shouldEstimate() {
+  return !_estUserPaused && !_estAutoPaused && !_estCancelled;
+}
+
+function _updateEstStrip() {
+  const strip = document.getElementById('estStrip');
+  if (!strip) return;
+  const label = document.getElementById('estStripLabel');
+  const bar   = document.getElementById('estBar');
+  const btn   = document.getElementById('estStripBtn');
+  const icon  = document.getElementById('estStripIcon');
+  if (_estDone >= _estTotal && _estTotal > 0) {
+    strip.classList.add('d-none');
+    return;
+  }
+  strip.classList.remove('d-none');
+  const pct = _estTotal > 0 ? Math.round(_estDone / _estTotal * 100) : 0;
+  bar.style.width = pct + '%';
+  const isPaused = _estUserPaused || _estAutoPaused;
+  if (isPaused) {
+    const reason = _estAutoPaused ? ' (converting)' : '';
+    label.textContent = 'Estimation paused' + reason + ' — ' + _estDone + ' / ' + _estTotal;
+    btn.className  = 'bi bi-play-fill est-strip-btn';
+    icon.className = 'bi bi-pause-circle est-strip-icon';
+    strip.classList.add('est-paused');
+  } else {
+    label.textContent = 'Estimating ' + _estDone + ' / ' + _estTotal + '\u2026';
+    btn.className  = 'bi bi-pause-fill est-strip-btn';
+    icon.className = 'bi bi-hourglass-split est-strip-icon';
+    strip.classList.remove('est-paused');
+  }
+}
+
+function toggleEstimation() {
+  _estUserPaused = !_estUserPaused;
+  _updateEstStrip();
+  if (!_estUserPaused && !_estRunning) _estTick(_estPendingFiles, _estPendingIndex);
+}
+
+// These are set by runEstimation so toggleEstimation can restart the chain
+let _estPendingFiles = [];
+let _estPendingIndex = 0;
+
+function runEstimation(files) {
+  const pending = files.filter(f => (f.status === 'pending') && f.full_path);
+  _estCancelled  = false;
+  _estDone       = 0;
+  _estTotal      = pending.length;
+  _estLastFolder = null;
+  _estPendingFiles = pending;
+  _estPendingIndex = 0;
+  _updateEstStrip();
+  if (_estTotal === 0) return;
+  _estTick(pending, 0);
+}
+
+function _estTick(pending, i) {
+  if (_estCancelled || i >= pending.length) {
+    _estRunning = false;
+    _updateEstStrip();
+    return;
+  }
+  if (!_shouldEstimate()) {
+    _estRunning = false;          // chain goes dormant; toggleEstimation or setButtonStates will restart
+    _estPendingIndex = i;         // save position
+    _updateEstStrip();
+    return;
+  }
+  _estRunning = true;
+  _estPendingIndex = i;
+  const f   = pending[i];
+  const idx = _files.indexOf(f);
+  const cell = document.getElementById('est-' + idx);
+  fetch('/api/estimate?path=' + encodeURIComponent(f.full_path))
+    .then(r => r.json())
+    .then(data => {
+      if (cell) {
+        if (data.error) {
+          cell.innerHTML = '<span class="text-secondary">\u2014</span>';
+        } else {
+          cell.innerHTML =
+            '<span class="text-success fw-semibold">' + data.estimated_saving_pct + '%</span>' +
+            '<br><small class="text-secondary">' + data.estimated_saving_mb + '\u202fMB</small>';
+        }
+      }
+      _estDone++;
+      _updateEstStrip();
+      // Delay before next: longer when crossing folder boundary
+      const nextF  = pending[i + 1];
+      const delay  = nextF && nextF.folder !== f.folder ? 6000 : 2500;
+      setTimeout(() => _estTick(pending, i + 1), delay);
+    })
+    .catch(() => {
+      if (cell) cell.textContent = '\u2014';
+      _estDone++;
+      _updateEstStrip();
+      setTimeout(() => _estTick(pending, i + 1), 2500);
+    });
 }
 
 // ============================================================

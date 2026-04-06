@@ -129,6 +129,15 @@
             <button class="chip chip-failed" id="chip-failed" onclick="setFilter('failed')">Failed <span class="chip-count" id="chipCount-failed">—</span></button>
           </div>
         </div>
+        <!-- Estimation progress strip — hidden until scan completes -->
+        <div id="estStrip" class="est-strip d-none" onclick="toggleEstimation()" title="Click to pause / resume estimation">
+          <i class="bi bi-hourglass-split est-strip-icon" id="estStripIcon"></i>
+          <span class="est-strip-label" id="estStripLabel">Estimating…</span>
+          <div class="est-strip-bar-track">
+            <div class="est-strip-bar" id="estBar"></div>
+          </div>
+          <i class="bi bi-pause-fill est-strip-btn" id="estStripBtn"></i>
+        </div>
         <div class="card-body p-0">
           <div class="table-responsive">
             <table class="table table-borderless mb-0">
@@ -137,12 +146,13 @@
                   <th style="width:20px"></th>
                   <th>Folder</th><th>Filename</th><th class="text-end">Size</th><th class="text-end">Bitrate</th><th>Codec</th>
                   <th>Duration</th><th>Status</th>
+                  <th class="text-end">Est. saving</th>
                   <th>Output</th><th>Saved</th><th>%</th><th></th>
                 </tr>
               </thead>
               <tbody id="queueBody">
                 <tr id="emptyRow">
-                  <td colspan="12" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
+                  <td colspan="13" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
                 </tr>
               </tbody>
             </table>

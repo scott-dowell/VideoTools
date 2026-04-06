@@ -7,11 +7,15 @@ Two modes:
                        QSV, falls back to libx265. Discards output if not
                        smaller than source.
 
+  estimate()         — Quick savings estimator. Encodes 10 s from the middle
+                       of the file with QSV and extrapolates compression ratio.
+
   (anime pipeline)   — TODO: port from convert_videos.py. Full remux, AAC
                        transcode, OCR subtitle handling, track filtering.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -146,3 +150,112 @@ def compress_simple(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Savings estimator
+# ---------------------------------------------------------------------------
+
+def _ffprobe_duration(input_path: str) -> float:
+    """Return duration in seconds via ffprobe, or 0.0 on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_entries", "format=duration",
+                input_path,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        data = json.loads(result.stdout)
+        return float(data["format"]["duration"])
+    except Exception:
+        return 0.0
+
+
+def estimate(input_path: str, quality: int | None = None) -> dict:
+    """
+    Encode a 10-second clip from the middle of input_path with hevc_qsv and
+    extrapolate the compression ratio to the full file.
+
+    Returns:
+        {
+          "estimated_output_mb": float,
+          "estimated_saving_mb": float,
+          "estimated_saving_pct": int,
+          "error": str | None,
+        }
+    """
+    quality = quality or config.QSV_QUALITY
+    input_path = os.path.normpath(input_path)
+
+    if not os.path.isfile(input_path):
+        return {"error": "File not found"}
+
+    src_size = os.path.getsize(input_path)
+    src_mb   = src_size / 1024 / 1024
+
+    duration = _ffprobe_duration(input_path)
+    if duration < 20:
+        # Too short to sample reliably — skip
+        return {"error": "File too short to estimate"}
+
+    seek = max(duration / 2 - 5, 0)
+    clip_secs = min(10.0, duration - seek)
+
+    os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
+    tmp_path = os.path.join(
+        config.LOCAL_TEMP_DIR,
+        f"_est_{Path(input_path).stem}.mkv",
+    )
+
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(seek),
+            "-t",  str(clip_secs),
+            "-i",  input_path,
+            "-c:v", "hevc_qsv",
+            "-global_quality", str(quality),
+            "-an",           # skip audio — faster
+            "-f", "matroska",
+            tmp_path,
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, timeout=120,
+        )
+        if result.returncode != 0 or not os.path.exists(tmp_path):
+            return {"error": "ffmpeg encode failed"}
+
+        enc_size = os.path.getsize(tmp_path)
+
+        # Bytes of source data that correspond to the sampled clip
+        src_clip_bytes = src_size * (clip_secs / duration)
+        if src_clip_bytes == 0:
+            return {"error": "Duration calculation error"}
+
+        ratio = enc_size / src_clip_bytes
+        estimated_output_mb = src_mb * ratio
+        estimated_saving_mb = src_mb - estimated_output_mb
+        if estimated_saving_mb < 0:
+            estimated_saving_mb = 0.0
+        estimated_saving_pct = int(estimated_saving_mb / src_mb * 100) if src_mb > 0 else 0
+
+        return {
+            "estimated_output_mb":  round(estimated_output_mb, 1),
+            "estimated_saving_mb":  round(estimated_saving_mb, 1),
+            "estimated_saving_pct": estimated_saving_pct,
+            "error": None,
+        }
+
+    except subprocess.TimeoutExpired:
+        return {"error": "Timed out"}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass

@@ -10,6 +10,7 @@ import string
 from flask import Flask, jsonify, render_template, request
 
 import config
+import converter
 
 app = Flask(__name__)
 
@@ -153,6 +154,18 @@ def api_settings_post():
         return jsonify({"error": "Invalid numeric value"}), 400
     _save_settings({**_load_settings(), **data})
     return jsonify({"ok": True})
+
+
+@app.route("/api/estimate")
+def api_estimate():
+    """Run a 10-second sample encode and return an estimated compression ratio."""
+    path = request.args.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    path = os.path.normpath(path)
+    settings = _load_settings()
+    result = converter.estimate(path, quality=settings.get("qsv_quality"))
+    return jsonify(result)
 
 
 @app.route("/api/status")

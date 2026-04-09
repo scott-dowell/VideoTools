@@ -395,6 +395,479 @@ def _verify_output(output_path: str, src_duration: float) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# Anime mode helpers
+# ---------------------------------------------------------------------------
+
+def _aac_encoder() -> str:
+    """Return the correct AAC encoder for this platform.
+
+    On Windows the built-in 'aac' encoder triggers an FP overflow on E-cores.
+    'aac_mf' (Media Foundation) does not have this bug.
+    """
+    import sys
+    return "aac_mf" if sys.platform == "win32" else "aac"
+
+
+def is_hi10(input_path: str) -> bool:
+    """Return True when the first video stream is 10-bit H.264 (Hi10P).
+
+    QSV cannot decode 10-bit H.264, so Hi10 files must be remuxed without
+    re-encoding the video stream.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-select_streams", "v:0",
+                "-print_format", "json",
+                "-show_streams",
+                input_path,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        data = json.loads(result.stdout)
+        streams = data.get("streams", [])
+        if not streams:
+            return False
+        s = streams[0]
+        codec = s.get("codec_name", "").lower()
+        if codec != "h264":
+            return False
+        # bits_per_raw_sample may be int or string depending on ffprobe version
+        bps = s.get("bits_per_raw_sample", 0)
+        try:
+            bps = int(bps)
+        except (TypeError, ValueError):
+            bps = 0
+        # Also check pix_fmt — yuv420p10* indicates 10-bit
+        pix_fmt = s.get("pix_fmt", "")
+        return bps >= 10 or "420p10" in pix_fmt or "422p10" in pix_fmt or "444p10" in pix_fmt
+    except Exception:
+        return False
+
+
+def _is_potentially_english(lang: str, title: str) -> bool:
+    """Return True if a subtitle stream should be treated as English.
+
+    Keeps a track when:
+    - lang tag is 'eng', 'en', or 'und' (undefined — could be English)
+    - OR the track title contains 'english', 'full', 'signs', or 'song'
+    """
+    lang  = (lang  or "").strip().lower()
+    title = (title or "").strip().lower()
+    if lang in ("eng", "en", "und", ""):
+        return True
+    english_keywords = ("english", "full", "signs", "song", "forced")
+    return any(kw in title for kw in english_keywords)
+
+
+def remux_to_mp4(
+    input_path: str,
+    output_dir: str,
+    log: LogFn,
+    stop_event: threading.Event,
+    quality: int | None = None,
+    progress_cb: ProgressCb | None = None,
+    pid_holder: list[int] | None = None,
+    hi10: bool | None = None,
+) -> tuple[bool, str]:
+    """
+    Anime-mode remux into MP4.
+
+    Decision tree:
+      1. MP4 fast-path: already .mp4, audio is AAC, no bitmap subs
+         → skip remux; go straight to compress_simple() (QSV/SW).
+      2. Hi10 H.264 (or hi10=True): copy video stream, transcode audio to AAC.
+         No QSV (it can't decode 10-bit H.264).
+      3. Everything else: QSV/SW video compress → AAC audio → mov_text subs.
+
+    Subtitle handling:
+    - Text subs (ASS/SRT/subrip/srt/webvtt): map to mov_text, keep English tracks only.
+    - Bitmap subs (PGS/VOBSUB): OCR → SRT → embed as mov_text.
+    - Foreign-only subs: silently dropped.
+
+    DTS overflow recovery:
+    - If the first attempt fails with "DTS ... out of order", retry once with
+      -max_interleave_delta 0.
+    - If that also fails, retry without subtitle streams.
+
+    Returns (True, encoder_used) or (False, "").
+    """
+    quality    = quality if quality is not None else config.QSV_QUALITY
+    input_path = os.path.normpath(input_path)
+    src_size   = os.path.getsize(input_path)
+    duration   = _ffprobe_duration(input_path)
+
+    # ------------------------------------------------------------------
+    # Probe streams
+    # ------------------------------------------------------------------
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams",
+                input_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        probe_data = json.loads(probe.stdout)
+        streams = probe_data.get("streams", [])
+    except Exception as exc:
+        log(f"ERROR: ffprobe failed: {exc}")
+        return False, ""
+
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    sub_streams   = [s for s in streams if s.get("codec_type") == "subtitle"]
+
+    if not video_streams:
+        log("ERROR: no video stream found")
+        return False, ""
+
+    v = video_streams[0]
+    v_codec  = v.get("codec_name", "").lower()
+    v_index  = v.get("index", 0)
+
+    # ------------------------------------------------------------------
+    # Determine if hi10
+    # ------------------------------------------------------------------
+    if hi10 is None:
+        hi10 = is_hi10(input_path)
+
+    # ------------------------------------------------------------------
+    # MP4 fast-path: already .mp4, all audio is aac, no bitmap subs
+    # ------------------------------------------------------------------
+    suffix = Path(input_path).suffix.lower()
+    if suffix == ".mp4":
+        has_bitmap = any(
+            s.get("codec_name", "").lower() in ("hdmv_pgs_subtitle", "dvd_subtitle")
+            for s in sub_streams
+        )
+        all_aac = all(
+            s.get("codec_name", "").lower() in ("aac", "aac_latm")
+            for s in audio_streams
+        ) if audio_streams else True
+        if all_aac and not has_bitmap:
+            log("MP4 fast-path: already MP4 + AAC, no bitmap subs — compressing directly.")
+            return compress_simple(
+                input_path, output_dir, log, stop_event,
+                quality=quality, progress_cb=progress_cb, pid_holder=pid_holder,
+            )
+
+    # ------------------------------------------------------------------
+    # Subtitle classification
+    # ------------------------------------------------------------------
+    TEXT_SUB_CODECS   = {"ass", "subrip", "srt", "webvtt", "mov_text"}
+    BITMAP_SUB_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "pgssub", "vobsub"}
+
+    english_text_subs   = []   # (stream_index, codec_name)
+    bitmap_sub_indices  = []   # stream index list for OCR
+
+    for s in sub_streams:
+        codec = s.get("codec_name", "").lower()
+        tags  = s.get("tags", {})
+        lang  = tags.get("language", "")
+        title = tags.get("title", "")
+        eng   = _is_potentially_english(lang, title)
+        if codec in TEXT_SUB_CODECS:
+            if eng:
+                english_text_subs.append(s["index"])
+        elif codec in BITMAP_SUB_CODECS:
+            if eng:
+                bitmap_sub_indices.append(s["index"])
+
+    # If no English subs kept at all but there's exactly one sub track, keep it
+    # (sole-sub rule: likely English even if not tagged)
+    if not english_text_subs and not bitmap_sub_indices and len(sub_streams) == 1:
+        s = sub_streams[0]
+        codec = s.get("codec_name", "").lower()
+        if codec in TEXT_SUB_CODECS:
+            english_text_subs.append(s["index"])
+        elif codec in BITMAP_SUB_CODECS:
+            bitmap_sub_indices.append(s["index"])
+
+    # ------------------------------------------------------------------
+    # OCR bitmap subs
+    # ------------------------------------------------------------------
+    import bitmap_subs as _bsubs
+
+    srt_paths: list[str] = []
+    if bitmap_sub_indices and _bsubs.DEPS_OK:
+        log(f"OCR bitmap subs ({len(bitmap_sub_indices)} track(s))...")
+        try:
+            srt_paths = _bsubs.ocr_bitmap_subs_to_srt(
+                input_path=input_path,
+                lang="en",
+                out_dir=config.LOCAL_TEMP_DIR,
+                all_streams=False,
+                verbose=False,
+                log_fn=log,
+            )
+        except Exception as exc:
+            log(f"WARNING: bitmap sub OCR failed: {exc} — continuing without subs")
+            srt_paths = []
+    elif bitmap_sub_indices:
+        log("WARNING: bitmap_subs deps not installed — skipping OCR")
+
+    # ------------------------------------------------------------------
+    # Build output path
+    # ------------------------------------------------------------------
+    out_name   = Path(input_path).stem + ".mp4"
+    final_path = os.path.join(output_dir, out_name)
+    os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
+    tmp_path   = os.path.join(config.LOCAL_TEMP_DIR, out_name)
+
+    aac = _aac_encoder()
+
+    def _build_cmd(include_subs: bool, extra_flags: list[str] | None = None) -> list[str]:
+        """Build the ffmpeg remux command."""
+        cmd = ["ffmpeg", "-y", "-i", input_path]
+
+        # Append SRT files as additional inputs
+        for srt in srt_paths:
+            cmd += ["-i", srt]
+
+        # Video
+        if hi10:
+            cmd += ["-map", f"0:{v_index}", "-c:v", "copy"]
+            encoder_tag = "copy"
+        else:
+            # QSV encode
+            cmd += [
+                "-map", f"0:{v_index}",
+                "-c:v", "hevc_qsv",
+                "-global_quality", str(quality),
+                "-tag:v", "hvc1",
+            ]
+            encoder_tag = "hevc_qsv"
+
+        # Audio — ALL tracks → AAC transcode
+        for i, a in enumerate(audio_streams):
+            ai = a.get("index", 0)
+            cmd += ["-map", f"0:{ai}", f"-c:a:{i}", aac]
+
+        # Subtitles
+        if include_subs:
+            # Text subs from source
+            for si in english_text_subs:
+                cmd += ["-map", f"0:{si}"]
+            # OCR'd SRT files (inputs 1..N)
+            for j in range(len(srt_paths)):
+                cmd += ["-map", f"{j+1}:s:0"]
+            # Convert all subtitle streams to mov_text
+            sub_count = len(english_text_subs) + len(srt_paths)
+            if sub_count > 0:
+                cmd += ["-c:s", "mov_text"]
+
+        if extra_flags:
+            cmd += extra_flags
+
+        cmd += ["-movflags", "+faststart", tmp_path]
+        return cmd, encoder_tag
+
+    # ------------------------------------------------------------------
+    # Run with DTS overflow recovery
+    # ------------------------------------------------------------------
+    try:
+        encoder_used = ""
+
+        for attempt, (inc_subs, extra) in enumerate([
+            (True,  None),                          # attempt 0: normal
+            (True,  ["-max_interleave_delta", "0"]), # attempt 1: DTS fix
+            (False, None),                           # attempt 2: no subs
+        ]):
+            if stop_event.is_set():
+                return False, ""
+
+            cmd, enc = _build_cmd(inc_subs, extra)
+            encoder_used = enc
+            if attempt == 1:
+                log("DTS overflow detected — retrying with -max_interleave_delta 0")
+            elif attempt == 2:
+                log("DTS retry failed — retrying without subtitle streams")
+
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+            # Capture stderr separately so we can inspect it for DTS errors
+            log(f"Running: {' '.join(cmd)}")
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                if pid_holder is not None:
+                    pid_holder[0] = proc.pid
+
+                output_lines: list[str] = []
+                dts_error = False
+
+                for line in proc.stdout:
+                    output_lines.append(line)
+                    if stop_event.is_set():
+                        proc.kill()
+                        proc.wait()
+                        log("Stopped by user.")
+                        return False, ""
+                    # DTS overflow detection
+                    if "out of order" in line.lower() or "dts" in line.lower() and "out of order" in line.lower():
+                        dts_error = True
+                    if progress_cb and duration > 0:
+                        m = _PROGRESS_RE.search(line)
+                        if m:
+                            elapsed  = _parse_time(m.group("time"))
+                            fps      = float(m.group("fps") or 0)
+                            pct      = min(100.0, elapsed / duration * 100)
+                            remaining = (duration - elapsed) / fps if fps > 0 else 0
+                            eta_secs  = max(0, int(remaining))
+                            try:
+                                progress_cb(pct, fps, eta_secs)
+                            except Exception:
+                                pass
+
+                proc.wait()
+                if pid_holder is not None:
+                    pid_holder[0] = 0
+
+            except FileNotFoundError:
+                log("ERROR: ffmpeg not found.")
+                return False, ""
+
+            if proc.returncode == 0 and os.path.exists(tmp_path):
+                break  # success
+
+            # Check if DTS error; if not, no point retrying sub-related attempts
+            full_output = "".join(output_lines)
+            if "out of order" not in full_output.lower():
+                if attempt == 0:
+                    # Non-DTS failure — bail immediately
+                    log("Remux failed.")
+                    return False, ""
+                # else let the loop try next approach
+
+        else:
+            log("All remux attempts failed.")
+            return False, ""
+
+        if not os.path.exists(tmp_path):
+            log("Remux failed — no output file.")
+            return False, ""
+
+        # --------------------------------------------------------------
+        # Size check — skip if output not smaller (not for Hi10 copy)
+        # --------------------------------------------------------------
+        enc_size = os.path.getsize(tmp_path)
+        if not hi10 and enc_size >= src_size:
+            log(f"Output not smaller ({enc_size:,} >= {src_size:,} bytes). Skipping.")
+            os.remove(tmp_path)
+            return False, ""
+
+        os.makedirs(output_dir, exist_ok=True)
+        os.replace(tmp_path, final_path)
+        saved = max(0, src_size - enc_size)
+        log(f"Done. Saved {saved/1024/1024:.1f} MB → {final_path}")
+        return True, encoder_used
+
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        # Clean up any temp SRT files we created
+        for srt in srt_paths:
+            if os.path.exists(srt):
+                try:
+                    os.remove(srt)
+                except OSError:
+                    pass
+
+
+def compress_and_remux(
+    input_path: str,
+    output_dir: str,
+    log: LogFn,
+    stop_event: threading.Event,
+    quality: int | None = None,
+    progress_cb: ProgressCb | None = None,
+    pid_holder: list[int] | None = None,
+) -> tuple[bool, str]:
+    """
+    Anime normal-H.264 path: compress with QSV/SW first, then remux the
+    resulting MKV to MP4 (AAC audio, mov_text subs).
+
+    Two-pass approach keeps things simple — compress_simple handles the
+    codec decision, then remux_to_mp4 handles the container conversion.
+    """
+    import tempfile
+
+    # Step 1: compress to a unique temp subdir so the path never collides
+    # with compress_simple's own internal tmp_path (which also lives in
+    # LOCAL_TEMP_DIR).  Using a separate subdir avoids the finally-block
+    # self-delete bug when output_dir == config.LOCAL_TEMP_DIR.
+    os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
+    compress_dir = tempfile.mkdtemp(dir=config.LOCAL_TEMP_DIR, prefix="_cr_")
+
+    ok, encoder_used = compress_simple(
+        input_path=input_path,
+        output_dir=compress_dir,
+        log=log,
+        stop_event=stop_event,
+        quality=quality,
+        progress_cb=progress_cb,
+        pid_holder=pid_holder,
+    )
+
+    if not ok:
+        # Clean up the temp dir
+        try:
+            import shutil
+            shutil.rmtree(compress_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return False, encoder_used
+
+    suffix   = Path(input_path).suffix.lower()
+    out_ext  = suffix if suffix in (".mp4", ".mkv", ".m4v") else ".mkv"
+    intermediate = os.path.join(compress_dir, Path(input_path).stem + out_ext)
+
+    if not os.path.exists(intermediate):
+        log("ERROR: intermediate file missing after compress_simple")
+        return False, encoder_used
+
+    # Step 2: remux the compressed MKV to MP4
+    log("Remuxing compressed output to MP4...")
+    ok2, _ = remux_to_mp4(
+        input_path=intermediate,
+        output_dir=output_dir,
+        log=log,
+        stop_event=stop_event,
+        quality=quality,
+        progress_cb=None,   # don't double-report progress
+        pid_holder=pid_holder,
+        hi10=False,
+    )
+
+    # Clean up intermediate and its temp dir
+    try:
+        import shutil
+        shutil.rmtree(compress_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+    if not ok2:
+        return False, encoder_used
+
+    return True, encoder_used
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatcher
 # ---------------------------------------------------------------------------
 
@@ -429,8 +902,69 @@ def convert_video(
     duration   = _ffprobe_duration(input_path)
 
     if anime_mode:
-        # Anime path implemented in Phase 3b; stub for now
-        log("Anime mode not yet implemented — falling back to normal.")
+        if is_hi10(input_path):
+            log("Hi10 H.264 detected — using remux path (no re-encode).")
+            ok, encoder_used = remux_to_mp4(
+                input_path=input_path,
+                output_dir=output_dir,
+                log=log,
+                stop_event=stop_event,
+                quality=quality,
+                progress_cb=progress_cb,
+                pid_holder=pid_holder,
+                hi10=True,
+            )
+        else:
+            log("Anime mode: compressing then remuxing to MP4.")
+            ok, encoder_used = compress_and_remux(
+                input_path=input_path,
+                output_dir=output_dir,
+                log=log,
+                stop_event=stop_event,
+                quality=quality,
+                progress_cb=progress_cb,
+                pid_holder=pid_holder,
+            )
+
+        if not ok:
+            return {
+                "ok":             False,
+                "output_path":    None,
+                "output_size_mb": 0.0,
+                "saved_mb":       0.0,
+                "saved_pct":      0,
+                "encoder_used":   encoder_used,
+                "error":          "anime encode failed",
+            }
+
+        out_name     = Path(input_path).stem + ".mp4"
+        output_path  = os.path.join(output_dir, out_name)
+        ok_verify, reason = _verify_output(output_path, duration)
+        if not ok_verify:
+            log(f"Integrity check failed: {reason}")
+            return {
+                "ok":             False,
+                "output_path":    output_path,
+                "output_size_mb": 0.0,
+                "saved_mb":       0.0,
+                "saved_pct":      0,
+                "encoder_used":   encoder_used,
+                "error":          f"integrity: {reason}",
+            }
+
+        out_size  = os.path.getsize(output_path)
+        out_mb    = out_size / (1024 * 1024)
+        saved_mb  = max(0.0, src_mb - out_mb)
+        saved_pct = int(saved_mb / src_mb * 100) if src_mb > 0 else 0
+        return {
+            "ok":             True,
+            "output_path":    output_path,
+            "output_size_mb": round(out_mb, 2),
+            "saved_mb":       round(saved_mb, 2),
+            "saved_pct":      saved_pct,
+            "encoder_used":   encoder_used,
+            "error":          None,
+        }
 
     # Normal mode
     ok, encoder_used = compress_simple(

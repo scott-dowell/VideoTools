@@ -23,6 +23,17 @@ BASE_DIR    = os.path.dirname(__file__)
 DB_PATH     = os.path.join(BASE_DIR, "conversions.db")
 db.init_db(DB_PATH)
 
+# Disable power-throttling for ffmpeg so E-cores don't cause FP overflows
+import subprocess as _sp
+try:
+    ffmpeg_exe = _sp.check_output(["where", "ffmpeg"], text=True).split()[0].strip()
+    _sp.run(
+        ["powercfg", "/powerthrottling", "disable", "/path", ffmpeg_exe],
+        capture_output=True, timeout=5,
+    )
+except Exception:
+    pass  # non-fatal — proceeed without it
+
 # ---------------------------------------------------------------------------
 # Job state (mutated only while holding _job_lock)
 # ---------------------------------------------------------------------------

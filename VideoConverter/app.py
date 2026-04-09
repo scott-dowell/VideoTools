@@ -5,6 +5,7 @@ Routes only; no business logic here.
 import ctypes
 import json
 import os
+import shutil
 import string
 
 from flask import Flask, jsonify, render_template, request
@@ -50,6 +51,73 @@ _SYSTEM_FOLDERS = {
     "windows", "windows.old", "program files", "program files (x86)", "programdata",
     "recovery", "boot", "perflogs", "msocache",
 }
+
+# Folder names that were used by legacy pipelines and should be unwound.
+_LEGACY_FOLDERS = {"converted", "hevc"}
+
+
+def _resolve_cleanup_dest(src_path: str) -> str | None:
+    """
+    If src_path sits inside a folder named 'converted' or 'hevc', return
+    the path it should be moved to (up to two levels up through legacy folders).
+    Returns None if the file is not in a legacy folder.
+    """
+    parent = os.path.dirname(src_path)
+    if os.path.basename(parent).lower() not in _LEGACY_FOLDERS:
+        return None
+    dest_dir = os.path.dirname(parent)          # move up once
+    if os.path.basename(dest_dir).lower() in _LEGACY_FOLDERS:
+        dest_dir = os.path.dirname(dest_dir)    # move up twice
+    return os.path.join(dest_dir, os.path.basename(src_path))
+
+
+def _cleanup_legacy_folders(root_path: str) -> dict:
+    """
+    Walk root_path recursively.  Any file found directly inside a folder named
+    'converted' or 'hevc' is moved up (at most two levels) so it sits beside
+    its former container.  Empty legacy folders are removed after the walk.
+
+    Returns {"moved": [...], "skipped": [...], "errors": [...]}
+    """
+    moved, skipped, errors = [], [], []
+    legacy_dirs: list[str] = []
+
+    for dirpath, dirnames, filenames in os.walk(root_path, topdown=False):
+        if os.path.basename(dirpath).lower() not in _LEGACY_FOLDERS:
+            continue
+        legacy_dirs.append(dirpath)
+        for filename in filenames:
+            src = os.path.join(dirpath, filename)
+            dest = _resolve_cleanup_dest(src)
+            if dest is None:
+                continue
+            if os.path.exists(dest):
+                skipped.append({
+                    "path": src.replace("\\", "/"),
+                    "reason": "destination already exists",
+                })
+                continue
+            try:
+                shutil.move(src, dest)
+                moved.append({
+                    "from": src.replace("\\", "/"),
+                    "to":   dest.replace("\\", "/"),
+                })
+            except Exception as exc:
+                errors.append({
+                    "path":   src.replace("\\", "/"),
+                    "reason": str(exc),
+                })
+
+    # Remove any legacy dirs that are now empty (deepest first — topdown=False order)
+    for d in legacy_dirs:
+        try:
+            if os.path.isdir(d) and not os.listdir(d):
+                os.rmdir(d)
+        except Exception:
+            pass
+
+    return {"moved": moved, "skipped": skipped, "errors": errors}
 
 
 def _volume_label(drive: str) -> str:
@@ -172,6 +240,24 @@ def api_estimate():
 def api_status():
     """Placeholder — will return live job status once converter is wired up."""
     return jsonify({"status": "idle", "queue": []})
+
+
+@app.route("/api/cleanup", methods=["POST"])
+def api_cleanup():
+    """Move files out of legacy 'converted'/'hevc' subfolders.
+
+    Body: { "path": "<root directory to clean up>" }
+    Returns: { "moved": [...], "skipped": [...], "errors": [...] }
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    path = data.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    path = os.path.normpath(path)
+    if not os.path.isdir(path):
+        return jsonify({"error": "Not a directory"}), 400
+    result = _cleanup_legacy_folders(path)
+    return jsonify(result)
 
 
 @app.route("/api/open")

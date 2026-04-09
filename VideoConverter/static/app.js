@@ -1,11 +1,8 @@
 // ============================================================
 // State
 // ============================================================
-let _files      = [];   // file objects loaded by scan
-let _simInterval = null;
-let _simIndex   = 0;
-let _simValue   = 0;
-let _paused     = false;
+let _files        = [];   // file objects loaded by scan
+let _scanEs       = null; // active EventSource for /api/scan
 let _activeFilter = 'all';
 let _searchQuery  = '';
 let _appState     = 'idle';  // idle | scanning | ready | running | done
@@ -250,6 +247,20 @@ function buildRow(f, index) {
   tr.draggable = (_appState === 'ready');
 
   return tr;
+}
+
+// Append only the new rows (without touching existing ones).
+// Used by the SSE scan path for incremental rendering.
+function _appendRows(newFiles, startIndex) {
+  const tbody = document.getElementById('queueBody');
+  // Remove the placeholder row if it is still there
+  const placeholder = tbody.querySelector('td[colspan]');
+  if (placeholder) tbody.innerHTML = '';
+  newFiles.forEach((f, i) => {
+    if (!f.bitrate_kbps) f.bitrate_kbps = _fileBitrate(f);
+    tbody.appendChild(buildRow(f, startIndex + i));
+  });
+  applyFilter();
 }
 
 function populateTable(files) {
@@ -525,7 +536,7 @@ function _estTick(pending, i) {
 }
 
 // ============================================================
-// Conversion  (simulated — swap for fetch('/api/start') + polling later)
+// Conversion  (wired to /api/start + /api/status polling in Phase 4)
 // ============================================================
 function startConversion() {
   if (_files.length === 0) return;
@@ -534,72 +545,13 @@ function startConversion() {
   addLog(anime
     ? 'Anime mode: ON \u2014 remux to MP4, AAC transcode, OCR subs'
     : 'Normal mode \u2014 compress only, copy all tracks', 'info');
-  setButtonStates('running');
-  _simIndex = 0;
-  _simValue = 0;
-  _paused   = false;
-  _startNextFile();
-}
-
-function _startNextFile() {
-  if (_simIndex >= _files.length) {
-    document.getElementById('etaVal').textContent      = 'Done';
-    document.getElementById('currentFilename').textContent = '\u2014';
-    addLog('All files processed.', 'ok');
-    setButtonStates('done');
-    return;
-  }
-  const f = _files[_simIndex];
-  // Mark active row
-  const activeRow = document.getElementById('row-' + _simIndex);
-  if (activeRow) {
-    activeRow.classList.add('tr-converting');
-    activeRow.cells[5].innerHTML = '<span class="badge badge-converting">converting</span>';
-  }
-  document.getElementById('currentFilename').textContent = f.name;
-  document.getElementById('fpsVal').textContent = (40 + Math.random() * 20).toFixed(1);
-  document.getElementById('etaVal').textContent = '\u2014';
-  _simValue = 0;
-  if (_simInterval) clearInterval(_simInterval);
-  _simInterval = setInterval(_simTick, 80);
-}
-
-function _simTick() {
-  if (_paused) return;
-  _simValue = Math.min(100, _simValue + Math.random() * 3);
-  document.getElementById('fileBar').style.width   = _simValue + '%';
-  document.getElementById('filePct').textContent   = _simValue.toFixed(0) + '%';
-  const overallPct = ((_simIndex + _simValue / 100) / _files.length * 100).toFixed(0);
-  document.getElementById('overallBar').style.width = overallPct + '%';
-  document.getElementById('overallPct').textContent = overallPct + '%';
-
-  if (_simValue >= 100) {
-    clearInterval(_simInterval);
-    const f      = _files[_simIndex];
-    const srcMB  = parseFloat(f.size.replace(/,/g, ''));
-    const outMB  = Math.round(srcMB * (0.25 + Math.random() * 0.15));
-    const savedMB = srcMB - outMB;
-    const pct    = Math.round(savedMB / srcMB * 100);
-    const row    = document.getElementById('row-' + _simIndex);
-    if (row) {
-      row.classList.remove('tr-converting');
-      row.classList.add('tr-done');
-      row.cells[5].innerHTML    = '<span class="badge badge-done">done</span>';
-      row.cells[6].textContent  = outMB.toLocaleString() + ' MB';
-      row.cells[7].textContent  = savedMB.toLocaleString() + ' MB';
-      row.cells[8].innerHTML    = '<strong>' + pct + '%</strong>';
-      addLog(f.name + ' \u2192 ' + outMB.toLocaleString() + ' MB (saved ' + savedMB.toLocaleString() + ' MB, ' + pct + '%)', 'ok');
-      const doneEl = document.getElementById('statDone');
-      doneEl.textContent = parseInt(doneEl.textContent || '0') + 1;
-    }
-    _simIndex++;
-    _startNextFile();
-  }
+  // TODO Phase 4: POST /api/start then _startPolling()
+  addLog('Backend conversion not yet wired \u2014 coming in Phase 4.', 'warn');
 }
 
 function pauseConversion() {
-  _paused = !_paused;
-  addLog(_paused ? 'Paused.' : 'Resumed.', 'warn');
+  // Wired to /api/pause and /api/resume in Phase 4
+  addLog('Pause/Resume not yet wired to backend.', 'warn');
 }
 
 // ============================================================

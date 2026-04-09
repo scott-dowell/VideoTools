@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import string
+import threading
+from datetime import datetime, timezone
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
@@ -20,6 +22,158 @@ app = Flask(__name__)
 BASE_DIR    = os.path.dirname(__file__)
 DB_PATH     = os.path.join(BASE_DIR, "conversions.db")
 db.init_db(DB_PATH)
+
+# ---------------------------------------------------------------------------
+# Job state (mutated only while holding _job_lock)
+# ---------------------------------------------------------------------------
+_job_lock   = threading.Lock()
+_stop_event = threading.Event()
+_ffmpeg_pid: list[int] = [0]   # _ffmpeg_pid[0] = current child PID; 0 means idle
+
+_job: dict = {
+    "state":         "idle",   # idle | running | done
+    "current_index": 0,
+    "total":         0,
+    "current_file":  "",
+    "progress_pct":  0.0,
+    "fps":           0.0,
+    "eta_secs":      0,
+    "saved_mb":      0.0,
+    "encoder":       "",
+    "files":         [],
+    "log":           [],
+    "paused":        False,
+}
+
+_PROCESS_ALL_ACCESS = 0x1F0FFF
+
+
+def _suspend_ffmpeg() -> None:
+    pid = _ffmpeg_pid[0]
+    if pid:
+        h = ctypes.windll.kernel32.OpenProcess(_PROCESS_ALL_ACCESS, False, pid)
+        if h:
+            ctypes.windll.ntdll.NtSuspendProcess(h)
+            ctypes.windll.kernel32.CloseHandle(h)
+
+
+def _resume_ffmpeg() -> None:
+    pid = _ffmpeg_pid[0]
+    if pid:
+        h = ctypes.windll.kernel32.OpenProcess(_PROCESS_ALL_ACCESS, False, pid)
+        if h:
+            ctypes.windll.ntdll.NtResumeProcess(h)
+            ctypes.windll.kernel32.CloseHandle(h)
+
+
+def _job_log(msg: str) -> None:
+    with _job_lock:
+        _job["log"].append(msg)
+        if len(_job["log"]) > 500:
+            _job["log"] = _job["log"][-400:]
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
+    """Runs in a daemon thread; processes the file queue sequentially."""
+    total_saved = 0.0
+
+    for idx, file_info in enumerate(files):
+        if _stop_event.is_set():
+            break
+
+        full_path = file_info["full_path"]
+        try:
+            mtime = os.path.getmtime(full_path)
+            size_mb = os.path.getsize(full_path) / (1024 * 1024)
+        except OSError as exc:
+            _job_log(f"Skipped {full_path}: {exc}")
+            with _job_lock:
+                _job["files"][idx]["status"] = "failed"
+            continue
+
+        # Ensure a DB record exists for this file
+        codec = (file_info.get("streams") or {}).get("video", {}) or {}
+        rec_id = db.upsert_pending(
+            source_path   = full_path,
+            source_mtime  = mtime,
+            source_size_mb = size_mb,
+            source_codec  = codec.get("codec") if isinstance(codec, dict) else None,
+        )
+
+        with _job_lock:
+            _job["current_index"] = idx
+            _job["current_file"]  = full_path
+            _job["progress_pct"]  = 0.0
+            _job["fps"]           = 0.0
+            _job["eta_secs"]      = 0
+            _job["encoder"]       = ""
+            _job["files"][idx]["status"] = "converting"
+
+        db.mark_running(rec_id, _utcnow())
+        _job_log(f"[{idx+1}/{len(files)}] {os.path.basename(full_path)}")
+
+        output_dir = os.path.join(os.path.dirname(full_path), "converted")
+
+        def _progress(pct: float, fps: float, eta: int) -> None:
+            with _job_lock:
+                _job["progress_pct"] = pct
+                _job["fps"]          = fps
+                _job["eta_secs"]     = eta
+
+        result = converter.convert_video(
+            input_path  = full_path,
+            output_dir  = output_dir,
+            anime_mode  = anime_mode,
+            quality     = quality,
+            progress_cb = _progress,
+            stop_event  = _stop_event,
+            log         = _job_log,
+            pid_holder  = _ffmpeg_pid,
+        )
+
+        if result["ok"]:
+            total_saved += result["saved_mb"]
+            db.mark_done(
+                record_id      = rec_id,
+                output_path    = result["output_path"],
+                output_size_mb = result["output_size_mb"],
+                saved_mb       = result["saved_mb"],
+                saved_pct      = result["saved_pct"],
+                completed_at   = _utcnow(),
+                encoder_used   = result["encoder_used"],
+            )
+            # Delete source after successful verified conversion
+            try:
+                os.remove(full_path)
+                _job_log(f"Deleted source: {full_path}")
+            except OSError as exc:
+                _job_log(f"Could not delete source: {exc}")
+            with _job_lock:
+                _job["files"][idx].update({
+                    "status":     "done",
+                    "output":     str(round(result["output_size_mb"], 1)),
+                    "saved":      str(round(result["saved_mb"], 1)),
+                    "pct":        str(result["saved_pct"]),
+                    "output_path": result["output_path"],
+                })
+        else:
+            db.mark_failed(rec_id, result.get("error", ""), _utcnow())
+            with _job_lock:
+                _job["files"][idx]["status"] = "failed"
+            _job_log(f"Failed: {result.get('error', 'unknown')}")
+
+        with _job_lock:
+            _job["saved_mb"] = total_saved
+
+    with _job_lock:
+        _job["state"]        = "done"
+        _job["current_file"] = ""
+        _job["progress_pct"] = 100.0
+        _ffmpeg_pid[0]       = 0
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
 
@@ -242,6 +396,83 @@ def api_estimate():
     return jsonify(result)
 
 
+@app.route("/api/start", methods=["POST"])
+def api_start():
+    """Begin processing a file queue in a background thread."""
+    with _job_lock:
+        if _job["state"] == "running":
+            return jsonify({"error": "A job is already running"}), 409
+
+    data      = request.get_json(force=True, silent=True) or {}
+    files     = data.get("files", [])
+    anime     = bool(data.get("anime_mode", False))
+    settings  = _load_settings()
+    quality   = int(settings.get("qsv_quality", config.QSV_QUALITY))
+
+    if not files:
+        return jsonify({"error": "No files provided"}), 400
+
+    _stop_event.clear()
+    with _job_lock:
+        _job.update({
+            "state":         "running",
+            "current_index": 0,
+            "total":         len(files),
+            "current_file":  "",
+            "progress_pct":  0.0,
+            "fps":           0.0,
+            "eta_secs":      0,
+            "saved_mb":      0.0,
+            "encoder":       "",
+            "files":         [dict(f) for f in files],
+            "log":           [],
+            "paused":        False,
+        })
+
+    t = threading.Thread(
+        target=_queue_worker,
+        args=(list(files), anime, quality),
+        daemon=True,
+    )
+    t.start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/status")
+def api_status():
+    """Return current job state."""
+    with _job_lock:
+        return jsonify(dict(_job))
+
+
+@app.route("/api/stop", methods=["POST"])
+def api_stop():
+    """Signal the queue worker to stop after the current file (or kill mid-encode)."""
+    _stop_event.set()
+    _resume_ffmpeg()   # unblock if paused so it can see the stop_event
+    with _job_lock:
+        _job["paused"] = False
+    return jsonify({"ok": True})
+
+
+@app.route("/api/pause", methods=["POST"])
+def api_pause():
+    """Suspend the ffmpeg child process."""
+    _suspend_ffmpeg()
+    with _job_lock:
+        _job["paused"] = True
+    return jsonify({"ok": True})
+
+
+@app.route("/api/resume", methods=["POST"])
+def api_resume():
+    """Resume a previously suspended ffmpeg process."""
+    _resume_ffmpeg()
+    with _job_lock:
+        _job["paused"] = False
+    return jsonify({"ok": True})
+
+
 @app.route("/api/scan")
 def api_scan():
     """Stream a recursive directory scan as Server-Sent Events."""
@@ -258,12 +489,6 @@ def api_scan():
         mimetype="text/event-stream",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
-
-
-@app.route("/api/status")
-def api_status():
-    """Placeholder — will return live job status once converter is wired up."""
-    return jsonify({"status": "idle", "queue": []})
 
 
 @app.route("/api/cleanup", methods=["POST"])

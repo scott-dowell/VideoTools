@@ -841,7 +841,10 @@ def compress_and_remux(
         log("ERROR: intermediate file missing after compress_simple")
         return False, encoder_used
 
-    # Step 2: remux the compressed MKV to MP4
+    # Step 2: remux the compressed MKV to MP4.
+    # Video is already HEVC from step 1 — copy it, don't re-encode.
+    # hi10=True tells remux_to_mp4 to use -c:v copy and skip the
+    # "output not smaller" size check (savings were established in step 1).
     log("Remuxing compressed output to MP4...")
     ok2, _ = remux_to_mp4(
         input_path=intermediate,
@@ -851,7 +854,7 @@ def compress_and_remux(
         quality=quality,
         progress_cb=None,   # don't double-report progress
         pid_holder=pid_holder,
-        hi10=False,
+        hi10=True,
     )
 
     # Clean up intermediate and its temp dir

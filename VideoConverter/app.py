@@ -8,12 +8,18 @@ import os
 import shutil
 import string
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
 import config
 import converter
+import db
+import scanner
 
 app = Flask(__name__)
+
+BASE_DIR    = os.path.dirname(__file__)
+DB_PATH     = os.path.join(BASE_DIR, "conversions.db")
+db.init_db(DB_PATH)
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
 
@@ -234,6 +240,24 @@ def api_estimate():
     settings = _load_settings()
     result = converter.estimate(path, quality=settings.get("qsv_quality"))
     return jsonify(result)
+
+
+@app.route("/api/scan")
+def api_scan():
+    """Stream a recursive directory scan as Server-Sent Events."""
+    path = request.args.get("path", "").strip()
+    if not path or not os.path.isdir(path):
+        return jsonify({"error": "Invalid path"}), 400
+
+    def _generate():
+        for event in scanner.walk(path):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return Response(
+        stream_with_context(_generate()),
+        mimetype="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @app.route("/api/status")

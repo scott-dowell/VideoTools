@@ -401,7 +401,8 @@ const DEMO_FILES = [
 ];
 
 function scanFolder(path) {
-  _currentScanPath = path;  // remember for re-scan and cleanup
+  _currentScanPath = path;
+  localStorage.setItem('vc_last_folder', path);  // remember for re-scan and cleanup
   const rescanBtn = document.getElementById('rescanBtn');
   if (rescanBtn) rescanBtn.disabled = false;
   _estCancelled  = true;   // stop any in-flight estimation from previous scan
@@ -1102,7 +1103,8 @@ function openBrowser() {
   document.getElementById('selectedPathDisplay').textContent = 'No folder selected';
   _modal = new bootstrap.Modal(document.getElementById('folderModal'));
   _modal.show();
-  browseTo('');
+  const lastFolder = localStorage.getItem('vc_last_folder') || '';
+  browseTo(lastFolder);
 }
 
 function browseTo(path) {

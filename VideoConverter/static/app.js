@@ -347,7 +347,7 @@ function applyFilter() {
 }
 
 // ============================================================
-// Scan  (simulated — swap for fetch('/api/scan') later)
+// Scan  (live /api/scan SSE)
 // ============================================================
 const DEMO_STREAMS = {
   h264_typical: {
@@ -420,16 +420,37 @@ function scanFolder(path) {
   document.getElementById('totalSizeLabel').textContent = 'Scanning\u2026';
   addLog('Scanning: ' + path, 'info');
 
-  // Replace setTimeout block with fetch('/api/scan?path=...') when backend is ready
-  setTimeout(() => {
-    const sorted = _sortFiles(DEMO_FILES);
-    sorted.forEach(f => _files.push(f));
-    populateTable(_files);
-    updateStats(_files);
-    addLog('Found ' + _files.length + ' video files \u2014 ' + document.getElementById('totalSizeLabel').textContent, 'ok');
-    setButtonStates('ready');
-    runEstimation(_files);
-  }, 1200);
+  if (_scanEs) { _scanEs.close(); _scanEs = null; }
+  _scanEs = new EventSource('/api/scan?path=' + encodeURIComponent(path));
+
+  _scanEs.onmessage = function(e) {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'folder') {
+      const startIdx = _files.length;
+      msg.files.forEach(f => _files.push(f));
+      _appendRows(msg.files, startIdx);
+      updateStats(_files);
+    } else if (msg.type === 'done') {
+      _scanEs.close(); _scanEs = null;
+      const totalGB = (msg.total_mb / 1024).toFixed(1);
+      document.getElementById('totalSizeLabel').textContent = totalGB + ' GB total';
+      addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB', 'ok');
+      setButtonStates('ready');
+      runEstimation(_files);
+    } else if (msg.type === 'warning') {
+      addLog('Skipped: ' + msg.message, 'warn');
+    } else if (msg.type === 'error') {
+      _scanEs.close(); _scanEs = null;
+      addLog('Scan error: ' + msg.message, 'err');
+      setButtonStates('idle');
+    }
+  };
+
+  _scanEs.onerror = function() {
+    if (_scanEs) { _scanEs.close(); _scanEs = null; }
+    addLog('Scan connection lost.', 'err');
+    setButtonStates('idle');
+  };
 }
 
 // ============================================================
@@ -536,22 +557,165 @@ function _estTick(pending, i) {
 }
 
 // ============================================================
-// Conversion  (wired to /api/start + /api/status polling in Phase 4)
+// Conversion  (live /api/start + /api/status polling)
 // ============================================================
+let _pollTimer = null;
+let _isPaused  = false;
+
+function _startPolling() {
+  if (_pollTimer) return;
+  _pollTimer = setInterval(_pollStatus, 1000);
+}
+
+function _stopPolling() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+
+function _pollStatus() {
+  fetch('/api/status')
+    .then(r => r.json())
+    .then(s => {
+      // Update progress widgets
+      const pct = s.progress_pct || 0;
+      document.getElementById('currentFilename').textContent = s.current_file
+        ? s.current_file.split(/[\\/]/).pop()
+        : (s.state === 'done' ? 'Complete' : '\u2014');
+      document.getElementById('fileBar').style.width = pct + '%';
+      document.getElementById('filePct').textContent  = Math.round(pct) + '%';
+      document.getElementById('fpsVal').textContent   = s.fps ? s.fps.toFixed(0) : '\u2014';
+      document.getElementById('etaVal').textContent   = s.eta_secs > 0
+        ? Math.floor(s.eta_secs / 60) + 'm ' + (s.eta_secs % 60) + 's'
+        : '\u2014';
+      document.getElementById('savedVal').textContent = s.saved_mb
+        ? (s.saved_mb / 1024 > 1
+            ? (s.saved_mb / 1024).toFixed(1) + ' GB'
+            : s.saved_mb.toFixed(0) + ' MB')
+        : '\u2014';
+      const overallDone  = s.files ? s.files.filter(f => f.status === 'done' || f.status === 'failed').length : 0;
+      const overallTotal = s.total || 0;
+      const overallPct   = overallTotal > 0 ? Math.round(overallDone / overallTotal * 100) : 0;
+      document.getElementById('overallPct').textContent  = overallPct + '%';
+      document.getElementById('overallBar').style.width  = overallPct + '%';
+
+      // Update pause button label
+      const pauseBtn = document.getElementById('pauseBtn');
+      if (pauseBtn) {
+        pauseBtn.innerHTML = s.paused
+          ? '<i class="bi bi-play-fill me-1"></i>Resume'
+          : '<i class="bi bi-pause-fill me-1"></i>Pause';
+      }
+
+      // Sync row badges + output cells from status.files
+      if (s.files) {
+        s.files.forEach((sf, idx) => {
+          // Sync into _files so local state matches
+          if (_files[idx]) {
+            _files[idx].status     = sf.status;
+            if (sf.output)  _files[idx].output  = sf.output;
+            if (sf.saved)   _files[idx].saved   = sf.saved;
+            if (sf.pct)     _files[idx].pct     = sf.pct;
+            if (sf.output_path) _files[idx].output_path = sf.output_path;
+          }
+          const row = document.getElementById('row-' + idx);
+          if (!row) return;
+          // Status badge (col index 7)
+          const badgeCell = row.cells[7];
+          if (badgeCell) {
+            const cls = sf.status === 'done'       ? 'badge-done'
+                      : sf.status === 'failed'     ? 'badge-failed'
+                      : sf.status === 'converting' ? 'badge-converting'
+                      : 'badge-pending';
+            badgeCell.innerHTML = '<span class="badge ' + cls + '">' + (sf.status || 'pending') + '</span>';
+            row.classList.toggle('tr-done',       sf.status === 'done');
+            row.classList.toggle('tr-failed',     sf.status === 'failed');
+            row.classList.toggle('tr-converting', sf.status === 'converting');
+          }
+          // Output/Saved/% cells (cols 9, 10, 11)
+          if (sf.status === 'done') {
+            if (row.cells[9])  row.cells[9].textContent  = sf.output  ? sf.output  + ' MB' : '';
+            if (row.cells[10]) row.cells[10].textContent = sf.saved   ? sf.saved   + ' MB' : '';
+            if (row.cells[11]) row.cells[11].innerHTML   = sf.pct     ? '<strong>' + sf.pct + '%</strong>' : '';
+          }
+        });
+        updateStats(_files);
+      }
+
+      // Transition state
+      if (s.state === 'done') {
+        _stopPolling();
+        _isPaused = false;
+        setButtonStates('ready');
+        addLog('Queue complete. Saved ' + (s.saved_mb || 0).toFixed(1) + ' MB total.', 'ok');
+      }
+    })
+    .catch(() => {}); // ignore transient errors
+}
+
 function startConversion() {
   if (_files.length === 0) return;
   const anime = document.getElementById('animeMode').checked;
+  const pendingFiles = _files.filter(f => f.status === 'pending' || f.status === 'failed');
+  if (pendingFiles.length === 0) {
+    addLog('No pending files to convert.', 'warn');
+    return;
+  }
   addLog('Starting conversion queue\u2026', 'info');
   addLog(anime
     ? 'Anime mode: ON \u2014 remux to MP4, AAC transcode, OCR subs'
     : 'Normal mode \u2014 compress only, copy all tracks', 'info');
-  // TODO Phase 4: POST /api/start then _startPolling()
-  addLog('Backend conversion not yet wired \u2014 coming in Phase 4.', 'warn');
+  fetch('/api/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files: _files, anime_mode: anime }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      _isPaused = false;
+      setButtonStates('running');
+      _startPolling();
+    } else {
+      addLog('Start failed: ' + (d.error || 'unknown'), 'err');
+    }
+  })
+  .catch(e => addLog('Could not reach server: ' + e, 'err'));
 }
 
 function pauseConversion() {
-  // Wired to /api/pause and /api/resume in Phase 4
-  addLog('Pause/Resume not yet wired to backend.', 'warn');
+  const endpoint = _isPaused ? '/api/resume' : '/api/pause';
+  fetch(endpoint, { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        _isPaused = !_isPaused;
+        const pauseBtn = document.getElementById('pauseBtn');
+        if (pauseBtn) {
+          pauseBtn.innerHTML = _isPaused
+            ? '<i class="bi bi-play-fill me-1"></i>Resume'
+            : '<i class="bi bi-pause-fill me-1"></i>Pause';
+        }
+        addLog(_isPaused ? 'Paused.' : 'Resumed.', 'info');
+      }
+    })
+    .catch(e => addLog('Pause/resume error: ' + e, 'err'));
+}
+
+function stopConversion() {
+  fetch('/api/stop', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        _stopPolling();
+        _isPaused = false;
+        setButtonStates('ready');
+        addLog('Stopped.', 'warn');
+      }
+    })
+    .catch(e => addLog('Stop error: ' + e, 'err'));
+}
+
+function hardStopConversion() {
+  stopConversion();  // same backend endpoint — hard-stop is a force-kill, same /api/stop
 }
 
 // ============================================================

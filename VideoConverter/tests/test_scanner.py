@@ -286,3 +286,37 @@ def test_api_scan_sse_content_type(client):
     resp = client.get(f"/api/scan?path={FIXTURES_DIR!s}")
     assert resp.status_code == 200
     assert "text/event-stream" in resp.content_type
+
+
+# ---------------------------------------------------------------------------
+# AV1 codec skip
+# ---------------------------------------------------------------------------
+
+def test_walk_skips_av1(tmp_path):
+    """Files whose first video stream is AV1 are excluded (already optimal)."""
+    from unittest.mock import patch
+
+    av1_file = tmp_path / "av1_video.mkv"
+    av1_file.write_bytes(b"\x00" * 100)   # dummy bytes — ffprobe is mocked
+
+    av1_probe_result = {
+        "streams": [{
+            "codec_type": "video",
+            "codec_name": "av1",
+            "width": 1920,
+            "height": 1080,
+            "r_frame_rate": "24/1",
+            "profile": "",
+            "pix_fmt": "yuv420p",
+            "bits_per_raw_sample": "8",
+        }],
+        "format": {"duration": "120.0", "bit_rate": "5000000"},
+    }
+
+    with patch("scanner._ffprobe", return_value=av1_probe_result):
+        folders, done, warnings, errors = _collect(str(tmp_path))
+
+    all_names = {f["name"] for f in _all_files(folders)}
+    assert "av1_video.mkv" not in all_names, (
+        "AV1 file should have been skipped but appeared in scan results"
+    )

@@ -230,6 +230,21 @@ def test_verify_output_missing_file():
     assert "not found" in reason
 
 
+def test_verify_output_duration_mismatch():
+    """_verify_output returns (False, reason) when the output duration differs
+    from the source duration by more than 5 %.
+    """
+    src = str(FIXTURES / "h264_short.mkv")
+    real_dur = converter._ffprobe_duration(src)
+    if real_dur <= 0:
+        pytest.skip("Could not determine fixture duration via ffprobe")
+    # Provide a src_duration that is double the real file's duration
+    wrong_dur = real_dur * 2.0
+    ok, reason = converter._verify_output(src, wrong_dur)
+    assert not ok, "Expected failure for duration mismatch"
+    assert "duration" in reason.lower(), f"Expected 'duration' in reason, got: {reason!r}"
+
+
 def test_verify_output_zero_bytes(tmp_path):
     f = tmp_path / "empty.mkv"
     f.write_bytes(b"")

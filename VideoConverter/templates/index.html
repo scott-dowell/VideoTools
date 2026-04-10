@@ -41,6 +41,9 @@
     <div class="card-body py-2 d-flex align-items-center gap-3">
       <i class="bi bi-folder2-open text-warning fs-5"></i>
       <span class="folder-path flex-grow-1" id="folderPath">No folder selected</span>
+      <button class="btn btn-sm btn-outline-secondary" id="rescanBtn" onclick="rescanFolder()" disabled title="Re-scan folder">
+        <i class="bi bi-arrow-clockwise"></i>
+      </button>
       <button class="btn btn-sm btn-outline-secondary" onclick="openBrowser()">
         <i class="bi bi-folder me-1"></i>Browse
       </button>
@@ -184,8 +187,8 @@
             </div>
           </div>
           <div class="text-center mt-1">
-            <button class="btn btn-hstop" id="hstopBtn" onclick="hardStopConversion()" disabled>
-              <i class="bi bi-x-octagon me-1"></i>Hard Stop (kill)
+            <button class="btn btn-outline-secondary btn-sm w-100" id="cleanupBtn" onclick="triggerCleanup()" disabled>
+              <i class="bi bi-folder-x me-1"></i>Clean Up Folders
             </button>
           </div>
         </div>
@@ -309,18 +312,18 @@
             <span>QSV Quality <small class="text-secondary">(hevc_qsv global_quality)</small></span>
             <strong id="qsvQualityVal">30</strong>
           </label>
-          <input type="range" class="form-range" id="qsvQuality" min="18" max="45" step="1" value="30"
+          <input type="range" class="form-range" id="qsvQuality" min="1" max="51" step="1" value="30"
             oninput="document.getElementById('qsvQualityVal').textContent=this.value">
-          <div class="d-flex justify-content-between"><small class="text-secondary">18 — best quality</small><small class="text-secondary">45 — smallest file</small></div>
+          <div class="d-flex justify-content-between"><small class="text-secondary">1 — best quality</small><small class="text-secondary">51 — smallest file</small></div>
         </div>
         <div class="mb-4">
           <label class="form-label d-flex justify-content-between">
             <span>Software CRF <small class="text-secondary">(libx265 fallback)</small></span>
             <strong id="swCrfVal">28</strong>
           </label>
-          <input type="range" class="form-range" id="swCrf" min="18" max="40" step="1" value="28"
+          <input type="range" class="form-range" id="swCrf" min="0" max="51" step="1" value="28"
             oninput="document.getElementById('swCrfVal').textContent=this.value">
-          <div class="d-flex justify-content-between"><small class="text-secondary">18 — best quality</small><small class="text-secondary">40 — smallest file</small></div>
+          <div class="d-flex justify-content-between"><small class="text-secondary">0 — best quality</small><small class="text-secondary">51 — smallest file</small></div>
         </div>
 
         <h6 class="details-section-head">Queue</h6>

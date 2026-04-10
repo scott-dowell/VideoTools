@@ -350,3 +350,175 @@ def test_failed_conversion_source_not_deleted_multiple_files(client, tmp_path, f
 
     for s in sources:
         assert os.path.exists(s), f"Source file was deleted after failed conversion: {s}"
+
+
+# ---------------------------------------------------------------------------
+# In-place replacement (output_path == source_path)
+# ---------------------------------------------------------------------------
+
+def test_source_not_deleted_when_replaced_in_place(client, tmp_path, fresh_db):
+    """When convert_video returns output_path == source_path (atomic in-place
+    replacement) the worker must NOT attempt a second os.remove() call on the
+    same path — that would delete the freshly-converted file.
+    """
+    import shutil
+    src = str(FIXTURES / "h264_short.mkv")
+    shutil.copy(src, str(tmp_path / "h264_short.mkv"))
+    test_src = str(tmp_path / "h264_short.mkv")
+
+    with patch.object(converter, "convert_video", return_value={
+        "ok": True,
+        "output_path": test_src,   # same path — simulates atomic os.replace()
+        "output_size_mb": 0.5,
+        "saved_mb": 1.0,
+        "saved_pct": 67,
+        "encoder_used": "hevc_qsv",
+        "error": None,
+    }):
+        client.post("/api/start", json={
+            "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
+            "anime_mode": False,
+        })
+        for _ in range(30):
+            time.sleep(0.1)
+            if client.get("/api/status").get_json()["state"] == "done":
+                break
+
+    # File must still exist — the worker should not have deleted it
+    assert os.path.exists(test_src), (
+        "Worker deleted the file even though output_path == source_path"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Error tail / ffmpeg_cmd stored on failure
+# ---------------------------------------------------------------------------
+
+def test_error_tail_stored_in_job_on_failure(client, tmp_path, fresh_db):
+    """On a failed conversion the job stores error_tail and ffmpeg_cmd in the
+    per-file entry so the UI can display them in the error modal.
+    """
+    import shutil
+    src = str(FIXTURES / "h264_short.mkv")
+    shutil.copy(src, str(tmp_path / "h264_short.mkv"))
+    test_src = str(tmp_path / "h264_short.mkv")
+
+    def _failing_convert(*args, **kwargs):
+        log = kwargs.get("log", lambda m: None)
+        log("Running: ffmpeg -y -i input.mkv -c:v hevc_qsv output.mkv")
+        log("[hevc_qsv @ 0x...] Error: encoder init failed")
+        return {
+            "ok": False, "output_path": None,
+            "output_size_mb": 0, "saved_mb": 0, "saved_pct": 0,
+            "encoder_used": "", "error": "encoder init failed",
+        }
+
+    with patch.object(converter, "convert_video", _failing_convert):
+        client.post("/api/start", json={
+            "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
+            "anime_mode": False,
+        })
+        for _ in range(30):
+            time.sleep(0.1)
+            if client.get("/api/status").get_json()["state"] == "done":
+                break
+
+    status = client.get("/api/status").get_json()
+    entry  = status["files"][0]
+    assert entry["status"] == "failed"
+    assert "error_tail" in entry,  "error_tail missing from failed file entry"
+    assert len(entry["error_tail"]) > 0, "error_tail is empty"
+    assert "ffmpeg_cmd" in entry, "ffmpeg_cmd missing from failed file entry"
+    assert "ffmpeg" in entry["ffmpeg_cmd"], "ffmpeg_cmd does not contain the command"
+
+
+# ---------------------------------------------------------------------------
+# 'stopped' state after user-requested stop
+# ---------------------------------------------------------------------------
+
+def test_job_state_is_stopped_after_stop(client, tmp_path, fresh_db):
+    """After the user requests a stop, job state becomes 'stopped' (not 'done')."""
+    import shutil
+    src = str(FIXTURES / "h264_short.mkv")
+    shutil.copy(src, str(tmp_path / "h264_short.mkv"))
+    test_src = str(tmp_path / "h264_short.mkv")
+
+    encode_started = threading.Event()
+
+    def _blocking_convert(*args, **kwargs):
+        stop = kwargs.get("stop_event")
+        encode_started.set()
+        if stop:
+            stop.wait(timeout=5)
+        return {
+            "ok": False, "output_path": None,
+            "output_size_mb": 0, "saved_mb": 0, "saved_pct": 0,
+            "encoder_used": "", "error": "stopped",
+        }
+
+    with patch.object(converter, "convert_video", _blocking_convert):
+        client.post("/api/start", json={
+            "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
+            "anime_mode": False,
+        })
+        assert encode_started.wait(timeout=3), "conversion never started"
+        client.post("/api/stop")
+        for _ in range(50):
+            time.sleep(0.1)
+            state = client.get("/api/status").get_json()["state"]
+            if state in ("stopped", "done"):
+                break
+
+    assert state == "stopped", f"Expected 'stopped' but got '{state}'"
+
+
+def test_stop_mid_queue_remaining_files_stay_pending(client, tmp_path, fresh_db):
+    """Files that have not been started when Stop fires must remain 'pending'."""
+    import shutil
+    src = str(FIXTURES / "h264_short.mkv")
+    copies = []
+    for i in range(3):
+        dst = str(tmp_path / f"vid_{i}.mkv")
+        shutil.copy(src, dst)
+        copies.append(dst)
+
+    first_started = threading.Event()
+
+    def _blocking_convert(*args, **kwargs):
+        stop = kwargs.get("stop_event")
+        first_started.set()
+        if stop:
+            stop.wait(timeout=5)
+        return {
+            "ok": False, "output_path": None,
+            "output_size_mb": 0, "saved_mb": 0, "saved_pct": 0,
+            "encoder_used": "", "error": "stopped",
+        }
+
+    with patch.object(converter, "convert_video", _blocking_convert):
+        client.post("/api/start", json={
+            "files": [
+                {"full_path": c, "name": os.path.basename(c), "status": "pending"}
+                for c in copies
+            ],
+            "anime_mode": False,
+        })
+        assert first_started.wait(timeout=3), "conversion never started"
+        client.post("/api/stop")
+        for _ in range(60):
+            time.sleep(0.1)
+            state = client.get("/api/status").get_json()["state"]
+            if state in ("stopped", "done"):
+                break
+
+    status = client.get("/api/status").get_json()
+    assert status["state"] == "stopped"
+    # First file was being converted when stopped
+    assert status["files"][0]["status"] == "failed"
+    # Remaining files were never started — must stay pending
+    assert status["files"][1]["status"] == "pending", (
+        f"files[1] should be pending, got {status['files'][1]['status']}"
+    )
+    assert status["files"][2]["status"] == "pending", (
+        f"files[2] should be pending, got {status['files'][2]['status']}"
+    )

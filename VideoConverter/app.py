@@ -127,13 +127,25 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         db.mark_running(rec_id, _utcnow())
         _job_log(f"[{idx+1}/{len(files)}] {os.path.basename(full_path)}")
 
-        output_dir = os.path.join(os.path.dirname(full_path), "converted")
+        # Output goes into the same directory as the source so the converted
+        # file replaces (or sits beside) the original in-place.  When the
+        # extension is unchanged compress_simple uses os.replace() to swap
+        # the file atomically; when it changes (e.g. MKV→MP4 in anime mode)
+        # the old source is removed explicitly below.
+        output_dir = os.path.dirname(full_path)
 
         def _progress(pct: float, fps: float, eta: int) -> None:
             with _job_lock:
                 _job["progress_pct"] = pct
                 _job["fps"]          = fps
                 _job["eta_secs"]     = eta
+
+        # Per-file log capture so error details can be surfaced in the UI
+        _file_log: list[str] = []
+
+        def _capture_log(msg: str) -> None:
+            _file_log.append(msg)
+            _job_log(msg)
 
         result = converter.convert_video(
             input_path  = full_path,
@@ -142,7 +154,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             quality     = quality,
             progress_cb = _progress,
             stop_event  = _stop_event,
-            log         = _job_log,
+            log         = _capture_log,
             pid_holder  = _ffmpeg_pid,
         )
 
@@ -157,12 +169,18 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                 completed_at   = _utcnow(),
                 encoder_used   = result["encoder_used"],
             )
-            # Delete source after successful verified conversion
-            try:
-                os.remove(full_path)
-                _job_log(f"Deleted source: {full_path}")
-            except OSError as exc:
-                _job_log(f"Could not delete source: {exc}")
+            # Remove the original only when the output path differs (e.g. .mkv
+            # source replaced by .mp4 in anime mode).  When paths are identical
+            # the file was already atomically replaced by os.replace() inside
+            # compress_simple — no second removal is needed or safe.
+            out_norm = os.path.normpath(result["output_path"]) if result["output_path"] else ""
+            src_norm = os.path.normpath(full_path)
+            if out_norm and out_norm != src_norm:
+                try:
+                    os.remove(full_path)
+                    _job_log(f"Deleted source: {full_path}")
+                except OSError as exc:
+                    _job_log(f"Could not delete source: {exc}")
             with _job_lock:
                 _job["files"][idx].update({
                     "status":     "done",
@@ -172,18 +190,28 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                     "output_path": result["output_path"],
                 })
         else:
-            db.mark_failed(rec_id, result.get("error", ""), _utcnow())
+            # Harvest error details from the per-file log capture
+            ffmpeg_cmd = next(
+                (line[len("Running: "):] for line in _file_log if line.startswith("Running: ")),
+                "",
+            )
+            error_tail = "\n".join(_file_log[-50:])
+            db.mark_failed(rec_id, error_tail, _utcnow())
             with _job_lock:
-                _job["files"][idx]["status"] = "failed"
+                _job["files"][idx]["status"]     = "failed"
+                _job["files"][idx]["ffmpeg_cmd"] = ffmpeg_cmd
+                _job["files"][idx]["error_tail"] = error_tail
             _job_log(f"Failed: {result.get('error', 'unknown')}")
 
         with _job_lock:
             _job["saved_mb"] = total_saved
 
     with _job_lock:
-        _job["state"]        = "done"
+        # Use 'stopped' when the user requested cancellation so the UI can
+        # distinguish an intentional stop from a completed queue.
+        _job["state"]        = "stopped" if _stop_event.is_set() else "done"
         _job["current_file"] = ""
-        _job["progress_pct"] = 100.0
+        _job["progress_pct"] = _job["progress_pct"] if _stop_event.is_set() else 100.0
         _ffmpeg_pid[0]       = 0
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
@@ -419,6 +447,10 @@ def api_start():
     anime     = bool(data.get("anime_mode", False))
     settings  = _load_settings()
     quality   = int(settings.get("qsv_quality", config.QSV_QUALITY))
+    # Apply local_temp_dir so ffmpeg staging uses the user-configured path
+    temp_dir  = settings.get("local_temp_dir", "").strip()
+    if temp_dir:
+        config.LOCAL_TEMP_DIR = temp_dir
 
     if not files:
         return jsonify({"error": "No files provided"}), 400

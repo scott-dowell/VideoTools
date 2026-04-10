@@ -5,9 +5,10 @@ let _files        = [];   // file objects loaded by scan
 let _scanEs       = null; // active EventSource for /api/scan
 let _activeFilter = 'all';
 let _searchQuery  = '';
-let _appState     = 'idle';  // idle | scanning | ready | running | done
+let _appState     = 'idle';  // idle | scanning | ready | running | done | stopped
 let _dragSrcIndex = null;
 let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name'
+let _currentScanPath = null;  // last successfully scanned folder path
 
 // Estimation background task state
 let _estUserPaused  = false;  // user clicked the strip
@@ -78,7 +79,10 @@ function setButtonStates(state) {
   document.getElementById('startBtn').disabled  = state !== 'ready';
   document.getElementById('pauseBtn').disabled  = state !== 'running';
   document.getElementById('stopBtn').disabled   = !(state === 'running' || state === 'scanning');
-  document.getElementById('hstopBtn').disabled  = state !== 'running';
+  const cleanupBtn = document.getElementById('cleanupBtn');
+  if (cleanupBtn) cleanupBtn.disabled = (state === 'running' || state === 'scanning' || state === 'idle');
+  const rescanBtn = document.getElementById('rescanBtn');
+  if (rescanBtn) rescanBtn.disabled = !_currentScanPath || state === 'running' || state === 'scanning';
   // Enable drag handles only when queue is ready and not running
   const canDrag = (state === 'ready');
   document.querySelectorAll('#queueBody tr[id^="row-"]').forEach(tr => {
@@ -397,6 +401,9 @@ const DEMO_FILES = [
 ];
 
 function scanFolder(path) {
+  _currentScanPath = path;  // remember for re-scan and cleanup
+  const rescanBtn = document.getElementById('rescanBtn');
+  if (rescanBtn) rescanBtn.disabled = false;
   _estCancelled  = true;   // stop any in-flight estimation from previous scan
   _estUserPaused = false;
   _estAutoPaused = false;
@@ -646,6 +653,11 @@ function _pollStatus() {
         _isPaused = false;
         setButtonStates('ready');
         addLog('Queue complete. Saved ' + (s.saved_mb || 0).toFixed(1) + ' MB total.', 'ok');
+      } else if (s.state === 'stopped') {
+        _stopPolling();
+        _isPaused = false;
+        setButtonStates('ready');
+        addLog('Conversion stopped.', 'warn');
       }
     })
     .catch(() => {}); // ignore transient errors
@@ -705,17 +717,34 @@ function stopConversion() {
     .then(r => r.json())
     .then(d => {
       if (d.ok) {
-        _stopPolling();
-        _isPaused = false;
-        setButtonStates('ready');
-        addLog('Stopped.', 'warn');
+        addLog('Stopping…', 'warn');
+        // Keep polling — _pollStatus will handle the stopped→ready transition
+        // once the backend worker has actually terminated.
       }
     })
     .catch(e => addLog('Stop error: ' + e, 'err'));
 }
 
-function hardStopConversion() {
-  stopConversion();  // same backend endpoint — hard-stop is a force-kill, same /api/stop
+// ============================================================
+// Cleanup legacy folders
+// ============================================================
+function triggerCleanup() {
+  const path = _currentScanPath;
+  if (!path) { addLog('No folder selected to clean up.', 'warn'); return; }
+  fetch('/api/cleanup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    const moved   = (d.moved   || []).length;
+    const skipped = (d.skipped || []).length;
+    const errors  = (d.errors  || []).length;
+    addLog('Cleanup: ' + moved + ' moved, ' + skipped + ' skipped, ' + errors + ' errors.',
+           moved > 0 ? 'ok' : 'info');
+  })
+  .catch(e => addLog('Cleanup error: ' + e, 'err'));
 }
 
 // ============================================================
@@ -1014,8 +1043,60 @@ function saveSettings() {
     .catch(() => {});
 })();
 
+// Auto-save anime_mode whenever the navbar checkbox changes
+(function _wireAnimeModeAutoSave() {
+  const am = document.getElementById('animeMode');
+  if (am) am.addEventListener('change', function() {
+    fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anime_mode: this.checked }),
+    });
+  });
+})();
+
+// ============================================================
+// Page-load recovery — restore queue if a job is active / completed
+// ============================================================
+(function _recoverJobState() {
+  fetch('/api/status')
+    .then(r => r.json())
+    .then(s => {
+      if (!s.files || s.files.length === 0 || s.state === 'idle') return;
+      // Restore the file list from the persisted job state
+      _files = s.files.map(f => Object.assign({}, f));
+      // Guess the root folder from the first file path
+      const firstPath = (_files[0] || {}).full_path || '';
+      const folderGuess = firstPath.replace(/[\\/][^\\/]+$/, '');
+      if (folderGuess) {
+        _currentScanPath = folderGuess;
+        document.getElementById('folderPath').textContent = folderGuess;
+        const rb = document.getElementById('rescanBtn');
+        if (rb) rb.disabled = false;
+      }
+      populateTable(_files);
+      updateStats(_files);
+      if (s.state === 'running') {
+        setButtonStates('running');
+        _startPolling();
+        addLog('Reconnected to running conversion.', 'info');
+      } else {
+        setButtonStates('ready');
+        addLog('Previous job ' + s.state + '. Queue restored.', 'info');
+      }
+    })
+    .catch(() => {});
+})();
+
 // ============================================================
 // Folder browser
+// ============================================================
+// Re-scan current folder
+// ============================================================
+function rescanFolder() {
+  if (_currentScanPath) scanFolder(_currentScanPath);
+}
+
 // ============================================================
 let _selectedPath = null;
 let _modal = null;

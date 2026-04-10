@@ -124,6 +124,7 @@ def _run_ffmpeg(
             pid_holder[0] = proc.pid
 
         for line in proc.stdout:
+            line_s = line.rstrip()
             if stop_event.is_set():
                 proc.kill()
                 proc.wait()
@@ -131,7 +132,7 @@ def _run_ffmpeg(
                 return False
 
             if progress_cb and duration_secs > 0:
-                m = _PROGRESS_RE.search(line)
+                m = _PROGRESS_RE.search(line_s)
                 if m:
                     elapsed = _parse_time(m.group("time"))
                     fps     = float(m.group("fps") or 0)
@@ -142,6 +143,11 @@ def _run_ffmpeg(
                         progress_cb(pct, fps, eta_secs)
                     except Exception:
                         pass
+                    continue   # progress line — don't clutter log
+
+            # Log all non-progress, non-empty lines so errors are visible
+            if line_s:
+                log(line_s)
 
         proc.wait()
         if pid_holder is not None:

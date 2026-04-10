@@ -75,7 +75,7 @@ def fresh_db(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_walk_finds_h264_files():
-    """All six H.264 fixture files appear; hevc_skip.mkv must not."""
+    """All six H.264 fixture files appear; hevc_skip.mkv also appears (HEVC re-encoding is allowed)."""
     folders, done, _, _ = _collect(FIXTURES_DIR)
     files = _all_files(folders)
     names = {f["name"] for f in files}
@@ -88,14 +88,14 @@ def test_walk_finds_h264_files():
         "h264_hi10.mkv",
         "h264_mp4_aac.mp4",
     }
-    assert h264_names == names
+    assert h264_names.issubset(names), f"Missing H.264 files: {h264_names - names}"
 
 
-def test_walk_skips_hevc():
-    """hevc_skip.mkv must never appear in any folder event."""
+def test_walk_includes_hevc():
+    """hevc_skip.mkv must appear in scan results — HEVC files are re-encodeable."""
     folders, _, _, _ = _collect(FIXTURES_DIR)
     names = {f["name"] for f in _all_files(folders)}
-    assert "hevc_skip.mkv" not in names
+    assert "hevc_skip.mkv" in names
 
 
 def test_walk_finds_all_video_extensions():
@@ -126,11 +126,11 @@ def test_walk_hi10_flagged():
 
 
 def test_walk_done_event():
-    """Final event is type='done' with total_files == 6."""
+    """Final event is type='done' with total_files == 7 (6 H.264 + 1 HEVC)."""
     folders, done, _, _ = _collect(FIXTURES_DIR)
     assert done is not None
     assert done["type"] == "done"
-    assert done["total_files"] == 6
+    assert done["total_files"] == 7
     assert done["total_mb"] > 0
 
 
@@ -293,7 +293,7 @@ def test_api_scan_sse_content_type(client):
 # ---------------------------------------------------------------------------
 
 def test_walk_skips_av1(tmp_path):
-    """Files whose first video stream is AV1 are excluded (already optimal)."""
+    """Files whose first video stream is AV1 are excluded (most efficient codec — no gains possible)."""
     from unittest.mock import patch
 
     av1_file = tmp_path / "av1_video.mkv"

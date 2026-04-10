@@ -27,7 +27,7 @@ File dict shape (one entry per qualifying video file):
   }
 
 Skip rules:
-  1. First video stream codec is hevc / av1 — already encoded.
+  1. First video stream codec is av1 — already at optimal efficiency.
   2. DB record for (path, mtime) has status='done'  — already converted.
   3. DB record has status='running'                 — in progress (emits warning).
 
@@ -49,7 +49,7 @@ import db
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".m2ts"}
 
-_SKIP_CODECS = {"hevc", "av1", "hevc_cuvid", "av1_cuvid"}
+_SKIP_CODECS = {"av1", "av1_cuvid"}  # AV1 only — HEVC files may still be inefficiently encoded
 
 _CODEC_DISPLAY: dict[str, str] = {
     "h264":        "H264",
@@ -311,7 +311,7 @@ def walk(root: str) -> Generator[dict, None, None]:
 
             parsed = _parse_probe(probe_data)
 
-            # ---- codec skip (already HEVC / AV1) ----
+            # ---- codec skip (AV1 — already at optimal efficiency) ----
             if parsed["codec"] in _SKIP_CODECS:
                 continue
 

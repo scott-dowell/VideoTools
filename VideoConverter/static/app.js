@@ -441,9 +441,17 @@ function scanFolder(path) {
       _scanEs.close(); _scanEs = null;
       const totalGB = (msg.total_mb / 1024).toFixed(1);
       document.getElementById('totalSizeLabel').textContent = totalGB + ' GB total';
-      addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB', 'ok');
-      setButtonStates('ready');
-      runEstimation(_files);
+      if (_files.length === 0) {
+        document.getElementById('queueBody').innerHTML =
+          '<tr><td colspan="13" class="text-center text-secondary py-4">' +
+          'No unprocessed videos found.</td></tr>';
+        addLog('Scan complete \u2014 no unprocessed videos found.', 'ok');
+        setButtonStates('idle');
+      } else {
+        addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB', 'ok');
+        setButtonStates('ready');
+        runEstimation(_files);
+      }
     } else if (msg.type === 'warning') {
       addLog('Skipped: ' + msg.message, 'warn');
     } else if (msg.type === 'error') {

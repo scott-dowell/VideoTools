@@ -159,6 +159,12 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             _file_log.append(msg)
             _job_log(msg)
 
+        # Hash the source before encoding so we can recognise it later even
+        # if it's moved to a different drive (resetting mtime).
+        src_hash = db.hash_file_head(full_path)
+        if src_hash:
+            db.update_source_hash(rec_id, src_hash)
+
         result = converter.convert_video(
             input_path  = full_path,
             output_dir  = output_dir,
@@ -172,6 +178,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
 
         if result["ok"]:
             total_saved += result["saved_mb"]
+            out_hash = db.hash_file_head(result["output_path"]) if result.get("output_path") else None
             db.mark_done(
                 record_id      = rec_id,
                 output_path    = result["output_path"],
@@ -180,6 +187,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                 saved_pct      = result["saved_pct"],
                 completed_at   = _utcnow(),
                 encoder_used   = result["encoder_used"],
+                output_hash    = out_hash,
             )
             # Remove the original only when the output path differs (e.g. .mkv
             # source replaced by .mp4 in anime mode).  When paths are identical

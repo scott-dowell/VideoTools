@@ -241,6 +241,12 @@ def _db_lookup(path: str, mtime: float, size_bytes: int) -> str | None:
         fp_record = db.get_record_by_fingerprint(mtime, size_bytes)
         if fp_record:
             return fp_record["status"]
+        # Fallback: cross-drive copy resets mtime — compute 2 MB hash as last resort.
+        file_hash = db.hash_file_head(path)
+        if file_hash:
+            hash_record = db.get_record_by_hash(file_hash)
+            if hash_record:
+                return hash_record["status"]
         return None
     except Exception:
         return None

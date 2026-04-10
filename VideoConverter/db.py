@@ -17,8 +17,10 @@ Table: conversions
   source_size_bytes INTEGER            -- exact file size; used for move/rename detection
   source_size_mb    REAL
   source_codec      TEXT
+  source_hash       TEXT               -- SHA-256 of first 2 MB of source file
   output_path       TEXT
   output_size_mb    REAL
+  output_hash       TEXT               -- SHA-256 of first 2 MB of output file
   saved_mb          REAL
   saved_pct         INTEGER
   status            TEXT    NOT NULL DEFAULT 'pending'
@@ -34,10 +36,14 @@ fresh pending row, allowing re-processing when a file is replaced in-place.
 
 Fingerprint lookup on (source_mtime, source_size_bytes) — survives folder renames
 and moves because mtime and exact size are preserved by the filesystem.
+
+Hash lookup on (source_hash | output_hash) — survives cross-drive copies that
+reset mtime. Hashes only the first 2 MB so the cost is negligible (~4 ms/SSD).
 """
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from contextlib import contextmanager
 
@@ -66,8 +72,10 @@ def init_db(db_path: str) -> None:
                 source_size_bytes INTEGER,
                 source_size_mb    REAL,
                 source_codec      TEXT,
+                source_hash       TEXT,
                 output_path       TEXT,
                 output_size_mb    REAL,
+                output_hash       TEXT,
                 saved_mb          REAL,
                 saved_pct         INTEGER,
                 status            TEXT    NOT NULL DEFAULT 'pending',
@@ -81,10 +89,15 @@ def init_db(db_path: str) -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS ux_conversions_path_mtime
                 ON conversions (source_path, source_mtime);
         """)
-        # Migration: add source_size_bytes to existing databases that pre-date this column.
+        # Migration: add columns to existing databases that pre-date them.
         existing = {row[1] for row in conn.execute("PRAGMA table_info(conversions)")}
-        if "source_size_bytes" not in existing:
-            conn.execute("ALTER TABLE conversions ADD COLUMN source_size_bytes INTEGER")
+        for col, typedef in [
+            ("source_size_bytes", "INTEGER"),
+            ("source_hash",       "TEXT"),
+            ("output_hash",       "TEXT"),
+        ]:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} {typedef}")
 
 
 @contextmanager
@@ -102,6 +115,21 @@ def _connect():
         raise
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# File hashing
+# ---------------------------------------------------------------------------
+
+def hash_file_head(path: str, head_bytes: int = 2 * 1024 * 1024) -> str | None:
+    """Return SHA-256 hex digest of the first `head_bytes` of a file, or None on error."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            h.update(f.read(head_bytes))
+        return h.hexdigest()
+    except OSError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +176,32 @@ def get_record_by_fingerprint(source_mtime: float, source_size_bytes: int) -> di
     return dict(row) if row else None
 
 
+def get_record_by_hash(content_hash: str) -> dict | None:
+    """
+    Return a done record whose source_hash OR output_hash matches.
+    Used as a last-resort fallback when path and fingerprint lookups both miss
+    (e.g. cross-drive copy that reset mtime).
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM conversions
+             WHERE (source_hash = ? OR output_hash = ?) AND status = 'done'
+            """,
+            (content_hash, content_hash),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_source_hash(record_id: int, source_hash: str) -> None:
+    """Store the source file hash on an existing record."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE conversions SET source_hash = ? WHERE id = ?",
+            (source_hash, record_id),
+        )
+
+
 def upsert_pending(
     source_path: str,
     source_mtime: float,
@@ -192,6 +246,7 @@ def mark_done(
     saved_pct: int,
     completed_at: str,
     encoder_used: str | None = None,
+    output_hash: str | None = None,
 ) -> None:
     """Flip a record to status='done' and fill in output metrics."""
     with _connect() as conn:
@@ -204,11 +259,12 @@ def mark_done(
                    saved_mb       = ?,
                    saved_pct      = ?,
                    completed_at   = ?,
-                   encoder_used   = ?
+                   encoder_used   = ?,
+                   output_hash    = ?
              WHERE id = ?
             """,
             (output_path, output_size_mb, saved_mb, saved_pct,
-             completed_at, encoder_used, record_id),
+             completed_at, encoder_used, output_hash, record_id),
         )
 
 

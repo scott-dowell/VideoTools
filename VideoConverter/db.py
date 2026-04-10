@@ -99,6 +99,10 @@ def init_db(db_path: str) -> None:
             if col not in existing:
                 conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} {typedef}")
 
+        # Reset any records left in 'running' state from a previous session —
+        # they can never complete now and would block re-queuing on the next scan.
+        conn.execute("UPDATE conversions SET status='queued', started_at=NULL WHERE status='running'")
+
 
 @contextmanager
 def _connect():

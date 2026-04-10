@@ -79,8 +79,8 @@ function setButtonStates(state) {
   document.getElementById('startBtn').disabled  = state !== 'ready';
   document.getElementById('pauseBtn').disabled  = state !== 'running';
   document.getElementById('stopBtn').disabled   = !(state === 'running' || state === 'scanning');
-  const cleanupBtn = document.getElementById('cleanupBtn');
-  if (cleanupBtn) cleanupBtn.disabled = (state === 'running' || state === 'scanning' || state === 'idle');
+  const hstopBtn = document.getElementById('hstopBtn');
+  if (hstopBtn) hstopBtn.disabled = state !== 'running';
   const rescanBtn = document.getElementById('rescanBtn');
   if (rescanBtn) rescanBtn.disabled = !_currentScanPath || state === 'running' || state === 'scanning';
   // Enable drag handles only when queue is ready and not running
@@ -571,7 +571,7 @@ let _isPaused  = false;
 
 function _startPolling() {
   if (_pollTimer) return;
-  _pollTimer = setInterval(_pollStatus, 1000);
+  _pollTimer = setInterval(_pollStatus, 500);
 }
 
 function _stopPolling() {
@@ -725,26 +725,13 @@ function stopConversion() {
     .catch(e => addLog('Stop error: ' + e, 'err'));
 }
 
-// ============================================================
-// Cleanup legacy folders
-// ============================================================
-function triggerCleanup() {
-  const path = _currentScanPath;
-  if (!path) { addLog('No folder selected to clean up.', 'warn'); return; }
-  fetch('/api/cleanup', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path }),
-  })
-  .then(r => r.json())
-  .then(d => {
-    const moved   = (d.moved   || []).length;
-    const skipped = (d.skipped || []).length;
-    const errors  = (d.errors  || []).length;
-    addLog('Cleanup: ' + moved + ' moved, ' + skipped + ' skipped, ' + errors + ' errors.',
-           moved > 0 ? 'ok' : 'info');
-  })
-  .catch(e => addLog('Cleanup error: ' + e, 'err'));
+function hardStopConversion() {
+  fetch('/api/hardstop', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) addLog('Hard stop — ffmpeg killed.', 'warn');
+    })
+    .catch(e => addLog('Hard stop error: ' + e, 'err'));
 }
 
 // ============================================================

@@ -41,6 +41,7 @@ ProgressCb = Callable[[float, float, int], None]   # pct, fps, eta_secs
 def _qsv_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
     return [
         "ffmpeg", "-y",
+        "-stats_period", "1",
         "-i", input_path,
         "-c:v", "hevc_qsv",
         "-global_quality", str(quality),
@@ -56,6 +57,7 @@ def _qsv_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
 def _sw_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
     return [
         "ffmpeg", "-y",
+        "-stats_period", "1",
         "-i", input_path,
         "-c:v", "libx265",
         "-crf", str(quality),

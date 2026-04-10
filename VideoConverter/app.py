@@ -77,6 +77,16 @@ def _resume_ffmpeg() -> None:
             ctypes.windll.kernel32.CloseHandle(h)
 
 
+def _kill_ffmpeg() -> None:
+    """Immediately terminate the ffmpeg child process (Hard Stop)."""
+    pid = _ffmpeg_pid[0]
+    if pid:
+        h = ctypes.windll.kernel32.OpenProcess(_PROCESS_ALL_ACCESS, False, pid)
+        if h:
+            ctypes.windll.kernel32.TerminateProcess(h, 1)
+            ctypes.windll.kernel32.CloseHandle(h)
+
+
 def _job_log(msg: str) -> None:
     with _job_lock:
         _job["log"].append(msg)
@@ -493,6 +503,17 @@ def api_stop():
     """Signal the queue worker to stop after the current file (or kill mid-encode)."""
     _stop_event.set()
     _resume_ffmpeg()   # unblock if paused so it can see the stop_event
+    with _job_lock:
+        _job["paused"] = False
+    return jsonify({"ok": True})
+
+
+@app.route("/api/hardstop", methods=["POST"])
+def api_hardstop():
+    """Immediately kill the ffmpeg process and stop the queue."""
+    _stop_event.set()
+    _resume_ffmpeg()   # unblock if paused first, then kill
+    _kill_ffmpeg()
     with _job_lock:
         _job["paused"] = False
     return jsonify({"ok": True})

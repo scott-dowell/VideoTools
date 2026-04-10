@@ -1,0 +1,7 @@
+{
+  "qsv_quality": 30,
+  "sw_hevc_crf": 28,
+  "local_temp_dir": "C:\\Temp\\vc_working",
+  "default_sort": "bitrate",
+  "anime_mode": true
+}

@@ -11,25 +11,29 @@ DB file: VideoConverter/conversions.db  (next to settings.json)
 Schema
 ------
 Table: conversions
-  id              INTEGER PRIMARY KEY
-  source_path     TEXT    NOT NULL
-  source_mtime    REAL    NOT NULL   -- os.path.getmtime(); re-processing key
-  source_size_mb  REAL
-  source_codec    TEXT
-  output_path     TEXT
-  output_size_mb  REAL
-  saved_mb        REAL
-  saved_pct       INTEGER
-  status          TEXT    NOT NULL DEFAULT 'pending'
-                          -- pending | running | done | failed | skipped
-  anime_mode      INTEGER DEFAULT 0
-  encoder_used    TEXT
-  started_at      TEXT               -- ISO-8601 UTC
-  completed_at    TEXT
-  error_tail      TEXT               -- last ~2 KB of ffmpeg stderr on failure
+  id                INTEGER PRIMARY KEY
+  source_path       TEXT    NOT NULL
+  source_mtime      REAL    NOT NULL   -- os.path.getmtime(); re-processing key
+  source_size_bytes INTEGER            -- exact file size; used for move/rename detection
+  source_size_mb    REAL
+  source_codec      TEXT
+  output_path       TEXT
+  output_size_mb    REAL
+  saved_mb          REAL
+  saved_pct         INTEGER
+  status            TEXT    NOT NULL DEFAULT 'pending'
+                            -- pending | running | done | failed | skipped
+  anime_mode        INTEGER DEFAULT 0
+  encoder_used      TEXT
+  started_at        TEXT               -- ISO-8601 UTC
+  completed_at      TEXT
+  error_tail        TEXT               -- last ~2 KB of ffmpeg stderr on failure
 
 Unique index on (source_path, source_mtime) — same path with a NEW mtime gets a
 fresh pending row, allowing re-processing when a file is replaced in-place.
+
+Fingerprint lookup on (source_mtime, source_size_bytes) — survives folder renames
+and moves because mtime and exact size are preserved by the filesystem.
 """
 
 from __future__ import annotations
@@ -56,26 +60,31 @@ def init_db(db_path: str) -> None:
     with _connect() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS conversions (
-                id              INTEGER PRIMARY KEY,
-                source_path     TEXT    NOT NULL,
-                source_mtime    REAL    NOT NULL,
-                source_size_mb  REAL,
-                source_codec    TEXT,
-                output_path     TEXT,
-                output_size_mb  REAL,
-                saved_mb        REAL,
-                saved_pct       INTEGER,
-                status          TEXT    NOT NULL DEFAULT 'pending',
-                anime_mode      INTEGER DEFAULT 0,
-                encoder_used    TEXT,
-                started_at      TEXT,
-                completed_at    TEXT,
-                error_tail      TEXT
+                id                INTEGER PRIMARY KEY,
+                source_path       TEXT    NOT NULL,
+                source_mtime      REAL    NOT NULL,
+                source_size_bytes INTEGER,
+                source_size_mb    REAL,
+                source_codec      TEXT,
+                output_path       TEXT,
+                output_size_mb    REAL,
+                saved_mb          REAL,
+                saved_pct         INTEGER,
+                status            TEXT    NOT NULL DEFAULT 'pending',
+                anime_mode        INTEGER DEFAULT 0,
+                encoder_used      TEXT,
+                started_at        TEXT,
+                completed_at      TEXT,
+                error_tail        TEXT
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS ux_conversions_path_mtime
                 ON conversions (source_path, source_mtime);
         """)
+        # Migration: add source_size_bytes to existing databases that pre-date this column.
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(conversions)")}
+        if "source_size_bytes" not in existing:
+            conn.execute("ALTER TABLE conversions ADD COLUMN source_size_bytes INTEGER")
 
 
 @contextmanager
@@ -126,9 +135,23 @@ def get_record_by_output(output_path: str) -> dict | None:
     return dict(row) if row else None
 
 
+def get_record_by_fingerprint(source_mtime: float, source_size_bytes: int) -> dict | None:
+    """
+    Return a done record matching (source_mtime, source_size_bytes).
+    Survives folder renames/moves because mtime and exact size are preserved.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM conversions WHERE source_mtime = ? AND source_size_bytes = ? AND status = 'done'",
+            (source_mtime, source_size_bytes),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def upsert_pending(
     source_path: str,
     source_mtime: float,
+    source_size_bytes: int | None = None,
     source_size_mb: float | None = None,
     source_codec: str | None = None,
 ) -> int:
@@ -139,11 +162,11 @@ def upsert_pending(
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO conversions (source_path, source_mtime, source_size_mb, source_codec, status)
-            VALUES (?, ?, ?, ?, 'pending')
+            INSERT INTO conversions (source_path, source_mtime, source_size_bytes, source_size_mb, source_codec, status)
+            VALUES (?, ?, ?, ?, ?, 'pending')
             ON CONFLICT (source_path, source_mtime) DO NOTHING
             """,
-            (source_path, source_mtime, source_size_mb, source_codec),
+            (source_path, source_mtime, source_size_bytes, source_size_mb, source_codec),
         )
         row = conn.execute(
             "SELECT id FROM conversions WHERE source_path = ? AND source_mtime = ?",

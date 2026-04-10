@@ -55,7 +55,12 @@ def test_db_init_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_upsert_pending_inserts_new_row(fresh_db):
-    record_id = db.upsert_pending("/data/show/ep01.mkv", 1_700_000_000.0, 1200.5, "h264")
+    record_id = db.upsert_pending(
+        "/data/show/ep01.mkv", 1_700_000_000.0,
+        source_size_bytes=1_258_291_200,
+        source_size_mb=1200.5,
+        source_codec="h264",
+    )
     assert isinstance(record_id, int)
     assert record_id > 0
 
@@ -64,6 +69,7 @@ def test_upsert_pending_inserts_new_row(fresh_db):
     assert row["status"] == "pending"
     assert row["source_codec"] == "h264"
     assert abs(row["source_size_mb"] - 1200.5) < 0.01
+    assert row["source_size_bytes"] == 1_258_291_200
 
 
 def test_upsert_pending_idempotent(fresh_db):
@@ -187,3 +193,37 @@ def test_mtime_change_creates_new_pending_record(fresh_db):
     new_row = db.get_record("/data/ep.mkv", new_mtime)
     assert old_row["status"] == "done"
     assert new_row["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# get_record_by_fingerprint
+# ---------------------------------------------------------------------------
+
+def test_get_record_by_fingerprint_finds_done_record(fresh_db):
+    """Fingerprint lookup finds a done record by (mtime, size_bytes)."""
+    rec_id = db.upsert_pending(
+        "/original/folder/ep01.mkv", 1_700_000_000.0,
+        source_size_bytes=417_333_248,
+    )
+    db.mark_done(rec_id, "/original/folder/ep01.mp4", 138.9, 258.6, 65,
+                 "2026-04-10T10:00:00Z", "hevc_qsv")
+
+    # Simulate folder rename: same mtime + size, different path
+    row = db.get_record_by_fingerprint(1_700_000_000.0, 417_333_248)
+    assert row is not None
+    assert row["status"] == "done"
+
+
+def test_get_record_by_fingerprint_miss(fresh_db):
+    """Returns None when no matching done record exists."""
+    assert db.get_record_by_fingerprint(1_700_000_000.0, 417_333_248) is None
+
+
+def test_get_record_by_fingerprint_ignores_non_done(fresh_db):
+    """Pending/failed records are not returned by fingerprint lookup."""
+    rec_id = db.upsert_pending(
+        "/folder/ep01.mkv", 1_700_000_000.0,
+        source_size_bytes=417_333_248,
+    )
+    row = db.get_record_by_fingerprint(1_700_000_000.0, 417_333_248)
+    assert row is None

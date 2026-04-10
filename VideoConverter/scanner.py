@@ -217,11 +217,15 @@ def _parse_probe(probe: dict) -> dict:
     }
 
 
-def _db_lookup(path: str, mtime: float) -> str | None:
+def _db_lookup(path: str, mtime: float, size_bytes: int) -> str | None:
     """
-    Return the DB status for (path, mtime), or None if no record / DB unavailable.
-    Also checks output_path so that files which changed extension (e.g. MKV→MP4
-    in anime mode) are recognised as already converted.
+    Return the DB status for this file, or None if no record / DB unavailable.
+
+    Lookup order:
+      1. Exact (source_path, source_mtime) match — normal case.
+      2. output_path match — file changed extension (e.g. MKV→MP4 in anime mode).
+      3. Fingerprint (source_mtime, source_size_bytes) match — file was moved/renamed.
+
     Defensive: any exception is treated as 'no record'.
     """
     try:
@@ -233,6 +237,10 @@ def _db_lookup(path: str, mtime: float) -> str | None:
         out_record = db.get_record_by_output(path)
         if out_record:
             return out_record["status"]
+        # Fallback: folder/file was renamed — mtime and exact size are unchanged.
+        fp_record = db.get_record_by_fingerprint(mtime, size_bytes)
+        if fp_record:
+            return fp_record["status"]
         return None
     except Exception:
         return None
@@ -297,7 +305,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                 continue
 
             # ---- DB skip check ----
-            db_status = _db_lookup(full_path, mtime)
+            db_status = _db_lookup(full_path, mtime, size_bytes)
             if db_status == "done":
                 continue                       # silently skip committed conversions
             if db_status == "running":

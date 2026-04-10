@@ -108,8 +108,9 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
 
         full_path = file_info["full_path"]
         try:
-            mtime = os.path.getmtime(full_path)
-            size_mb = os.path.getsize(full_path) / (1024 * 1024)
+            mtime      = os.path.getmtime(full_path)
+            size_bytes = os.path.getsize(full_path)
+            size_mb    = size_bytes / (1024 * 1024)
         except OSError as exc:
             _job_log(f"Skipped {full_path}: {exc}")
             with _job_lock:
@@ -119,10 +120,11 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         # Ensure a DB record exists for this file
         codec = (file_info.get("streams") or {}).get("video", {}) or {}
         rec_id = db.upsert_pending(
-            source_path   = full_path,
-            source_mtime  = mtime,
-            source_size_mb = size_mb,
-            source_codec  = codec.get("codec") if isinstance(codec, dict) else None,
+            source_path       = full_path,
+            source_mtime      = mtime,
+            source_size_bytes = size_bytes,
+            source_size_mb    = size_mb,
+            source_codec      = codec.get("codec") if isinstance(codec, dict) else None,
         )
 
         with _job_lock:

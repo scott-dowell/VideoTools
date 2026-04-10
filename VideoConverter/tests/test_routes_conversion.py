@@ -286,3 +286,67 @@ def test_db_failed_on_error(client, tmp_path, fresh_db):
     conn.close()
     assert rows
     assert rows[0][0] == "failed"
+    # Critical: source file must NOT be deleted after a failed conversion
+    assert os.path.exists(test_src), "Source file was deleted despite a failed conversion"
+
+
+def test_failed_conversion_source_not_deleted(client, tmp_path, fresh_db):
+    """Source video is NEVER deleted when conversion returns ok=False.
+
+    This is a safety-critical invariant: no video should be discarded
+    unless the output has been successfully verified.
+    """
+    src = str(FIXTURES / "h264_short.mkv")
+    import shutil
+    shutil.copy(src, str(tmp_path / "h264_short.mkv"))
+    test_src = str(tmp_path / "h264_short.mkv")
+
+    original_size = os.path.getsize(test_src)
+
+    with patch.object(converter, "convert_video", return_value={
+        "ok": False, "output_path": None,
+        "output_size_mb": 0, "saved_mb": 0, "saved_pct": 0,
+        "encoder_used": "", "error": "simulated encoder failure",
+    }):
+        client.post("/api/start", json={
+            "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
+            "anime_mode": False,
+        })
+        for _ in range(30):
+            time.sleep(0.1)
+            if client.get("/api/status").get_json()["state"] == "done":
+                break
+
+    assert os.path.exists(test_src), "Source file was deleted despite conversion failure"
+    assert os.path.getsize(test_src) == original_size, "Source file was modified"
+
+
+def test_failed_conversion_source_not_deleted_multiple_files(client, tmp_path, fresh_db):
+    """No source file from a multi-file queue is deleted when all conversions fail."""
+    src = str(FIXTURES / "h264_short.mkv")
+    import shutil
+    sources = []
+    for i in range(3):
+        dest = str(tmp_path / f"video_{i}.mkv")
+        shutil.copy(src, dest)
+        sources.append(dest)
+
+    with patch.object(converter, "convert_video", return_value={
+        "ok": False, "output_path": None,
+        "output_size_mb": 0, "saved_mb": 0, "saved_pct": 0,
+        "encoder_used": "", "error": "simulated failure",
+    }):
+        client.post("/api/start", json={
+            "files": [
+                {"full_path": s, "name": os.path.basename(s), "status": "pending"}
+                for s in sources
+            ],
+            "anime_mode": False,
+        })
+        for _ in range(60):
+            time.sleep(0.1)
+            if client.get("/api/status").get_json()["state"] == "done":
+                break
+
+    for s in sources:
+        assert os.path.exists(s), f"Source file was deleted after failed conversion: {s}"

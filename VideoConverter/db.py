@@ -112,6 +112,20 @@ def get_record(source_path: str, source_mtime: float) -> dict | None:
     return dict(row) if row else None
 
 
+def get_record_by_output(output_path: str) -> dict | None:
+    """
+    Return a done record whose output_path matches, normalised to forward slashes.
+    Used by the scanner to recognise already-converted files that changed extension.
+    """
+    normalised = output_path.replace("\\", "/")
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM conversions WHERE REPLACE(output_path, '\\', '/') = ? AND status = 'done'",
+            (normalised,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def upsert_pending(
     source_path: str,
     source_mtime: float,

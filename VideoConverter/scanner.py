@@ -220,11 +220,20 @@ def _parse_probe(probe: dict) -> dict:
 def _db_lookup(path: str, mtime: float) -> str | None:
     """
     Return the DB status for (path, mtime), or None if no record / DB unavailable.
+    Also checks output_path so that files which changed extension (e.g. MKV→MP4
+    in anime mode) are recognised as already converted.
     Defensive: any exception is treated as 'no record'.
     """
     try:
         record = db.get_record(path, mtime)
-        return record["status"] if record else None
+        if record:
+            return record["status"]
+        # Fallback: the file on disk may be the *output* of a completed conversion
+        # (e.g. source was .mkv, output is .mp4 sitting in the same folder).
+        out_record = db.get_record_by_output(path)
+        if out_record:
+            return out_record["status"]
+        return None
     except Exception:
         return None
 

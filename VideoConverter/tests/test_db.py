@@ -91,6 +91,31 @@ def test_upsert_pending_different_mtime_new_row(fresh_db):
     assert row_new is not None
 
 
+def test_upsert_pending_stores_anime_mode(fresh_db):
+    """anime_mode=True is persisted on insert."""
+    import sqlite3
+    db.upsert_pending("/data/ep.mkv", 1_000.0, anime_mode=True)
+    with sqlite3.connect(fresh_db) as conn:
+        row = conn.execute(
+            "SELECT anime_mode FROM conversions WHERE source_path=?", ("/data/ep.mkv",)
+        ).fetchone()
+    assert row is not None
+    assert row[0] == 1
+
+
+def test_upsert_pending_updates_anime_mode_on_conflict(fresh_db):
+    """Re-queueing the same (path, mtime) with a different anime_mode updates the column."""
+    import sqlite3
+    db.upsert_pending("/data/ep.mkv", 1_000.0, anime_mode=False)
+    db.upsert_pending("/data/ep.mkv", 1_000.0, anime_mode=True)   # same key
+    with sqlite3.connect(fresh_db) as conn:
+        row = conn.execute(
+            "SELECT anime_mode FROM conversions WHERE source_path=?", ("/data/ep.mkv",)
+        ).fetchone()
+    assert row is not None
+    assert row[0] == 1   # updated, not left at 0
+
+
 # ---------------------------------------------------------------------------
 # get_record
 # ---------------------------------------------------------------------------

@@ -125,6 +125,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             source_size_bytes = size_bytes,
             source_size_mb    = size_mb,
             source_codec      = codec.get("codec") if isinstance(codec, dict) else None,
+            anime_mode        = anime_mode,
         )
 
         with _job_lock:

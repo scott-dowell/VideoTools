@@ -212,6 +212,7 @@ def upsert_pending(
     source_size_bytes: int | None = None,
     source_size_mb: float | None = None,
     source_codec: str | None = None,
+    anime_mode: bool = False,
 ) -> int:
     """
     Insert a new pending row or return the existing row's id if it already exists.
@@ -220,11 +221,11 @@ def upsert_pending(
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO conversions (source_path, source_mtime, source_size_bytes, source_size_mb, source_codec, status)
-            VALUES (?, ?, ?, ?, ?, 'pending')
-            ON CONFLICT (source_path, source_mtime) DO NOTHING
+            INSERT INTO conversions (source_path, source_mtime, source_size_bytes, source_size_mb, source_codec, anime_mode, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending')
+            ON CONFLICT (source_path, source_mtime) DO UPDATE SET anime_mode = excluded.anime_mode
             """,
-            (source_path, source_mtime, source_size_bytes, source_size_mb, source_codec),
+            (source_path, source_mtime, source_size_bytes, source_size_mb, source_codec, int(anime_mode)),
         )
         row = conn.execute(
             "SELECT id FROM conversions WHERE source_path = ? AND source_mtime = ?",

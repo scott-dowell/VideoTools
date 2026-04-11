@@ -352,6 +352,46 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
 # Output integrity check
 # ---------------------------------------------------------------------------
 
+def _verify_tracks_preserved(src_path: str, out_path: str) -> tuple[bool, str]:
+    """
+    Probe source and output with ffprobe and verify that no audio or subtitle
+    tracks were silently dropped.
+
+    Rules:
+      - Output must have at least as many audio streams as the source.
+      - If the source has any subtitle streams, the output must have at least one.
+
+    Returns (True, "") on pass, (False, reason) on fail.
+    """
+    def _probe_streams(path: str) -> list:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        return json.loads(r.stdout).get("streams", [])
+
+    try:
+        src_streams = _probe_streams(src_path)
+        out_streams = _probe_streams(out_path)
+    except Exception as exc:
+        return False, f"ffprobe error during track verification: {exc}"
+
+    src_audio = sum(1 for s in src_streams if s.get("codec_type") == "audio")
+    out_audio = sum(1 for s in out_streams if s.get("codec_type") == "audio")
+    src_subs  = sum(1 for s in src_streams if s.get("codec_type") == "subtitle")
+    out_subs  = sum(1 for s in out_streams if s.get("codec_type") == "subtitle")
+
+    if out_audio < src_audio:
+        return False, (
+            f"audio tracks dropped: source had {src_audio}, output has {out_audio}"
+        )
+    if src_subs > 0 and out_subs == 0:
+        return False, (
+            f"subtitles lost: source had {src_subs} subtitle track(s), output has none"
+        )
+    return True, ""
+
+
 def _verify_output(output_path: str, src_duration: float) -> tuple[bool, str]:
     """
     Sanity-check the encoded output via ffprobe.

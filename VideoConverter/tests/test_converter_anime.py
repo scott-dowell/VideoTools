@@ -368,3 +368,88 @@ def test_remux_bitmap_sub_no_deps_fails(tmp_path):
     assert any("error" in m.lower() for m in msgs), "Expected ERROR message in log"
     # Must not produce any output file
     assert not list(Path(out_dir).glob("*.mp4")), "Must not produce output when aborting"
+
+
+# ===========================================================================
+# _verify_tracks_preserved tests
+# ===========================================================================
+
+def _make_probe_result(audio_count: int, sub_count: int) -> str:
+    """Return a minimal ffprobe JSON string for mocking."""
+    import json as _json
+    streams = (
+        [{"codec_type": "video", "codec_name": "hevc"}]
+        + [{"codec_type": "audio", "codec_name": "aac"}] * audio_count
+        + [{"codec_type": "subtitle", "codec_name": "mov_text"}] * sub_count
+    )
+    return _json.dumps({"streams": streams})
+
+
+def test_verify_tracks_ok(tmp_path):
+    """Matching audio + sub counts → passes."""
+    from unittest.mock import patch, MagicMock
+    src = str(tmp_path / "src.mkv")
+    out = str(tmp_path / "out.mp4")
+    # Create dummy files so exists check passes (not needed here — ffprobe is mocked)
+    Path(src).write_bytes(b"x")
+    Path(out).write_bytes(b"x")
+
+    same_result = _make_probe_result(audio_count=2, sub_count=1)
+    mock_run = MagicMock()
+    mock_run.return_value.stdout = same_result
+    with patch("converter.subprocess.run", mock_run):
+        ok, reason = converter._verify_tracks_preserved(src, out)
+    assert ok is True, f"Expected pass but got: {reason}"
+
+
+def test_verify_tracks_audio_dropped(tmp_path):
+    """Fewer audio tracks in output → fails."""
+    from unittest.mock import patch, MagicMock
+    src = str(tmp_path / "src.mkv")
+    out = str(tmp_path / "out.mp4")
+
+    call_count = [0]
+    def side_effect(*args, **kwargs):
+        m = MagicMock()
+        # First call = src (2 audio), second = out (1 audio)
+        m.stdout = _make_probe_result(2, 1) if call_count[0] == 0 else _make_probe_result(1, 1)
+        call_count[0] += 1
+        return m
+
+    with patch("converter.subprocess.run", side_effect=side_effect):
+        ok, reason = converter._verify_tracks_preserved(src, out)
+    assert ok is False
+    assert "audio" in reason.lower()
+
+
+def test_verify_tracks_subs_lost(tmp_path):
+    """Source had subs, output has none → fails."""
+    from unittest.mock import patch, MagicMock
+    src = str(tmp_path / "src.mkv")
+    out = str(tmp_path / "out.mp4")
+
+    call_count = [0]
+    def side_effect(*args, **kwargs):
+        m = MagicMock()
+        m.stdout = _make_probe_result(2, 1) if call_count[0] == 0 else _make_probe_result(2, 0)
+        call_count[0] += 1
+        return m
+
+    with patch("converter.subprocess.run", side_effect=side_effect):
+        ok, reason = converter._verify_tracks_preserved(src, out)
+    assert ok is False
+    assert "subtitle" in reason.lower() or "sub" in reason.lower()
+
+
+def test_verify_tracks_no_subs_in_source_ok(tmp_path):
+    """Source with no subs and output with no subs is fine (hardsubbed source)."""
+    from unittest.mock import patch, MagicMock
+    src = str(tmp_path / "src.mkv")
+    out = str(tmp_path / "out.mp4")
+
+    same_result = _make_probe_result(audio_count=1, sub_count=0)
+    mock_run = MagicMock()
+    mock_run.return_value.stdout = same_result
+    with patch("converter.subprocess.run", mock_run):
+        ok, reason = converter._verify_tracks_preserved(src, out)
+    assert ok is True, f"Expected pass for no-sub source but got: {reason}"

@@ -196,11 +196,19 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             out_norm = os.path.normpath(result["output_path"]) if result["output_path"] else ""
             src_norm = os.path.normpath(full_path)
             if out_norm and out_norm != src_norm:
-                try:
-                    os.remove(full_path)
-                    _job_log(f"Deleted source: {full_path}")
-                except OSError as exc:
-                    _job_log(f"Could not delete source: {exc}")
+                ok_tracks, track_reason = converter._verify_tracks_preserved(
+                    full_path, result["output_path"]
+                )
+                if not ok_tracks:
+                    _job_log(
+                        f"ERROR: track verification failed — source NOT deleted: {track_reason}"
+                    )
+                else:
+                    try:
+                        os.remove(full_path)
+                        _job_log(f"Deleted source: {full_path}")
+                    except OSError as exc:
+                        _job_log(f"Could not delete source: {exc}")
             with _job_lock:
                 _job["files"][idx].update({
                     "status":     "done",

@@ -603,7 +603,13 @@ def remux_to_mp4(
     import bitmap_subs as _bsubs
 
     srt_paths: list[str] = []
-    if bitmap_sub_indices and _bsubs.DEPS_OK:
+    if bitmap_sub_indices and not _bsubs.DEPS_OK:
+        log(
+            "ERROR: bitmap subtitle track(s) found but OCR dependencies are not installed. "
+            "Run: pip install easyocr Pillow pysubs2"
+        )
+        return False, ""
+    if bitmap_sub_indices:
         log(f"OCR bitmap subs ({len(bitmap_sub_indices)} track(s))...")
         try:
             srt_paths = _bsubs.ocr_bitmap_subs_to_srt(
@@ -615,10 +621,8 @@ def remux_to_mp4(
                 log_fn=log,
             )
         except Exception as exc:
-            log(f"WARNING: bitmap sub OCR failed: {exc} — continuing without subs")
-            srt_paths = []
-    elif bitmap_sub_indices:
-        log("WARNING: bitmap_subs deps not installed — skipping OCR")
+            log(f"ERROR: bitmap sub OCR failed: {exc} — aborting to preserve subtitles")
+            return False, ""
 
     # ------------------------------------------------------------------
     # Build output path

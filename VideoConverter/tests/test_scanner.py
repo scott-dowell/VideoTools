@@ -126,11 +126,11 @@ def test_walk_hi10_flagged():
 
 
 def test_walk_done_event():
-    """Final event is type='done' with total_files == 7 (6 H.264 + 1 HEVC)."""
+    """Final event is type='done' with total_files == 8 (6 H.264 + 2 HEVC)."""
     folders, done, _, _ = _collect(FIXTURES_DIR)
     assert done is not None
     assert done["type"] == "done"
-    assert done["total_files"] == 7
+    assert done["total_files"] == 8
     assert done["total_mb"] > 0
 
 

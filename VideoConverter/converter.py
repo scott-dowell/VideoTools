@@ -743,6 +743,12 @@ def remux_to_mp4(
             if attempt == 1:
                 log("DTS overflow detected — retrying with -max_interleave_delta 0")
             elif attempt == 2:
+                if english_text_subs or bitmap_sub_indices:
+                    log(
+                        "ERROR: DTS error could not be resolved with subtitles present. "
+                        "Aborting to preserve subtitle tracks."
+                    )
+                    return False, ""
                 log("DTS retry failed — retrying without subtitle streams")
 
             if os.path.exists(tmp_path):

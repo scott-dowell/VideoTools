@@ -12,6 +12,7 @@ Run:  pytest VideoConverter/tests/test_routes_conversion.py -v
 """
 
 import os
+import shutil
 import sys
 import threading
 import time
@@ -233,7 +234,8 @@ def test_db_done_on_success(client, tmp_path, fresh_db):
             "error": None,
         }
 
-    with patch.object(converter, "convert_video", _ok_convert):
+    with patch.object(converter, "convert_video", _ok_convert), \
+         patch.object(converter, "_verify_tracks_preserved", return_value=(True, "")):
         client.post("/api/start", json={
             "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
             "anime_mode": False,
@@ -522,3 +524,110 @@ def test_stop_mid_queue_remaining_files_stay_pending(client, tmp_path, fresh_db)
     assert status["files"][2]["status"] == "pending", (
         f"files[2] should be pending, got {status['files'][2]['status']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Track verification safety tests
+# ---------------------------------------------------------------------------
+
+def _wait_done(client, timeout=3.0):
+    for _ in range(int(timeout / 0.1)):
+        time.sleep(0.1)
+        if client.get("/api/status").get_json()["state"] == "done":
+            return True
+    return False
+
+
+def test_track_verify_fail_marks_failed_and_deletes_output(client, tmp_path, fresh_db):
+    """
+    When _verify_tracks_preserved returns False the worker must:
+    - delete the bad output file
+    - mark the DB record 'failed'
+    - NOT delete the source file
+    - report the file status as 'failed' in /api/status
+    """
+    src = str(FIXTURES / "h264_short.mkv")
+    shutil.copy(src, str(tmp_path / "h264_short.mkv"))
+    test_src = str(tmp_path / "h264_short.mkv")
+
+    bad_output = str(tmp_path / "bad_output.mp4")
+    Path(bad_output).write_bytes(b"\x00" * 100)  # exists but will fail verification
+
+    def _ok_convert(*args, **kwargs):
+        return {
+            "ok": True,
+            "output_path": bad_output,
+            "output_size_mb": 0.0001,
+            "saved_mb": 1.0,
+            "saved_pct": 90,
+            "encoder_used": "hevc_qsv",
+            "error": None,
+        }
+
+    with patch.object(converter, "convert_video", _ok_convert), \
+         patch.object(converter, "_verify_tracks_preserved", return_value=(False, "subtitles lost: source had 1 subtitle track(s), output has none")):
+
+        client.post("/api/start", json={
+            "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
+            "anime_mode": True,
+        })
+        _wait_done(client)
+
+    # Output file must be deleted
+    assert not os.path.exists(bad_output), "Bad output file should have been deleted"
+    # Source must be preserved
+    assert os.path.exists(test_src), "Source file must NOT be deleted when track check fails"
+    # DB must be failed
+    import sqlite3
+    conn = sqlite3.connect(fresh_db)
+    rows = conn.execute(
+        "SELECT status FROM conversions WHERE source_path = ?", (test_src,)
+    ).fetchall()
+    conn.close()
+    assert rows and rows[0][0] == "failed", f"Expected DB status=failed, got: {rows}"
+    # API status must show failed
+    status = client.get("/api/status").get_json()
+    assert status["files"][0]["status"] == "failed"
+
+
+def test_track_verify_pass_deletes_source(client, tmp_path, fresh_db):
+    """
+    When _verify_tracks_preserved passes and output path differs,
+    the source file IS deleted and DB is marked done.
+    """
+    src = str(FIXTURES / "h264_short.mkv")
+    shutil.copy(src, str(tmp_path / "h264_short.mkv"))
+    test_src = str(tmp_path / "h264_short.mkv")
+
+    good_output = str(tmp_path / "h264_short.mp4")
+    Path(good_output).write_bytes(b"\x00" * 100)
+
+    def _ok_convert(*args, **kwargs):
+        return {
+            "ok": True,
+            "output_path": good_output,
+            "output_size_mb": 0.0001,
+            "saved_mb": 1.0,
+            "saved_pct": 90,
+            "encoder_used": "hevc_qsv",
+            "error": None,
+        }
+
+    with patch.object(converter, "convert_video", _ok_convert), \
+         patch.object(converter, "_verify_tracks_preserved", return_value=(True, "")):
+
+        client.post("/api/start", json={
+            "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
+            "anime_mode": True,
+        })
+        _wait_done(client)
+
+    assert os.path.exists(good_output), "Output should exist after success"
+    assert not os.path.exists(test_src), "Source should be deleted after successful track verify"
+    import sqlite3
+    conn = sqlite3.connect(fresh_db)
+    rows = conn.execute(
+        "SELECT status FROM conversions WHERE source_path = ?", (test_src,)
+    ).fetchall()
+    conn.close()
+    assert rows and rows[0][0] == "done"

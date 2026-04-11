@@ -177,46 +177,57 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         )
 
         if result["ok"]:
-            total_saved += result["saved_mb"]
-            out_hash = db.hash_file_head(result["output_path"]) if result.get("output_path") else None
-            db.mark_done(
-                record_id      = rec_id,
-                output_path    = result["output_path"],
-                output_size_mb = result["output_size_mb"],
-                saved_mb       = result["saved_mb"],
-                saved_pct      = result["saved_pct"],
-                completed_at   = _utcnow(),
-                encoder_used   = result["encoder_used"],
-                output_hash    = out_hash,
-            )
-            # Remove the original only when the output path differs (e.g. .mkv
-            # source replaced by .mp4 in anime mode).  When paths are identical
-            # the file was already atomically replaced by os.replace() inside
-            # compress_simple — no second removal is needed or safe.
             out_norm = os.path.normpath(result["output_path"]) if result["output_path"] else ""
             src_norm = os.path.normpath(full_path)
+
+            # Belt-and-suspenders: verify tracks before committing to 'done'
+            track_ok = True
+            track_reason = ""
             if out_norm and out_norm != src_norm:
-                ok_tracks, track_reason = converter._verify_tracks_preserved(
+                track_ok, track_reason = converter._verify_tracks_preserved(
                     full_path, result["output_path"]
                 )
-                if not ok_tracks:
-                    _job_log(
-                        f"ERROR: track verification failed — source NOT deleted: {track_reason}"
-                    )
-                else:
+
+            if not track_ok:
+                _job_log(
+                    f"ERROR: track verification failed — removing bad output: {track_reason}"
+                )
+                try:
+                    os.remove(result["output_path"])
+                except OSError:
+                    pass
+                db.mark_failed(rec_id, f"track verification: {track_reason}", _utcnow())
+                with _job_lock:
+                    _job["files"][idx]["status"]     = "failed"
+                    _job["files"][idx]["error_tail"] = f"track verification: {track_reason}"
+            else:
+                total_saved += result["saved_mb"]
+                out_hash = db.hash_file_head(result["output_path"]) if result.get("output_path") else None
+                db.mark_done(
+                    record_id      = rec_id,
+                    output_path    = result["output_path"],
+                    output_size_mb = result["output_size_mb"],
+                    saved_mb       = result["saved_mb"],
+                    saved_pct      = result["saved_pct"],
+                    completed_at   = _utcnow(),
+                    encoder_used   = result["encoder_used"],
+                    output_hash    = out_hash,
+                )
+                # Remove source when output path differs (e.g. MKV→MP4 in anime mode)
+                if out_norm and out_norm != src_norm:
                     try:
                         os.remove(full_path)
                         _job_log(f"Deleted source: {full_path}")
                     except OSError as exc:
                         _job_log(f"Could not delete source: {exc}")
-            with _job_lock:
-                _job["files"][idx].update({
-                    "status":     "done",
-                    "output":     str(round(result["output_size_mb"], 1)),
-                    "saved":      str(round(result["saved_mb"], 1)),
-                    "pct":        str(result["saved_pct"]),
-                    "output_path": result["output_path"],
-                })
+                with _job_lock:
+                    _job["files"][idx].update({
+                        "status":     "done",
+                        "output":     str(round(result["output_size_mb"], 1)),
+                        "saved":      str(round(result["saved_mb"], 1)),
+                        "pct":        str(result["saved_pct"]),
+                        "output_path": result["output_path"],
+                    })
         else:
             # Harvest error details from the per-file log capture
             ffmpeg_cmd = next(

@@ -453,3 +453,55 @@ def test_verify_tracks_no_subs_in_source_ok(tmp_path):
     with patch("converter.subprocess.run", mock_run):
         ok, reason = converter._verify_tracks_preserved(src, out)
     assert ok is True, f"Expected pass for no-sub source but got: {reason}"
+
+
+# ===========================================================================
+# DTS fallback safety tests
+# ===========================================================================
+
+def test_remux_dts_fallback_aborts_when_subs_present(tmp_path):
+    """
+    When the DTS no-subs fallback (attempt 2) would be reached and subtitles
+    are present, remux_to_mp4 must abort rather than silently drop subs.
+    """
+    import json as _json
+
+    # Build a minimal ffprobe response that includes an ASS subtitle stream
+    probe_data = {
+        "streams": [
+            {"index": 0, "codec_type": "video",    "codec_name": "hevc"},
+            {"index": 1, "codec_type": "audio",    "codec_name": "aac",
+             "tags": {"language": "jpn"}},
+            {"index": 2, "codec_type": "subtitle", "codec_name": "ass",
+             "tags": {"language": "eng"}},
+        ]
+    }
+
+    msgs = []
+    log = msgs.append
+    stop = threading.Event()
+
+    # Simulate: attempt 0 and 1 fail with a DTS error, attempt 2 would be 'no subs'.
+    # We mock _run_ffmpeg to always return False, and mock subprocess.Popen so that
+    # the DTS error text appears in stdout to satisfy the retry condition.
+    proc_mock = MagicMock()
+    proc_mock.stdout = iter(["error: out of order dts\n"])
+    proc_mock.returncode = 1
+    proc_mock.wait = MagicMock()
+    proc_mock.pid = 1234
+
+    with patch("converter.subprocess.run",
+               return_value=MagicMock(stdout=_json.dumps(probe_data), returncode=0)), \
+         patch("converter.subprocess.Popen", return_value=proc_mock), \
+         patch("converter._ffprobe_duration", return_value=60.0):
+
+        ok, enc = converter.remux_to_mp4(
+            str(FIXTURES / "h264_bitmap_sub.mkv"),  # any existing file — probing is mocked
+            str(tmp_path / "out"),
+            log, stop,
+            hi10=True,
+        )
+
+    assert ok is False, "Expected abort when DTS fallback would drop subs"
+    assert any("dts" in m.lower() or "abort" in m.lower() or "subtitle" in m.lower()
+               for m in msgs), f"Expected abort message in log. Got: {msgs}"

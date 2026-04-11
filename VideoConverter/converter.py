@@ -669,6 +669,10 @@ def remux_to_mp4(
             # OCR'd SRT files (inputs 1..N)
             for j in range(len(srt_paths)):
                 cmd += ["-map", f"{j+1}:s:0"]
+            # Tag OCR'd tracks with English language (they were selected as English above)
+            text_sub_offset = len(english_text_subs)
+            for j in range(len(srt_paths)):
+                cmd += [f"-metadata:s:s:{text_sub_offset + j}", "language=eng"]
             # Convert all subtitle streams to mov_text
             sub_count = len(english_text_subs) + len(srt_paths)
             if sub_count > 0:

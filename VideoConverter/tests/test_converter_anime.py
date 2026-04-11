@@ -336,6 +336,11 @@ def test_remux_bitmap_sub_produces_two_sub_tracks(tmp_path):
     assert sub_codecs == {"mov_text"}, (
         f"All subtitle tracks should be mov_text in MP4, got: {sub_codecs}"
     )
+    # OCR'd tracks must have language=eng, not und
+    sub_langs = [s.get("tags", {}).get("language", "") for s in sub_streams]
+    assert all(lang == "eng" for lang in sub_langs), (
+        f"All subtitle tracks should have language=eng, got: {sub_langs}"
+    )
     # Confirm log shows OCR was invoked
     assert any("ocr" in m.lower() for m in msgs), "Expected 'OCR' in log output"
 

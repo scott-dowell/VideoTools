@@ -193,6 +193,27 @@ Invoke-FFmpeg -Label 'h264_mp4_aac.mp4' -FFmpegArgs @(
 # ---------------------------------------------------------------------------
 
 Remove-Item $tmpSrt -ErrorAction SilentlyContinue
+
+# ---------------------------------------------------------------------------
+# 8. h264_bitmap_sub.mkv  — HEVC, 60 s real clip, AAC jpn, ASS eng + PGS eng
+#
+#    This fixture is NOT generated synthetically — ffmpeg cannot encode PGS.
+#    It is a 60-second extract from a real source file.
+#    To regenerate:
+#        ffmpeg -y -ss 120 -t 60 `
+#          -i "C:\Users\scott\Downloads\Anime\Isuca\S01E01-Chance Meeting.mkv" `
+#          -map 0:0 -map 0:1 -map 0:2 -map 0:3 `
+#          -c:v copy -c:a copy -c:s copy `
+#          "$outDir\h264_bitmap_sub.mkv"
+#    Streams: 0=hevc, 1=aac/jpn, 2=ass/eng(Doki), 3=hdmv_pgs_subtitle/eng(USBD)
+# ---------------------------------------------------------------------------
+if (-not (Test-Path (Join-Path $outDir 'h264_bitmap_sub.mkv'))) {
+    Write-Host "  h264_bitmap_sub.mkv not found — skipping (requires real source file)" -ForegroundColor Yellow
+} else {
+    $size = [math]::Round((Get-Item (Join-Path $outDir 'h264_bitmap_sub.mkv')).Length / 1MB, 1)
+    Write-Host "  h264_bitmap_sub.mkv already present ($size MB)" -ForegroundColor Green
+}
+
 Write-Host ""
-Write-Host "All 7 fixtures generated successfully." -ForegroundColor Cyan
+Write-Host "Synthetic fixtures generated successfully." -ForegroundColor Cyan
 Get-ChildItem $outDir | Format-Table Name, @{L='Size (MB)'; E={[math]::Round($_.Length/1MB,1)}} -AutoSize

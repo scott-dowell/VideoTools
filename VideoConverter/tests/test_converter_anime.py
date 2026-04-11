@@ -255,21 +255,111 @@ def test_convert_video_anime_hi10(tmp_path):
     assert result["encoder_used"] == "copy"
 
 
-def test_convert_video_anime_normal(tmp_path):
-    """convert_video with anime_mode=True and 8-bit source uses compress+remux."""
+    assert result["ok"] is True, f"Expected ok=True; logs: {msgs}; error: {result.get('error')}"
+    assert result["output_path"] is not None
+    assert result["output_path"].endswith(".mp4")
+
+
+# ---------------------------------------------------------------------------
+# Bitmap subtitle (PGS) OCR tests — requires h264_bitmap_sub.mkv fixture
+# ---------------------------------------------------------------------------
+
+BITMAP_FIXTURE = FIXTURES / "h264_bitmap_sub.mkv"
+
+bitmap_required = pytest.mark.skipif(
+    not BITMAP_FIXTURE.exists(),
+    reason="h264_bitmap_sub.mkv fixture missing — see make_fixtures.ps1 for instructions",
+)
+
+
+@bitmap_required
+def test_bitmap_sub_fixture_streams():
+    """Fixture must have HEVC video, AAC audio, ASS sub, and PGS bitmap sub."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(BITMAP_FIXTURE)],
+        capture_output=True, text=True, timeout=15,
+    )
+    import json
+    data = json.loads(result.stdout)
+    streams = data.get("streams", [])
+    codecs = {s.get("codec_name", "").lower() for s in streams}
+    assert "hevc" in codecs, "Expected HEVC video in fixture"
+    assert "aac" in codecs, "Expected AAC audio in fixture"
+    assert "ass" in codecs, "Expected ASS text sub in fixture"
+    assert "hdmv_pgs_subtitle" in codecs, "Expected PGS bitmap sub in fixture"
+
+
+@bitmap_required
+def test_bitmap_sub_ocr_deps_ok():
+    """bitmap_subs.DEPS_OK must be True — easyocr/Pillow/pysubs2 required."""
+    import bitmap_subs
+    assert bitmap_subs.DEPS_OK, (
+        "OCR deps not installed. Run: pip install easyocr Pillow pysubs2"
+    )
+
+
+@bitmap_required
+def test_remux_bitmap_sub_produces_two_sub_tracks(tmp_path):
+    """
+    remux_to_mp4 on a file with ASS + PGS subs must produce an MP4 with
+    both subtitle tracks as mov_text — the PGS should be OCR'd to text.
+    """
+    import json
     out_dir = str(tmp_path / "out")
     msgs, log = _logs()
     stop = threading.Event()
 
-    result = converter.convert_video(
-        input_path=str(FIXTURES / "h264_multitrack.mkv"),
-        output_dir=out_dir,
-        anime_mode=True,
-        quality=None,
-        progress_cb=None,
-        stop_event=stop,
-        log=log,
+    ok, enc = converter.remux_to_mp4(
+        str(BITMAP_FIXTURE),
+        out_dir, log, stop,
+        hi10=True,  # video is already HEVC — copy it
     )
-    assert result["ok"] is True, f"Expected ok=True; logs: {msgs}; error: {result.get('error')}"
-    assert result["output_path"] is not None
-    assert result["output_path"].endswith(".mp4")
+    assert ok, f"remux_to_mp4 failed; logs: {msgs}"
+
+    out_files = list(Path(out_dir).glob("*.mp4"))
+    assert out_files, "Expected .mp4 output"
+    out_path = str(out_files[0])
+
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", out_path],
+        capture_output=True, text=True, timeout=15,
+    )
+    data = json.loads(result.stdout)
+    streams = data.get("streams", [])
+
+    sub_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
+    assert len(sub_streams) >= 2, (
+        f"Expected at least 2 subtitle tracks (ASS + OCR'd PGS), got {len(sub_streams)}; "
+        f"logs: {msgs}"
+    )
+    sub_codecs = {s.get("codec_name", "").lower() for s in sub_streams}
+    assert sub_codecs == {"mov_text"}, (
+        f"All subtitle tracks should be mov_text in MP4, got: {sub_codecs}"
+    )
+    # Confirm log shows OCR was invoked
+    assert any("ocr" in m.lower() for m in msgs), "Expected 'OCR' in log output"
+
+
+@bitmap_required
+def test_remux_bitmap_sub_no_deps_fails(tmp_path):
+    """
+    When OCR deps are unavailable and the file has bitmap subs,
+    remux_to_mp4 must return (False, '') rather than silently drop them.
+    """
+    from unittest.mock import patch
+    import bitmap_subs
+    out_dir = str(tmp_path / "out")
+    msgs, log = _logs()
+    stop = threading.Event()
+
+    with patch.object(bitmap_subs, "DEPS_OK", False):
+        ok, enc = converter.remux_to_mp4(
+            str(BITMAP_FIXTURE),
+            out_dir, log, stop,
+            hi10=True,
+        )
+
+    assert ok is False, "Expected failure when OCR deps missing and bitmap subs present"
+    assert any("error" in m.lower() for m in msgs), "Expected ERROR message in log"
+    # Must not produce any output file
+    assert not list(Path(out_dir).glob("*.mp4")), "Must not produce output when aborting"

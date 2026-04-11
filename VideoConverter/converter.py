@@ -119,6 +119,8 @@ def _run_ffmpeg(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding='utf-8',
+            errors='replace',
         )
         if pid_holder is not None:
             pid_holder[0] = proc.pid

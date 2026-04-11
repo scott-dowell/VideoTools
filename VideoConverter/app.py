@@ -492,9 +492,19 @@ def api_start():
             "paused":        False,
         })
 
+    def _worker_safe():
+        try:
+            _queue_worker(list(files), anime, quality)
+        except Exception as exc:
+            import traceback
+            _job_log(f"Worker crashed unexpectedly: {exc}\n{traceback.format_exc()}")
+            with _job_lock:
+                _job["state"]        = "done"
+                _job["current_file"] = ""
+                _ffmpeg_pid[0]       = 0
+
     t = threading.Thread(
-        target=_queue_worker,
-        args=(list(files), anime, quality),
+        target=_worker_safe,
         daemon=True,
     )
     t.start()

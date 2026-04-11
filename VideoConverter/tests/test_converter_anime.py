@@ -505,3 +505,63 @@ def test_remux_dts_fallback_aborts_when_subs_present(tmp_path):
     assert ok is False, "Expected abort when DTS fallback would drop subs"
     assert any("dts" in m.lower() or "abort" in m.lower() or "subtitle" in m.lower()
                for m in msgs), f"Expected abort message in log. Got: {msgs}"
+
+
+def test_remux_dts_attempt2_tried_before_abort(tmp_path):
+    """
+    The DTS recovery loop must try attempt 2 (-fflags +genpts -avoid_negative_ts)
+    before reaching the abort/no-subs stage.  Verify by having only attempts
+    0 and 1 fail with DTS error; attempt 2 succeeds.
+    """
+    import json as _json
+
+    probe_data = {
+        "streams": [
+            {"index": 0, "codec_type": "video",    "codec_name": "hevc"},
+            {"index": 1, "codec_type": "audio",    "codec_name": "aac",
+             "tags": {"language": "jpn"}},
+            {"index": 2, "codec_type": "subtitle", "codec_name": "ass",
+             "tags": {"language": "eng"}},
+        ]
+    }
+
+    msgs = []
+    log = msgs.append
+    stop = threading.Event()
+
+    class _DtsThenOkProc:
+        _call = 0
+        pid = 999
+        def __init__(self):
+            type(self)._call += 1
+            if type(self)._call <= 2:
+                self.stdout = iter(["error: out of order dts\n"])
+                self.returncode = 1
+            else:
+                self.stdout = iter([])
+                self.returncode = 0
+        def wait(self): pass
+        def kill(self): pass
+
+    _DtsThenOkProc._call = 0
+
+    with patch("converter.subprocess.run",
+               return_value=MagicMock(stdout=_json.dumps(probe_data), returncode=0)), \
+         patch("converter.subprocess.Popen", side_effect=lambda *a, **k: _DtsThenOkProc()), \
+         patch("converter._ffprobe_duration", return_value=60.0), \
+         patch("converter._verify_tracks_preserved", return_value=(True, "")), \
+         patch("os.path.getsize", return_value=1000), \
+         patch("os.path.exists", return_value=True), \
+         patch("os.replace"), \
+         patch("os.makedirs"):
+
+        ok, enc = converter.remux_to_mp4(
+            str(FIXTURES / "h264_bitmap_sub.mkv"),
+            str(tmp_path / "out"),
+            log, stop,
+            hi10=True,
+        )
+
+    assert ok is True, f"Expected success on attempt 2; logs: {msgs}"
+    assert any("dts fix retry" in m.lower() for m in msgs), \
+        f"Expected attempt-2 'DTS fix retry' log message; got: {msgs}"

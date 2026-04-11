@@ -308,3 +308,55 @@ def test_estimate_returns_expected_keys(tmp_path):
     # Regardless of ffmpeg outcome, the dict must have these keys
     assert isinstance(result, dict)
     assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# compress_simple — track verification before os.replace
+# ---------------------------------------------------------------------------
+
+def test_compress_simple_aborts_when_track_verify_fails(tmp_path):
+    """
+    If _verify_tracks_preserved fails after encoding, compress_simple must:
+    - NOT call os.replace (source stays intact)
+    - Return (False, '')
+    - Delete the temp output
+    """
+    from unittest.mock import patch
+    src = str(FIXTURES / "h264_short.mkv")
+    src_size = Path(src).stat().st_size
+    out_dir = str(tmp_path / "out")
+    msgs, log = _logs()
+    stop = threading.Event()
+
+    def _fake_run(cmd, log_fn, stop_ev, **kwargs):
+        # Write something smaller than source so the size check passes
+        tmp_out = cmd[-1]
+        Path(tmp_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(tmp_out).write_bytes(b"\x00" * 100)
+        return True
+
+    with patch.object(converter, "_run_ffmpeg", _fake_run), \
+         patch.object(converter, "_verify_tracks_preserved",
+                      return_value=(False, "audio tracks dropped: source had 2, output has 1")):
+        ok, enc = converter.compress_simple(src, out_dir, log, stop)
+
+    assert ok is False, "Expected failure when track verification fails"
+    assert any("track verification" in m.lower() or "error" in m.lower() for m in msgs)
+    assert Path(src).exists(), "Source file must not be deleted"
+    assert Path(src).stat().st_size == src_size, "Source file must not be modified"
+
+
+def test_compress_simple_track_verify_pass_proceeds(tmp_path):
+    """When _verify_tracks_preserved passes, compress_simple proceeds normally."""
+    from unittest.mock import patch
+    src = str(FIXTURES / "h264_short.mkv")
+    out_dir = str(tmp_path / "out")
+    msgs, log = _logs()
+    stop = threading.Event()
+
+    with patch.object(converter, "_verify_tracks_preserved", return_value=(True, "")):
+        ok, enc = converter.compress_simple(src, out_dir, log, stop)
+
+    assert isinstance(ok, bool)
+    assert not any("track verification failed" in m.lower() for m in msgs), \
+        f"Unexpected track verification failure in logs: {msgs}"

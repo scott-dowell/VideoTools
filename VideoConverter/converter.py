@@ -228,6 +228,13 @@ def compress_simple(
             os.remove(tmp_path)
             return False, ""
 
+        # Verify audio/subtitle tracks survived before atomically replacing source
+        ok_tracks, track_reason = _verify_tracks_preserved(input_path, tmp_path)
+        if not ok_tracks:
+            log(f"ERROR: track verification failed — aborting to preserve source: {track_reason}")
+            os.remove(tmp_path)
+            return False, ""
+
         os.makedirs(output_dir, exist_ok=True)
         os.replace(tmp_path, final_path)
         saved = src_size - enc_size
@@ -731,9 +738,10 @@ def remux_to_mp4(
         encoder_used = ""
 
         for attempt, (inc_subs, extra) in enumerate([
-            (True,  None),                          # attempt 0: normal
-            (True,  ["-max_interleave_delta", "0"]), # attempt 1: DTS fix
-            (False, None),                           # attempt 2: no subs
+            (True,  None),                                                         # attempt 0: normal
+            (True,  ["-max_interleave_delta", "0"]),                               # attempt 1: DTS fix
+            (True,  ["-fflags", "+genpts", "-avoid_negative_ts", "make_zero"]),   # attempt 2: aggressive DTS fix
+            (False, None),                                                         # attempt 3: no subs
         ]):
             if stop_event.is_set():
                 return False, ""
@@ -743,6 +751,8 @@ def remux_to_mp4(
             if attempt == 1:
                 log("DTS overflow detected — retrying with -max_interleave_delta 0")
             elif attempt == 2:
+                log("DTS fix retry — trying -fflags +genpts -avoid_negative_ts make_zero")
+            elif attempt == 3:
                 if english_text_subs or bitmap_sub_indices:
                     log(
                         "ERROR: DTS error could not be resolved with subtitles present. "

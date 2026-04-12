@@ -986,28 +986,17 @@ def convert_video(
 
     if anime_mode:
         if is_hi10(input_path):
-            log("Hi10 H.264 detected — using remux path (no re-encode).")
-            ok, encoder_used = remux_to_mp4(
-                input_path=input_path,
-                output_dir=output_dir,
-                log=log,
-                stop_event=stop_event,
-                quality=quality,
-                progress_cb=progress_cb,
-                pid_holder=pid_holder,
-                hi10=True,
-            )
-        else:
-            log("Anime mode: compressing then remuxing to MP4.")
-            ok, encoder_used = compress_and_remux(
-                input_path=input_path,
-                output_dir=output_dir,
-                log=log,
-                stop_event=stop_event,
-                quality=quality,
-                progress_cb=progress_cb,
-                pid_holder=pid_holder,
-            )
+            log("Hi10 H.264 detected — QSV unsupported, will use libx265 software encoder.")
+        log("Anime mode: compressing then remuxing to MP4.")
+        ok, encoder_used = compress_and_remux(
+            input_path=input_path,
+            output_dir=output_dir,
+            log=log,
+            stop_event=stop_event,
+            quality=quality,
+            progress_cb=progress_cb,
+            pid_holder=pid_holder,
+        )
 
         if not ok:
             return {

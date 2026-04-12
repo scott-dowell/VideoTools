@@ -235,7 +235,7 @@ def test_stop_during_remux(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_convert_video_anime_hi10(tmp_path):
-    """convert_video with anime_mode=True and Hi10 source uses remux path."""
+    """convert_video with anime_mode=True and Hi10 source compresses via libx265/QSV + remux."""
     out_dir = str(tmp_path / "out")
     msgs, log = _logs()
     stop = threading.Event()
@@ -252,12 +252,7 @@ def test_convert_video_anime_hi10(tmp_path):
     assert result["ok"] is True, f"Expected ok=True; logs: {msgs}; error: {result.get('error')}"
     assert result["output_path"] is not None
     assert result["output_path"].endswith(".mp4")
-    assert result["encoder_used"] == "copy"
-
-
-    assert result["ok"] is True, f"Expected ok=True; logs: {msgs}; error: {result.get('error')}"
-    assert result["output_path"] is not None
-    assert result["output_path"].endswith(".mp4")
+    assert result["encoder_used"] in ("hevc_qsv", "libx265")
 
 
 # ---------------------------------------------------------------------------

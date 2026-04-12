@@ -818,18 +818,31 @@ def remux_to_mp4(
             if proc.returncode == 0 and os.path.exists(tmp_path):
                 break  # success
 
-            # Check if DTS error; if not, no point retrying sub-related attempts
+            # Classify the failure: timestamp-related errors trigger retries;
+            # unknown/silent failures (last line is a progress line) also retry.
             full_output = "".join(output_lines)
-            if "out of order" not in full_output.lower():
+            lo = full_output.lower()
+            _TS_PATTERNS = ("out of order", "non-monotonic", "non monotonous",
+                            "invalid duration", "dts")
+            is_ts_error = any(p in lo for p in _TS_PATTERNS)
+            # Silent crash: all captured lines are progress/header lines, no clear error
+            last_meaningful = next(
+                (l.rstrip() for l in reversed(output_lines)
+                 if l.strip() and "frame=" not in l and "[out#" not in l),
+                ""
+            )
+            is_silent = last_meaningful == "" or last_meaningful.startswith("frame=")
+
+            if not is_ts_error and not is_silent:
                 if attempt == 0:
-                    # Non-DTS failure — bail immediately; log ffmpeg output for diagnosis
+                    # Known non-recoverable failure — log output for diagnosis and bail
                     for ol in output_lines:
                         ol = ol.rstrip()
                         if ol:
                             log(ol)
                     log("Remux failed.")
                     return False, ""
-                # else let the loop try next approach
+            # Timestamp error or silent crash — continue to next attempt
 
         else:
             log("All remux attempts failed.")

@@ -703,10 +703,12 @@ def remux_to_mp4(
             ]
             encoder_tag = "hevc_qsv"
 
-        # Audio — ALL tracks → AAC transcode
+        # Audio — copy if already AAC; otherwise transcode to AAC
         for i, a in enumerate(audio_streams):
             ai = a.get("index", 0)
-            cmd += ["-map", f"0:{ai}", f"-c:a:{i}", aac]
+            src_ac = a.get("codec_name", "").lower()
+            audio_codec = "copy" if src_ac in ("aac", "aac_latm") else aac
+            cmd += ["-map", f"0:{ai}", f"-c:a:{i}", audio_codec]
 
         # Subtitles
         if include_subs:
@@ -820,7 +822,11 @@ def remux_to_mp4(
             full_output = "".join(output_lines)
             if "out of order" not in full_output.lower():
                 if attempt == 0:
-                    # Non-DTS failure — bail immediately
+                    # Non-DTS failure — bail immediately; log ffmpeg output for diagnosis
+                    for ol in output_lines:
+                        ol = ol.rstrip()
+                        if ol:
+                            log(ol)
                     log("Remux failed.")
                     return False, ""
                 # else let the loop try next approach

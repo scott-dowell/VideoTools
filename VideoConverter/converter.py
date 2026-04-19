@@ -337,14 +337,32 @@ def compress_simple(
             return False, ""
 
         os.makedirs(output_dir, exist_ok=True)
-        os.replace(tmp_path, final_path)
+        # Retry the rename — on Windows, AV software can briefly lock a newly
+        # written file, causing WinError 32.  A short back-off resolves it.
+        for _attempt in range(6):
+            try:
+                os.replace(tmp_path, final_path)
+                break
+            except PermissionError:
+                if _attempt == 5:
+                    raise
+                import time as _time
+                _time.sleep(0.5)
         saved = src_size - enc_size
         log(f"Done. Saved {saved / 1024 / 1024:.1f} MB → {final_path}")
         return True, encoder_used
 
     finally:
         if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+            for _attempt in range(6):
+                try:
+                    os.remove(tmp_path)
+                    break
+                except PermissionError:
+                    if _attempt == 5:
+                        break  # best-effort cleanup, don't mask the real error
+                    import time as _time
+                    _time.sleep(0.5)
 
 
 # ---------------------------------------------------------------------------

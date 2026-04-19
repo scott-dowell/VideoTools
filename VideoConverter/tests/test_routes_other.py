@@ -122,9 +122,13 @@ def test_browse_files_not_included(client, tmp_path):
 # /api/browse — invalid path
 # ---------------------------------------------------------------------------
 
-def test_browse_invalid_path_returns_400(client):
-    r = client.get("/api/browse?path=C:/nonexistent_xyz_12345")
-    assert r.status_code == 400
+def test_browse_nonexistent_path_walks_up(client):
+    # A non-existent deep path should walk up to the nearest existing ancestor
+    r = client.get("/api/browse?path=C:/nonexistent_xyz_12345/also_gone/deep")
+    assert r.status_code == 200
+    data = r.get_json()
+    # Should have landed on C:/ or drives listing (no error key)
+    assert "error" not in data
 
 
 # ---------------------------------------------------------------------------

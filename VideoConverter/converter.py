@@ -26,6 +26,64 @@ from pathlib import Path
 from typing import Callable
 
 import config
+import conv_log as _conv_log
+
+# ---------------------------------------------------------------------------
+# Windows P-core helper
+# ---------------------------------------------------------------------------
+
+def _run_with_pcores_only(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """
+    Run a subprocess restricted to P-cores only on Windows (avoids the native
+    aac FP-overflow crash on Intel Gracemont E-cores).
+
+    On non-Windows (or if affinity API is unavailable), falls back to a plain
+    subprocess.run().
+
+    Strategy: spawn the process, immediately call SetProcessAffinityMask to
+    exclude the top 8 logical CPUs (which are E-cores on i7-12xxx/13xxx/14xxx),
+    then wait for it to finish.
+    """
+    if os.name != "nt":
+        return subprocess.run(cmd, **kwargs)
+
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+
+    cpu_count = os.cpu_count() or 1
+    # Assume the top 8 logical CPUs are E-cores on Intel hybrid chips.
+    # If the machine has ≤ 8 CPUs, use all of them (no E-cores to exclude).
+    e_core_count = 8
+    if cpu_count > e_core_count:
+        p_core_mask = (1 << (cpu_count - e_core_count)) - 1
+    else:
+        p_core_mask = (1 << cpu_count) - 1
+
+    # Pop timeout from kwargs — Popen doesn't accept it; we'll use communicate()
+    timeout = kwargs.pop("timeout", None)
+
+    # subprocess.run keyword args that map to Popen
+    proc = subprocess.Popen(cmd, **kwargs)
+    # Set affinity immediately after spawn
+    try:
+        kernel32.SetProcessAffinityMask(proc._handle, p_core_mask)
+    except Exception:
+        pass  # Non-fatal — process will still run, just might hit E-cores
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        raise
+
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=proc.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Types
@@ -100,6 +158,7 @@ def _run_ffmpeg(
     duration_secs: float = 0.0,
     progress_cb: ProgressCb | None = None,
     pid_holder: list[int] | None = None,   # pid_holder[0] = pid, caller clears
+    output_path: str | None = None,        # when set, validate output on non-zero exit
 ) -> bool:
     """Run an FFmpeg command; return True on success.
 
@@ -111,6 +170,11 @@ def _run_ffmpeg(
         progress_cb:   Called with (pct, fps, eta_secs) on each stats line.
         pid_holder:    If provided, pid_holder[0] is set to the child PID so
                        the caller can NtSuspend/NtResume it.
+        output_path:   When provided and exit code is non-zero, the output is
+                       validated with ffprobe.  If it has a valid duration the
+                       non-zero exit is treated as non-fatal (some codecs, e.g.
+                       dvd_subtitle copy, cause ffmpeg to exit 1 despite
+                       producing a fully valid output).
     """
     log(f"Running: {' '.join(cmd)}")
     try:
@@ -154,7 +218,32 @@ def _run_ffmpeg(
         proc.wait()
         if pid_holder is not None:
             pid_holder[0] = 0
-        return proc.returncode == 0
+        if proc.returncode == 0:
+            return True
+        # Non-zero exit — if an output path was provided, check whether the
+        # output is actually valid (some streams such as dvd_subtitle cause
+        # ffmpeg to exit non-zero even after a complete, valid encode).
+        if output_path and os.path.exists(output_path):
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default", output_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if probe.returncode == 0:
+                try:
+                    dur = float(
+                        next(l for l in probe.stdout.splitlines() if "duration=" in l)
+                        .split("=")[1]
+                    )
+                    if dur > 0:
+                        log(
+                            f"NOTE: ffmpeg exited {proc.returncode} but output is "
+                            "valid — treating as success (non-fatal codec warning)"
+                        )
+                        return True
+                except (ValueError, StopIteration):
+                    pass
+        return False
     except FileNotFoundError:
         log("ERROR: ffmpeg not found. Is it on PATH?")
         return False
@@ -172,6 +261,7 @@ def compress_simple(
     quality: int | None = None,
     progress_cb: ProgressCb | None = None,
     pid_holder: list[int] | None = None,
+    conv_logger: "_conv_log.ConversionLogger | None" = None,
 ) -> tuple[bool, str]:
     """
     Normal-mode compression.
@@ -201,9 +291,11 @@ def compress_simple(
     try:
         # Try QSV first
         encoder_used = "hevc_qsv"
+        qsv_log = conv_logger.tee(log, "compress_qsv") if conv_logger else log
         success = _run_ffmpeg(
-            _qsv_cmd(input_path, tmp_path, quality), log, stop_event,
+            _qsv_cmd(input_path, tmp_path, quality), qsv_log, stop_event,
             duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
+            output_path=tmp_path,
         )
         if not success:
             if stop_event.is_set():
@@ -213,18 +305,26 @@ def compress_simple(
                 os.remove(tmp_path)
             encoder_used = "libx265"
             sw_quality = quality if quality <= 51 else config.SW_HEVC_CRF
+            sw_log = conv_logger.tee(log, "compress_sw") if conv_logger else log
             success = _run_ffmpeg(
-                _sw_cmd(input_path, tmp_path, sw_quality), log, stop_event,
+                _sw_cmd(input_path, tmp_path, sw_quality), sw_log, stop_event,
                 duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
+                output_path=tmp_path,
             )
 
         if not success or not os.path.exists(tmp_path):
             log("Encode failed.")
+            if conv_logger:
+                conv_logger.mark_fail_at("compress phase (QSV and SW both failed)")
             return False, ""
 
         enc_size = os.path.getsize(tmp_path)
         if enc_size >= src_size:
             log(f"Output not smaller ({enc_size:,} >= {src_size:,} bytes). Skipping.")
+            if conv_logger:
+                conv_logger.mark_fail_at(
+                    f"output not smaller ({enc_size:,} >= {src_size:,} bytes)"
+                )
             os.remove(tmp_path)
             return False, ""
 
@@ -359,14 +459,19 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
 # Output integrity check
 # ---------------------------------------------------------------------------
 
-def _verify_tracks_preserved(src_path: str, out_path: str) -> tuple[bool, str]:
+def _verify_tracks_preserved(src_path: str, out_path: str, check_subs: bool = True) -> tuple[bool, str]:
     """
     Probe source and output with ffprobe and verify that no audio or subtitle
     tracks were silently dropped.
 
     Rules:
       - Output must have at least as many audio streams as the source.
-      - If the source has any subtitle streams, the output must have at least one.
+      - If check_subs is True and the source has any subtitle streams, the
+        output must have at least one.
+
+    check_subs should be False for MP4 (anime mode) outputs where subtitle
+    tracks are legitimately transformed or excluded during remux (e.g. bitmap
+    subs that cannot be OCR'd, or non-English text subs filtered by language).
 
     Returns (True, "") on pass, (False, reason) on fail.
     """
@@ -375,6 +480,8 @@ def _verify_tracks_preserved(src_path: str, out_path: str) -> tuple[bool, str]:
             ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", path],
             capture_output=True, text=True, timeout=30,
         )
+        if not r.stdout.strip():
+            raise ValueError(f"ffprobe returned empty output for: {path}")
         return json.loads(r.stdout).get("streams", [])
 
     try:
@@ -392,7 +499,7 @@ def _verify_tracks_preserved(src_path: str, out_path: str) -> tuple[bool, str]:
         return False, (
             f"audio tracks dropped: source had {src_audio}, output has {out_audio}"
         )
-    if src_subs > 0 and out_subs == 0:
+    if check_subs and src_subs > 0 and out_subs == 0:
         return False, (
             f"subtitles lost: source had {src_subs} subtitle track(s), output has none"
         )
@@ -527,6 +634,7 @@ def remux_to_mp4(
     progress_cb: ProgressCb | None = None,
     pid_holder: list[int] | None = None,
     hi10: bool | None = None,
+    conv_logger: "_conv_log.ConversionLogger | None" = None,
 ) -> tuple[bool, str]:
     """
     Anime-mode remux into MP4.
@@ -681,13 +789,157 @@ def remux_to_mp4(
 
     aac = _aac_encoder()
 
-    def _build_cmd(include_subs: bool, extra_flags: list[str] | None = None) -> list[str]:
+    def _preencode_audio_to_aac() -> list[str | None] | None:
+        """
+        Pre-encode each non-AAC audio stream to an individual .m4a file using
+        aac_mf, one track at a time.  Returns a list parallel to audio_streams
+        where None means the stream is already AAC (copy from source), or a path
+        to the pre-encoded temp file.  Returns None if any encoding fails.
+
+        Encoding tracks one-by-one avoids the aac_mf multi-stream crash while
+        keeping aac_mf (not native aac) to side-step the E-core FP overflow.
+
+        Note: aac_mf may exit non-zero on DTS/PTS warnings even when the output
+        is fully written and playable.  We therefore verify the output with
+        ffprobe rather than trusting the exit code.
+        """
+        def _is_valid_audio(path: str) -> bool:
+            """Return True if path is a readable audio file with duration > 0."""
+            if not os.path.exists(path) or os.path.getsize(path) < 1024:
+                return False
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default", path,
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+            return probe.returncode == 0 and "duration=" in probe.stdout
+
+        files: list[str | None] = []
+        for i, a in enumerate(audio_streams):
+            if stop_event.is_set():
+                for f in files:
+                    if f and os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
+                return None
+            src_ac = a.get("codec_name", "").lower()
+            if src_ac in ("aac", "aac_latm"):
+                files.append(None)   # already AAC — will copy from source
+                continue
+            ai = a.get("index", 0)
+            tmp_audio = os.path.join(
+                config.LOCAL_TEMP_DIR,
+                f"_audio_{os.getpid()}_{i}.m4a",
+            )
+            # Always include DTS-fix flags: aac_mf can exit non-zero on
+            # non-monotonic DTS without them and leave an invalid container.
+            cmd = [
+                "ffmpeg", "-y",
+                "-fflags", "+genpts",
+                "-avoid_negative_ts", "make_zero",
+                "-i", input_path,
+                "-map", f"0:{ai}",
+                "-c:a", "aac_mf",
+                "-vn", "-sn",
+                tmp_audio,
+            ]
+            log(f"Pre-encoding audio track {i+1}/{len(audio_streams)} to AAC...")
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=600,
+            )
+            # Write raw stderr to its own step log regardless of outcome
+            if conv_logger:
+                conv_logger.write_step(
+                    f"audio_track_{i+1}_aac_mf", r.stderr or ""
+                )
+            # Verify with ffprobe — do not rely on exit code because aac_mf
+            # returns non-zero for harmless DTS warnings even on good output.
+            if not _is_valid_audio(tmp_audio):
+                # aac_mf failed (may be a Windows MFT crash / access violation
+                # on specific audio content).  Fall back to native aac.
+                log(f"aac_mf failed for track {i+1} (rc={r.returncode}) — "
+                    "retrying with native aac encoder...")
+                err_lines = (r.stderr or "").strip().splitlines()
+                for el in err_lines[-5:]:
+                    if el.strip():
+                        log(f"  [aac_mf stderr] {el.rstrip()}")
+                if os.path.exists(tmp_audio):
+                    try:
+                        os.remove(tmp_audio)
+                    except OSError:
+                        pass
+                # Native aac fallback — still use DTS-fix flags.
+                # On Windows, restrict the subprocess to P-cores only to avoid
+                # the floating-point overflow bug in native aac on Intel E-cores.
+                cmd_native = [
+                    "ffmpeg", "-y",
+                    "-fflags", "+genpts",
+                    "-avoid_negative_ts", "make_zero",
+                    "-i", input_path,
+                    "-map", f"0:{ai}",
+                    "-c:a", "aac",
+                    "-vn", "-sn",
+                    tmp_audio,
+                ]
+                r2 = _run_with_pcores_only(
+                    cmd_native, capture_output=True, text=True, timeout=600,
+                )
+                # Write native aac stderr to its own step log
+                if conv_logger:
+                    conv_logger.write_step(
+                        f"audio_track_{i+1}_native_aac", r2.stderr or ""
+                    )
+                if not _is_valid_audio(tmp_audio):
+                    log(f"Audio pre-encode failed for track {i+1} (aac_mf and native aac both failed)")
+                    if conv_logger:
+                        conv_logger.mark_fail_at(
+                            f"audio track {i+1} pre-encode "
+                            f"(aac_mf rc={r.returncode}, native aac also failed)"
+                        )
+                    err2 = (r2.stderr or "").strip().splitlines()
+                    for el in err2[-5:]:
+                        if el.strip():
+                            log(f"  [aac stderr] {el.rstrip()}")
+                    if os.path.exists(tmp_audio):
+                        try:
+                            os.remove(tmp_audio)
+                        except OSError:
+                            pass
+                    for f in files:
+                        if f and os.path.exists(f):
+                            try:
+                                os.remove(f)
+                            except OSError:
+                                pass
+                    return None
+                log(f"Track {i+1} pre-encoded successfully with native aac fallback")
+            files.append(tmp_audio)
+        return files
+
+    def _build_cmd(
+        include_subs: bool,
+        extra_flags: list[str] | None = None,
+        pre_audio: list[str | None] | None = None,
+    ) -> tuple[list[str], str]:
         """Build the ffmpeg remux command."""
         cmd = ["ffmpeg", "-y", "-i", input_path]
 
-        # Append SRT files as additional inputs
+        # Append SRT files as additional inputs (inputs 1..len(srt_paths))
         for srt in srt_paths:
             cmd += ["-i", srt]
+
+        # Append pre-encoded audio files as extra inputs
+        # (inputs len(srt_paths)+1 .. len(srt_paths)+len(non-None pre_audio))
+        pre_audio_start_idx = 1 + len(srt_paths)
+        if pre_audio:
+            for af in pre_audio:
+                if af is not None:
+                    cmd += ["-i", af]
 
         # Video
         if hi10:
@@ -703,12 +955,17 @@ def remux_to_mp4(
             ]
             encoder_tag = "hevc_qsv"
 
-        # Audio — copy if already AAC; otherwise transcode to AAC
+        # Audio — use pre-encoded file (copy) if available, else inline transcode
+        pre_idx = pre_audio_start_idx
         for i, a in enumerate(audio_streams):
             ai = a.get("index", 0)
             src_ac = a.get("codec_name", "").lower()
-            audio_codec = "copy" if src_ac in ("aac", "aac_latm") else aac
-            cmd += ["-map", f"0:{ai}", f"-c:a:{i}", audio_codec]
+            if pre_audio and pre_audio[i] is not None:
+                cmd += ["-map", f"{pre_idx}:a:0", f"-c:a:{i}", "copy"]
+                pre_idx += 1
+            else:
+                audio_codec = "copy" if src_ac in ("aac", "aac_latm") else aac
+                cmd += ["-map", f"0:{ai}", f"-c:a:{i}", audio_codec]
 
         # Subtitles
         if include_subs:
@@ -738,30 +995,43 @@ def remux_to_mp4(
     # ------------------------------------------------------------------
     try:
         encoder_used = ""
+        _pre_audio: list[str | None] | None = None   # populated on pre-encode attempts
 
-        for attempt, (inc_subs, extra) in enumerate([
-            (True,  None),                                                         # attempt 0: normal
-            (True,  ["-max_interleave_delta", "0"]),                               # attempt 1: DTS fix
-            (True,  ["-fflags", "+genpts", "-avoid_negative_ts", "make_zero"]),   # attempt 2: aggressive DTS fix
-            (False, None),                                                         # attempt 3: no subs
+        for attempt, (inc_subs, extra, use_preenc) in enumerate([
+            (True,  None,                                                               False),  # 0: normal
+            (True,  ["-max_interleave_delta", "0"],                                   False),  # 1: DTS fix
+            (True,  ["-fflags", "+genpts", "-avoid_negative_ts", "make_zero"],       False),  # 2: aggressive DTS fix
+            (True,  None,                                                               True),   # 3: pre-encode audio
+            (False, None,                                                               True),   # 4: pre-encode audio, no subs
         ]):
             if stop_event.is_set():
                 return False, ""
 
-            cmd, enc = _build_cmd(inc_subs, extra)
+            # On the first pre-encode attempt, run the pre-encode step
+            if use_preenc and _pre_audio is None:
+                log("aac_mf failed — pre-encoding audio tracks individually with aac_mf...")
+                _pre_audio = _preencode_audio_to_aac()
+                if _pre_audio is None:
+                    log("Audio pre-encode failed — giving up.")
+                    return False, ""
+
+            cmd, enc = _build_cmd(
+                inc_subs, extra,
+                pre_audio=_pre_audio if use_preenc else None,
+            )
             encoder_used = enc
             if attempt == 1:
                 log("DTS overflow detected — retrying with -max_interleave_delta 0")
             elif attempt == 2:
                 log("DTS fix retry — trying -fflags +genpts -avoid_negative_ts make_zero")
-            elif attempt == 3:
+            elif attempt == 4:
                 if english_text_subs or bitmap_sub_indices:
                     log(
-                        "ERROR: DTS error could not be resolved with subtitles present. "
+                        "ERROR: remux failed and could not be resolved with subtitles present. "
                         "Aborting to preserve subtitle tracks."
                     )
                     return False, ""
-                log("DTS retry failed — retrying without subtitle streams")
+                log("Retrying without subtitle streams")
 
             if os.path.exists(tmp_path):
                 try:
@@ -815,11 +1085,18 @@ def remux_to_mp4(
                 log("ERROR: ffmpeg not found.")
                 return False, ""
 
+            # Always save the full attempt output to its phase log
+            if conv_logger:
+                conv_logger.write_phase(
+                    f"remux_attempt_{attempt+1}", "".join(output_lines)
+                )
+
             if proc.returncode == 0 and os.path.exists(tmp_path):
                 break  # success
 
             # Classify the failure: timestamp-related errors trigger retries;
-            # unknown/silent failures (last line is a progress line) also retry.
+            # unknown/silent failures (last line is a progress line) also retry;
+            # aac_mf encoder crashes (Windows MFT) also retry via pre-encode path.
             full_output = "".join(output_lines)
             lo = full_output.lower()
             _TS_PATTERNS = ("out of order", "non-monotonic", "non monotonous",
@@ -832,20 +1109,26 @@ def remux_to_mp4(
                 ""
             )
             is_silent = last_meaningful == "" or last_meaningful.startswith("frame=")
+            # aac_mf crash: Windows Media Foundation encoder failure (mid-encode or at init)
+            is_aac_mf_fail = any("[aac_mf @" in l for l in output_lines)
 
-            if not is_ts_error and not is_silent:
+            if not is_ts_error and not is_silent and not is_aac_mf_fail:
                 if attempt == 0:
-                    # Known non-recoverable failure — log output for diagnosis and bail
+                    # True non-recoverable failure — log output for diagnosis and bail
                     for ol in output_lines:
                         ol = ol.rstrip()
                         if ol:
                             log(ol)
                     log("Remux failed.")
+                    if conv_logger:
+                        conv_logger.mark_fail_at("remux attempt 1 (non-recoverable error)")
                     return False, ""
-            # Timestamp error or silent crash — continue to next attempt
+            # Timestamp error, silent crash, or aac_mf failure — continue to next attempt
 
         else:
             log("All remux attempts failed.")
+            if conv_logger:
+                conv_logger.mark_fail_at("remux (all attempts failed)")
             return False, ""
 
         if not os.path.exists(tmp_path):
@@ -880,6 +1163,14 @@ def remux_to_mp4(
                     os.remove(srt)
                 except OSError:
                     pass
+        # Clean up any pre-encoded audio files
+        if _pre_audio:
+            for af in _pre_audio:
+                if af and os.path.exists(af):
+                    try:
+                        os.remove(af)
+                    except OSError:
+                        pass
 
 
 def compress_and_remux(
@@ -890,6 +1181,7 @@ def compress_and_remux(
     quality: int | None = None,
     progress_cb: ProgressCb | None = None,
     pid_holder: list[int] | None = None,
+    conv_logger: "_conv_log.ConversionLogger | None" = None,
 ) -> tuple[bool, str]:
     """
     Anime normal-H.264 path: compress with QSV/SW first, then remux the
@@ -915,6 +1207,7 @@ def compress_and_remux(
         quality=quality,
         progress_cb=progress_cb,
         pid_holder=pid_holder,
+        conv_logger=conv_logger,
     )
 
     if not ok:
@@ -948,6 +1241,7 @@ def compress_and_remux(
         progress_cb=None,   # don't double-report progress
         pid_holder=pid_holder,
         hi10=True,
+        conv_logger=conv_logger,
     )
 
     # Clean up intermediate and its temp dir
@@ -997,6 +1291,8 @@ def convert_video(
     src_mb     = src_size / (1024 * 1024)
     duration   = _ffprobe_duration(input_path)
 
+    clog = _conv_log.ConversionLogger(input_path)
+
     if anime_mode:
         if is_hi10(input_path):
             log("Hi10 H.264 detected — QSV unsupported, will use libx265 software encoder.")
@@ -1009,9 +1305,11 @@ def convert_video(
             quality=quality,
             progress_cb=progress_cb,
             pid_holder=pid_holder,
+            conv_logger=clog,
         )
 
         if not ok:
+            clog.failure()
             return {
                 "ok":             False,
                 "output_path":    None,
@@ -1020,6 +1318,7 @@ def convert_video(
                 "saved_pct":      0,
                 "encoder_used":   encoder_used,
                 "error":          "anime encode failed",
+                "conv_logger":    clog,
             }
 
         out_name     = Path(input_path).stem + ".mp4"
@@ -1027,6 +1326,8 @@ def convert_video(
         ok_verify, reason = _verify_output(output_path, duration)
         if not ok_verify:
             log(f"Integrity check failed: {reason}")
+            clog.mark_fail_at(f"integrity check: {reason}")
+            clog.failure()
             return {
                 "ok":             False,
                 "output_path":    output_path,
@@ -1035,12 +1336,14 @@ def convert_video(
                 "saved_pct":      0,
                 "encoder_used":   encoder_used,
                 "error":          f"integrity: {reason}",
+                "conv_logger":    clog,
             }
 
         out_size  = os.path.getsize(output_path)
         out_mb    = out_size / (1024 * 1024)
         saved_mb  = max(0.0, src_mb - out_mb)
         saved_pct = int(saved_mb / src_mb * 100) if src_mb > 0 else 0
+        clog.success(encoder_used, saved_pct)
         return {
             "ok":             True,
             "output_path":    output_path,
@@ -1049,6 +1352,7 @@ def convert_video(
             "saved_pct":      saved_pct,
             "encoder_used":   encoder_used,
             "error":          None,
+            "conv_logger":    clog,
         }
 
     # Normal mode
@@ -1060,9 +1364,11 @@ def convert_video(
         quality     = quality,
         progress_cb = progress_cb,
         pid_holder  = pid_holder,
+        conv_logger = clog,
     )
 
     if not ok:
+        clog.failure()
         return {
             "ok":           False,
             "output_path":  None,
@@ -1071,6 +1377,7 @@ def convert_video(
             "saved_pct":    0,
             "encoder_used": encoder_used,
             "error":        "encode failed or no savings",
+            "conv_logger":  clog,
         }
 
     # Locate output file
@@ -1083,6 +1390,8 @@ def convert_video(
     ok_verify, reason = _verify_output(output_path, duration)
     if not ok_verify:
         log(f"Integrity check failed: {reason}")
+        clog.mark_fail_at(f"integrity check: {reason}")
+        clog.failure()
         return {
             "ok":           False,
             "output_path":  output_path,
@@ -1091,13 +1400,14 @@ def convert_video(
             "saved_pct":    0,
             "encoder_used": encoder_used,
             "error":        f"integrity: {reason}",
+            "conv_logger":  clog,
         }
 
     out_size   = os.path.getsize(output_path)
     out_mb     = out_size / (1024 * 1024)
     saved_mb   = src_mb - out_mb
     saved_pct  = int(saved_mb / src_mb * 100) if src_mb > 0 else 0
-
+    clog.success(encoder_used, saved_pct)
     return {
         "ok":             True,
         "output_path":    output_path,
@@ -1106,4 +1416,5 @@ def convert_video(
         "saved_pct":      saved_pct,
         "encoder_used":   encoder_used,
         "error":          None,
+        "conv_logger":    clog,
     }

@@ -185,8 +185,13 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             track_ok = True
             track_reason = ""
             if out_norm and out_norm != src_norm:
+                # Skip subtitle check for MP4 outputs (anime mode): remux_to_mp4
+                # intentionally excludes non-English subs and unprocessable bitmap
+                # subs (e.g. dvd_subtitle), so the output MP4 legitimately has
+                # fewer subtitle tracks than the source.  Audio is still checked.
+                out_is_mp4 = result["output_path"].lower().endswith(".mp4")
                 track_ok, track_reason = converter._verify_tracks_preserved(
-                    full_path, result["output_path"]
+                    full_path, result["output_path"], check_subs=not out_is_mp4
                 )
 
             if not track_ok:
@@ -198,6 +203,9 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                 except OSError:
                     pass
                 db.mark_failed(rec_id, f"track verification: {track_reason}", _utcnow())
+                _clog = result.get("conv_logger")
+                if _clog:
+                    _clog.failure(f"track verification: {track_reason}")
                 with _job_lock:
                     _job["files"][idx]["status"]     = "failed"
                     _job["files"][idx]["error_tail"] = f"track verification: {track_reason}"
@@ -221,6 +229,9 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                         _job_log(f"Deleted source: {full_path}")
                     except OSError as exc:
                         _job_log(f"Could not delete source: {exc}")
+                _clog = result.get("conv_logger")
+                if _clog:
+                    _clog.success(result["encoder_used"], result["saved_pct"])
                 with _job_lock:
                     _job["files"][idx].update({
                         "status":     "done",
@@ -237,6 +248,9 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             )
             error_tail = "\n".join(_file_log[-50:])
             db.mark_failed(rec_id, error_tail, _utcnow())
+            _clog = result.get("conv_logger")
+            if _clog:
+                _clog.failure(result.get("error", ""))
             with _job_lock:
                 _job["files"][idx]["status"]     = "failed"
                 _job["files"][idx]["ffmpeg_cmd"] = ffmpeg_cmd
@@ -386,6 +400,16 @@ def index():
 def api_browse():
     req_path = request.args.get("path", "").strip()
 
+    if req_path:
+        req_path = os.path.normpath(req_path)
+        # Walk up the tree until we find an existing directory (handles deleted remembered paths)
+        while req_path and not os.path.isdir(req_path):
+            parent = os.path.dirname(req_path)
+            if parent == req_path:
+                req_path = ""  # drive root doesn't exist — fall back to drive listing
+                break
+            req_path = parent
+
     # Root — list available drives
     if not req_path:
         drives = []
@@ -398,10 +422,6 @@ def api_browse():
                     "has_children": True,
                 })
         return jsonify({"path": "", "parent": None, "dirs": drives})
-
-    req_path = os.path.normpath(req_path)
-    if not os.path.isdir(req_path):
-        return jsonify({"error": "Not a directory"}), 400
 
     parent = os.path.dirname(req_path)
     if parent == req_path:

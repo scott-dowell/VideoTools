@@ -724,11 +724,14 @@ def remux_to_mp4(
     # ------------------------------------------------------------------
     # Subtitle classification
     # ------------------------------------------------------------------
-    TEXT_SUB_CODECS   = {"ass", "subrip", "srt", "webvtt", "mov_text"}
-    BITMAP_SUB_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "pgssub", "vobsub"}
+    TEXT_SUB_CODECS    = {"ass", "subrip", "srt", "webvtt", "mov_text"}
+    PGS_SUB_CODECS    = {"hdmv_pgs_subtitle", "pgssub"}   # can be OCR'd to SRT
+    COPY_BITMAP_CODECS = {"dvd_subtitle", "vobsub"}        # copy as-is (bin_data in MP4)
+    BITMAP_SUB_CODECS = PGS_SUB_CODECS | COPY_BITMAP_CODECS
 
-    english_text_subs   = []   # (stream_index, codec_name)
-    bitmap_sub_indices  = []   # stream index list for OCR
+    english_text_subs   = []   # stream indices for text subs (-> mov_text)
+    pgs_sub_indices     = []   # stream indices for PGS subs (-> OCR -> SRT)
+    copy_bitmap_indices = []   # stream indices for dvd_subtitle/vobsub (-> copy)
 
     for s in sub_streams:
         codec = s.get("codec_name", "").lower()
@@ -739,19 +742,24 @@ def remux_to_mp4(
         if codec in TEXT_SUB_CODECS:
             if eng:
                 english_text_subs.append(s["index"])
-        elif codec in BITMAP_SUB_CODECS:
+        elif codec in PGS_SUB_CODECS:
             if eng:
-                bitmap_sub_indices.append(s["index"])
+                pgs_sub_indices.append(s["index"])
+        elif codec in COPY_BITMAP_CODECS:
+            if eng:
+                copy_bitmap_indices.append(s["index"])
 
     # If no English subs kept at all but there's exactly one sub track, keep it
     # (sole-sub rule: likely English even if not tagged)
-    if not english_text_subs and not bitmap_sub_indices and len(sub_streams) == 1:
+    if not english_text_subs and not pgs_sub_indices and not copy_bitmap_indices and len(sub_streams) == 1:
         s = sub_streams[0]
         codec = s.get("codec_name", "").lower()
         if codec in TEXT_SUB_CODECS:
             english_text_subs.append(s["index"])
-        elif codec in BITMAP_SUB_CODECS:
-            bitmap_sub_indices.append(s["index"])
+        elif codec in PGS_SUB_CODECS:
+            pgs_sub_indices.append(s["index"])
+        elif codec in COPY_BITMAP_CODECS:
+            copy_bitmap_indices.append(s["index"])
 
     # ------------------------------------------------------------------
     # OCR bitmap subs
@@ -759,14 +767,14 @@ def remux_to_mp4(
     import bitmap_subs as _bsubs
 
     srt_paths: list[str] = []
-    if bitmap_sub_indices and not _bsubs.DEPS_OK:
+    if pgs_sub_indices and not _bsubs.DEPS_OK:
         log(
             "ERROR: bitmap subtitle track(s) found but OCR dependencies are not installed. "
             "Run: pip install easyocr Pillow pysubs2"
         )
         return False, ""
-    if bitmap_sub_indices:
-        log(f"OCR bitmap subs ({len(bitmap_sub_indices)} track(s))...")
+    if pgs_sub_indices:
+        log(f"OCR bitmap subs ({len(pgs_sub_indices)} track(s))...")
         try:
             srt_paths = _bsubs.ocr_bitmap_subs_to_srt(
                 input_path=input_path,
@@ -779,6 +787,8 @@ def remux_to_mp4(
         except Exception as exc:
             log(f"ERROR: bitmap sub OCR failed: {exc} — aborting to preserve subtitles")
             return False, ""
+    if copy_bitmap_indices:
+        log(f"Copying {len(copy_bitmap_indices)} dvd_subtitle/vobsub track(s) directly into MP4...")
 
     # ------------------------------------------------------------------
     # Build output path
@@ -970,20 +980,24 @@ def remux_to_mp4(
 
         # Subtitles
         if include_subs:
-            # Text subs from source
+            # Text subs from source (-> mov_text)
             for si in english_text_subs:
                 cmd += ["-map", f"0:{si}"]
-            # OCR'd SRT files (inputs 1..N)
+            # OCR'd SRT files (inputs 1..N) (-> mov_text)
             for j in range(len(srt_paths)):
                 cmd += ["-map", f"{j+1}:s:0"]
             # Tag OCR'd tracks with English language (they were selected as English above)
             text_sub_offset = len(english_text_subs)
             for j in range(len(srt_paths)):
                 cmd += [f"-metadata:s:s:{text_sub_offset + j}", "language=eng"]
-            # Convert all subtitle streams to mov_text
+            # Convert text+OCR subtitle streams to mov_text
             sub_count = len(english_text_subs) + len(srt_paths)
             if sub_count > 0:
                 cmd += ["-c:s", "mov_text"]
+            # dvd_subtitle/vobsub tracks — copy directly (become bin_data in MP4)
+            for si in copy_bitmap_indices:
+                cmd += ["-map", f"0:{si}", f"-c:s:{sub_count}", "copy"]
+                sub_count += 1
 
         if extra_flags:
             cmd += extra_flags
@@ -1028,7 +1042,7 @@ def remux_to_mp4(
             elif attempt == 2:
                 log("DTS fix retry — trying -fflags +genpts -avoid_negative_ts make_zero")
             elif attempt == 4:
-                if english_text_subs or bitmap_sub_indices:
+                if english_text_subs or pgs_sub_indices or copy_bitmap_indices:
                     log(
                         "ERROR: remux failed and could not be resolved with subtitles present. "
                         "Aborting to preserve subtitle tracks."

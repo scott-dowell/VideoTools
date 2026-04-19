@@ -575,8 +575,17 @@ function _estTick(pending, i) {
 // ============================================================
 // Conversion  (live /api/start + /api/status polling)
 // ============================================================
-let _pollTimer = null;
-let _isPaused  = false;
+let _pollTimer  = null;
+let _isPaused   = false;
+let _logCursor  = 0;
+
+// Returns true for verbose ffmpeg internals that clutter the log box
+function _isVerboseLogLine(msg) {
+  if (msg.startsWith('Running: ')) return true;
+  if (/^\[[\w_]+ @ /.test(msg)) return true;   // [hevc_qsv @ 0x...] codec context
+  if (/^(ffmpeg |ffprobe |  |Input #|Output #|Stream mapping|Stream #\d|Press \[|video:|audio:|subtitle:|global headers:)/.test(msg)) return true;
+  return false;
+}
 
 function _startPolling() {
   if (_pollTimer) return;
@@ -656,6 +665,18 @@ function _pollStatus() {
         updateStats(_files);
       }
 
+      // Render new backend log lines (filter out verbose ffmpeg internals)
+      if (s.log && s.log.length > _logCursor) {
+        s.log.slice(_logCursor).forEach(msg => {
+          if (_isVerboseLogLine(msg)) return;
+          const cls = msg.startsWith('ERROR:') ? 'err'
+                    : /^(Done\.|NOTE:|Skipped |Track \d+ pre-encoded)/.test(msg) ? 'ok'
+                    : 'info';
+          addLog(msg, cls);
+        });
+        _logCursor = s.log.length;
+      }
+
       // Transition state
       if (s.state === 'done') {
         _stopPolling();
@@ -693,6 +714,7 @@ function startConversion() {
   .then(d => {
     if (d.ok) {
       _isPaused = false;
+      _logCursor = 0;
       setButtonStates('running');
       _startPolling();
     } else {

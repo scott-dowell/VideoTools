@@ -291,6 +291,7 @@ def compress_simple(
     try:
         # Try QSV first
         encoder_used = "hevc_qsv"
+        log("Compressing with hevc_qsv...")
         qsv_log = conv_logger.tee(log, "compress_qsv") if conv_logger else log
         success = _run_ffmpeg(
             _qsv_cmd(input_path, tmp_path, quality), qsv_log, stop_event,
@@ -1020,7 +1021,9 @@ def remux_to_mp4(
                 pre_audio=_pre_audio if use_preenc else None,
             )
             encoder_used = enc
-            if attempt == 1:
+            if attempt == 0:
+                log("Remuxing to MP4...")
+            elif attempt == 1:
                 log("DTS overflow detected — retrying with -max_interleave_delta 0")
             elif attempt == 2:
                 log("DTS fix retry — trying -fflags +genpts -avoid_negative_ts make_zero")

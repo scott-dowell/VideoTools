@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -100,6 +102,7 @@ def _qsv_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
     return [
         "ffmpeg", "-y",
         "-stats_period", "1",
+        "-fflags", "+discardcorrupt",
         "-i", input_path,
         "-c:v", "hevc_qsv",
         "-global_quality", str(quality),
@@ -116,6 +119,7 @@ def _sw_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
     return [
         "ffmpeg", "-y",
         "-stats_period", "1",
+        "-fflags", "+discardcorrupt",
         "-i", input_path,
         "-c:v", "libx265",
         "-crf", str(quality),
@@ -134,7 +138,7 @@ def _sw_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 _PROGRESS_RE = re.compile(
-    r"frame=\s*(?P<frame>\d+)\s+fps=\s*(?P<fps>[\d.]+).*?time=(?P<time>[\d:.]+)"
+    r"frame=\s*(?P<frame>\d+)\s+fps=\s*(?P<fps>[\d.]+).*?time=(?P<time>[\d:.]+).*?speed=\s*(?P<speed>[\d.]+)x"
 )
 
 
@@ -189,22 +193,58 @@ def _run_ffmpeg(
         if pid_holder is not None:
             pid_holder[0] = proc.pid
 
-        for line in proc.stdout:
+        # Read stdout in a daemon thread — on Windows, Intel QSV's runtime
+        # can launch helper processes that inherit the pipe handle.  If we
+        # block directly on `for line in proc.stdout:` the loop never sees
+        # EOF even after ffmpeg exits because those grandchildren still hold
+        # the write-end of the pipe.  Reading via a queue + timeout lets us
+        # detect process exit and break out cleanly.
+        _line_queue: queue.Queue[str | None] = queue.Queue()
+
+        def _reader() -> None:
+            try:
+                for line in proc.stdout:
+                    _line_queue.put(line)
+            finally:
+                _line_queue.put(None)  # sentinel — always signals completion
+
+        _reader_thread = threading.Thread(target=_reader, daemon=True)
+        _reader_thread.start()
+
+        while True:
+            try:
+                line = _line_queue.get(timeout=0.5)
+            except queue.Empty:
+                # No output yet — check whether we should abort
+                if stop_event.is_set():
+                    proc.kill()
+                    proc.wait()
+                    _reader_thread.join(timeout=5)
+                    log("Stopped by user.")
+                    return False
+                continue
+
+            if line is None:
+                # Reader thread reached EOF
+                break
+
             line_s = line.rstrip()
             if stop_event.is_set():
                 proc.kill()
                 proc.wait()
+                _reader_thread.join(timeout=5)
                 log("Stopped by user.")
                 return False
 
             if progress_cb and duration_secs > 0:
                 m = _PROGRESS_RE.search(line_s)
                 if m:
-                    elapsed = _parse_time(m.group("time"))
-                    fps     = float(m.group("fps") or 0)
-                    pct     = min(100.0, elapsed / duration_secs * 100)
-                    remaining = (duration_secs - elapsed) / fps if fps > 0 else 0
-                    eta_secs  = max(0, int(remaining))
+                    elapsed  = _parse_time(m.group("time"))
+                    fps      = float(m.group("fps") or 0)
+                    speed    = float(m.group("speed") or 0)
+                    pct      = min(100.0, elapsed / duration_secs * 100)
+                    # eta = remaining source-seconds / encode speed multiplier
+                    eta_secs = max(0, int((duration_secs - elapsed) / speed)) if speed > 0 else 0
                     try:
                         progress_cb(pct, fps, eta_secs)
                     except Exception:
@@ -215,6 +255,7 @@ def _run_ffmpeg(
             if line_s:
                 log(line_s)
 
+        _reader_thread.join(timeout=5)
         proc.wait()
         if pid_holder is not None:
             pid_holder[0] = 0
@@ -227,7 +268,7 @@ def _run_ffmpeg(
             probe = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                  "-of", "default", output_path],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
             if probe.returncode == 0:
                 try:
@@ -250,6 +291,24 @@ def _run_ffmpeg(
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _temp_dir_for(output_dir: str) -> str:
+    """Return a temp staging directory on the same drive as *output_dir*.
+
+    Keeping temp on the same drive as the output means:
+    - os.replace() always succeeds (no cross-drive WinError 17)
+    - C:\\ space is not consumed by conversions targeting other drives
+    Falls back to config.LOCAL_TEMP_DIR for UNC/network paths.
+    """
+    drive = os.path.splitdrive(os.path.abspath(output_dir))[0]
+    if drive:
+        return os.path.join(drive + os.sep, "Temp", "vc_working")
+    return config.LOCAL_TEMP_DIR
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -262,6 +321,7 @@ def compress_simple(
     progress_cb: ProgressCb | None = None,
     pid_holder: list[int] | None = None,
     conv_logger: "_conv_log.ConversionLogger | None" = None,
+    tmp_holder: list[str] | None = None,
 ) -> tuple[bool, str]:
     """
     Normal-mode compression.
@@ -283,9 +343,12 @@ def compress_simple(
     out_ext  = suffix if suffix in (".mp4", ".mkv", ".m4v") else ".mkv"
     out_name = Path(input_path).stem + out_ext
 
-    os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
-    tmp_path   = os.path.join(config.LOCAL_TEMP_DIR, out_name)
+    _local_temp = _temp_dir_for(output_dir)
+    os.makedirs(_local_temp, exist_ok=True)
+    tmp_path   = os.path.join(_local_temp, out_name)
     final_path = os.path.join(output_dir, out_name)
+    if tmp_holder is not None:
+        tmp_holder[0] = tmp_path
 
     encoder_used = ""
     try:
@@ -327,7 +390,7 @@ def compress_simple(
                     f"output not smaller ({enc_size:,} >= {src_size:,} bytes)"
                 )
             os.remove(tmp_path)
-            return False, ""
+            return False, "no_savings"
 
         # Verify audio/subtitle tracks survived before atomically replacing source
         ok_tracks, track_reason = _verify_tracks_preserved(input_path, tmp_path)
@@ -337,22 +400,31 @@ def compress_simple(
             return False, ""
 
         os.makedirs(output_dir, exist_ok=True)
-        # Retry the rename — on Windows, AV software can briefly lock a newly
+        # Retry the move — on Windows, AV software can briefly lock a newly
         # written file, causing WinError 32.  A short back-off resolves it.
+        # os.replace() fails across drives (WinError 17), so fall back to
+        # shutil.move() which handles cross-drive by copy+delete.
+        import shutil as _shutil
         for _attempt in range(6):
             try:
                 os.replace(tmp_path, final_path)
                 break
-            except PermissionError:
-                if _attempt == 5:
-                    raise
-                import time as _time
-                _time.sleep(0.5)
+            except OSError as _e:
+                if _e.winerror == 17:  # ERROR_NOT_SAME_DEVICE — cross-drive move
+                    _shutil.move(tmp_path, final_path)
+                    break
+                if _e.winerror == 32 and _attempt < 5:  # ERROR_SHARING_VIOLATION
+                    import time as _time
+                    _time.sleep(0.5)
+                    continue
+                raise
         saved = src_size - enc_size
         log(f"Done. Saved {saved / 1024 / 1024:.1f} MB → {final_path}")
         return True, encoder_used
 
     finally:
+        if tmp_holder is not None:
+            tmp_holder[0] = ""
         if os.path.exists(tmp_path):
             for _attempt in range(6):
                 try:
@@ -379,7 +451,7 @@ def _ffprobe_duration(input_path: str) -> float:
                 "-show_entries", "format=duration",
                 input_path,
             ],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
         )
         data = json.loads(result.stdout)
         return float(data["format"]["duration"])
@@ -495,13 +567,16 @@ def _verify_tracks_preserved(src_path: str, out_path: str, check_subs: bool = Tr
     Returns (True, "") on pass, (False, reason) on fail.
     """
     def _probe_streams(path: str) -> list:
-        r = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", path],
-            capture_output=True, text=True, timeout=30,
-        )
-        if not r.stdout.strip():
-            raise ValueError(f"ffprobe returned empty output for: {path}")
-        return json.loads(r.stdout).get("streams", [])
+        for attempt in range(3):
+            r = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", path],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            )
+            if r.stdout.strip():
+                return json.loads(r.stdout).get("streams", [])
+            if attempt < 2:
+                time.sleep(0.5)
+        raise ValueError(f"ffprobe returned empty output for: {path}")
 
     try:
         src_streams = _probe_streams(src_path)
@@ -541,20 +616,29 @@ def _verify_output(output_path: str, src_duration: float) -> tuple[bool, str]:
     if os.path.getsize(output_path) == 0:
         return False, "empty file"
 
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "quiet",
-                "-print_format", "json",
-                "-show_streams",
-                "-show_format",
-                output_path,
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
-        data = json.loads(result.stdout)
-    except Exception as exc:
-        return False, f"ffprobe error: {exc}"
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_streams",
+                    "-show_format",
+                    output_path,
+                ],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            )
+            if not result.stdout.strip():
+                raise ValueError(f"ffprobe returned empty output (rc={result.returncode})")
+            data = json.loads(result.stdout)
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(0.5)
+    else:
+        return False, f"ffprobe error: {last_exc}"
 
     streams = data.get("streams", [])
     has_video = any(s.get("codec_type") == "video" for s in streams)
@@ -606,7 +690,7 @@ def is_hi10(input_path: str) -> bool:
                 "-show_streams",
                 input_path,
             ],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
         )
         data = json.loads(result.stdout)
         streams = data.get("streams", [])
@@ -654,6 +738,7 @@ def remux_to_mp4(
     pid_holder: list[int] | None = None,
     hi10: bool | None = None,
     conv_logger: "_conv_log.ConversionLogger | None" = None,
+    tmp_holder: list[str] | None = None,
 ) -> tuple[bool, str]:
     """
     Anime-mode remux into MP4.
@@ -693,7 +778,7 @@ def remux_to_mp4(
                 "-show_streams",
                 input_path,
             ],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
         probe_data = json.loads(probe.stdout)
         streams = probe_data.get("streams", [])
@@ -737,6 +822,7 @@ def remux_to_mp4(
             return compress_simple(
                 input_path, output_dir, log, stop_event,
                 quality=quality, progress_cb=progress_cb, pid_holder=pid_holder,
+                tmp_holder=tmp_holder,
             )
 
     # ------------------------------------------------------------------
@@ -842,7 +928,7 @@ def remux_to_mp4(
                     "-show_entries", "format=duration",
                     "-of", "default", path,
                 ],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
             )
             return probe.returncode == 0 and "duration=" in probe.stdout
 
@@ -879,7 +965,7 @@ def remux_to_mp4(
             ]
             log(f"Pre-encoding audio track {i+1}/{len(audio_streams)} to AAC...")
             r = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=600,
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
             )
             # Write raw stderr to its own step log regardless of outcome
             if conv_logger:
@@ -916,7 +1002,7 @@ def remux_to_mp4(
                     tmp_audio,
                 ]
                 r2 = _run_with_pcores_only(
-                    cmd_native, capture_output=True, text=True, timeout=600,
+                    cmd_native, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
                 )
                 # Write native aac stderr to its own step log
                 if conv_logger:
@@ -1082,6 +1168,8 @@ def remux_to_mp4(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                 )
                 if pid_holder is not None:
                     pid_holder[0] = proc.pid
@@ -1177,10 +1265,17 @@ def remux_to_mp4(
         if not hi10 and enc_size >= src_size:
             log(f"Output not smaller ({enc_size:,} >= {src_size:,} bytes). Skipping.")
             os.remove(tmp_path)
-            return False, ""
+            return False, "no_savings"
 
         os.makedirs(output_dir, exist_ok=True)
-        os.replace(tmp_path, final_path)
+        import shutil as _shutil
+        try:
+            os.replace(tmp_path, final_path)
+        except OSError as _e:
+            if _e.winerror == 17:
+                _shutil.move(tmp_path, final_path)
+            else:
+                raise
         saved = max(0, src_size - enc_size)
         log(f"Done. Saved {saved/1024/1024:.1f} MB → {final_path}")
         return True, encoder_used
@@ -1217,6 +1312,7 @@ def compress_and_remux(
     progress_cb: ProgressCb | None = None,
     pid_holder: list[int] | None = None,
     conv_logger: "_conv_log.ConversionLogger | None" = None,
+    tmp_holder: list[str] | None = None,
 ) -> tuple[bool, str]:
     """
     Anime normal-H.264 path: compress with QSV/SW first, then remux the
@@ -1231,8 +1327,22 @@ def compress_and_remux(
     # with compress_simple's own internal tmp_path (which also lives in
     # LOCAL_TEMP_DIR).  Using a separate subdir avoids the finally-block
     # self-delete bug when output_dir == config.LOCAL_TEMP_DIR.
-    os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
-    compress_dir = tempfile.mkdtemp(dir=config.LOCAL_TEMP_DIR, prefix="_cr_")
+    _local_temp = _temp_dir_for(output_dir)
+    os.makedirs(_local_temp, exist_ok=True)
+    compress_dir = tempfile.mkdtemp(dir=_local_temp, prefix="_cr_")
+
+    # Phase 1 reports 0→92%; phase 2 (stream-copy remux) reports 92→100%.
+    # This prevents the progress bar from sitting frozen at ~100% while the
+    # container conversion runs silently.
+    _COMPRESS_SHARE = 0.92
+
+    def _compress_progress(pct: float, fps: float, eta: int) -> None:
+        if progress_cb is not None:
+            progress_cb(pct * _COMPRESS_SHARE, fps, eta)
+
+    def _remux_progress(pct: float, fps: float, eta: int) -> None:
+        if progress_cb is not None:
+            progress_cb(_COMPRESS_SHARE * 100 + pct * (1.0 - _COMPRESS_SHARE), fps, eta)
 
     ok, encoder_used = compress_simple(
         input_path=input_path,
@@ -1240,9 +1350,10 @@ def compress_and_remux(
         log=log,
         stop_event=stop_event,
         quality=quality,
-        progress_cb=progress_cb,
+        progress_cb=_compress_progress if progress_cb is not None else None,
         pid_holder=pid_holder,
         conv_logger=conv_logger,
+        tmp_holder=tmp_holder,
     )
 
     if not ok:
@@ -1273,10 +1384,11 @@ def compress_and_remux(
         log=log,
         stop_event=stop_event,
         quality=quality,
-        progress_cb=None,   # don't double-report progress
+        progress_cb=_remux_progress if progress_cb is not None else None,
         pid_holder=pid_holder,
         hi10=True,
         conv_logger=conv_logger,
+        tmp_holder=tmp_holder,
     )
 
     # Clean up intermediate and its temp dir
@@ -1305,6 +1417,7 @@ def convert_video(
     stop_event: threading.Event,
     log: LogFn | None = None,
     pid_holder: list[int] | None = None,
+    tmp_holder: list[str] | None = None,
 ) -> dict:
     """
     Convert a single video file.  Returns a result dict:
@@ -1341,6 +1454,7 @@ def convert_video(
             progress_cb=progress_cb,
             pid_holder=pid_holder,
             conv_logger=clog,
+            tmp_holder=tmp_holder,
         )
 
         if not ok:
@@ -1388,6 +1502,7 @@ def convert_video(
             "encoder_used":   encoder_used,
             "error":          None,
             "conv_logger":    clog,
+            "duration_secs":  duration,
         }
 
     # Normal mode
@@ -1400,6 +1515,7 @@ def convert_video(
         progress_cb = progress_cb,
         pid_holder  = pid_holder,
         conv_logger = clog,
+        tmp_holder  = tmp_holder,
     )
 
     if not ok:
@@ -1411,7 +1527,7 @@ def convert_video(
             "saved_mb":     0.0,
             "saved_pct":    0,
             "encoder_used": encoder_used,
-            "error":        "encode failed or no savings",
+            "error":        "no_savings" if encoder_used == "no_savings" else "encode failed",
             "conv_logger":  clog,
         }
 
@@ -1452,4 +1568,5 @@ def convert_video(
         "encoder_used":   encoder_used,
         "error":          None,
         "conv_logger":    clog,
+        "duration_secs":  duration,
     }

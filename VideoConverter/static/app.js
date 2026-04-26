@@ -2,9 +2,15 @@
 // State
 // ============================================================
 let _files        = [];   // file objects loaded by scan
+let _fileIndexByPath = {}; // full_path → _files index for O(1) probe/remove lookup
 let _scanEs       = null; // active EventSource for /api/scan
+let _probeTotal   = 0;    // files queued for phase-2 probe
+let _probeDone    = 0;    // probe events received so far
 let _activeFilter = 'all';
 let _searchQuery  = '';
+let _filterSizeMin = ''; let _filterSizeMax = '';
+let _filterBrMin   = ''; let _filterBrMax   = '';
+let _filterDurMin  = ''; let _filterDurMax  = '';
 let _appState     = 'idle';  // idle | scanning | ready | running | done | stopped
 let _dragSrcIndex = null;
 let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name'
@@ -69,6 +75,8 @@ function addLog(msg, cls) {
   div.className = 'log-' + cls;
   div.textContent = '\u25b8 ' + msg;
   box.appendChild(div);
+  // Trim oldest entries so the log doesn't grow unbounded
+  while (box.children.length > 200) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
 }
 
@@ -82,7 +90,9 @@ function setButtonStates(state) {
   const hstopBtn = document.getElementById('hstopBtn');
   if (hstopBtn) hstopBtn.disabled = state !== 'running';
   const rescanBtn = document.getElementById('rescanBtn');
-  if (rescanBtn) rescanBtn.disabled = !_currentScanPath || state === 'running' || state === 'scanning';
+  if (rescanBtn) rescanBtn.disabled = !_currentScanPath || state === 'running';
+  const cleanupBtn = document.getElementById('cleanupBtn');
+  if (cleanupBtn) cleanupBtn.disabled = !_currentScanPath || state === 'running';
   // Enable drag handles only when queue is ready and not running
   const canDrag = (state === 'ready');
   document.querySelectorAll('#queueBody tr[id^="row-"]').forEach(tr => {
@@ -200,11 +210,13 @@ function buildRow(f, index) {
 
   // col 5 — Status badge
   const tdStatus = document.createElement('td');
-  const badgeClass = f.status === 'done' ? 'badge-done'
-                   : f.status === 'failed' ? 'badge-failed'
+  const badgeClass = f.status === 'done'       ? 'badge-done'
+                   : f.status === 'failed'     ? 'badge-failed'
+                   : f.status === 'no_saving'  ? 'badge-no-saving'
                    : f.status === 'converting' ? 'badge-converting'
                    : 'badge-pending';
-  tdStatus.innerHTML = '<span class="badge ' + badgeClass + '">' + (f.status || 'pending') + '</span>';
+  const badgeLabel  = f.status === 'no_saving' ? 'Skipped – Larger' : (f.status || 'pending');
+  tdStatus.innerHTML = '<span class="badge ' + badgeClass + '">' + badgeLabel + '</span>';
   tr.appendChild(tdStatus);
 
   // col 5b — Est. saving
@@ -267,6 +279,32 @@ function _appendRows(newFiles, startIndex) {
   applyFilter();
 }
 
+// Fill in codec / bitrate / duration cells once a probe result arrives.
+function _updateRowProbe(idx, f) {
+  const tr = document.getElementById('row-' + idx);
+  if (!tr) return;
+  const cells = tr.querySelectorAll('td');
+  // Column order matches buildRow:
+  // 0=handle 1=folder 2=name 3=size 4=bitrate 5=codec 6=duration 7=status 8=est …
+  const tdBr    = cells[4];
+  const tdCodec = cells[5];
+  const tdDur   = cells[6];
+  if (tdBr) {
+    const br = f.bitrate_kbps || 0;
+    tdBr.textContent = br > 0 ? (br >= 1000 ? (br/1000).toFixed(1)+' Mbps' : br+' kbps') : '—';
+  }
+  if (tdCodec) {
+    const span = document.createElement('span');
+    span.className = 'codec-' + (f.codec || '').toLowerCase();
+    span.textContent = f.codec || '—';
+    tdCodec.textContent = '';
+    tdCodec.appendChild(span);
+  }
+  if (tdDur) {
+    tdDur.textContent = f.duration || '—';
+  }
+}
+
 function populateTable(files) {
   const tbody = document.getElementById('queueBody');
   tbody.innerHTML = '';
@@ -282,9 +320,10 @@ function populateTable(files) {
 
 function updateStats(files) {
   const totalMB  = files.reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
-  const done     = files.filter(f => f.status === 'done').length;
-  const failed   = files.filter(f => f.status === 'failed').length;
-  const pending  = files.filter(f => f.status === 'pending').length;
+  const done      = files.filter(f => f.status === 'done').length;
+  const failed    = files.filter(f => f.status === 'failed').length;
+  const noSaving  = files.filter(f => f.status === 'no_saving').length;
+  const pending   = files.filter(f => f.status === 'pending').length;
   const savedMB  = files.reduce((s, f) => s + (f.saved  ? parseFloat(f.saved.replace(/,/g, ''))  || 0 : 0), 0);
   const origMB   = files.filter(f => f.status === 'done')
                         .reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
@@ -320,7 +359,9 @@ function updateStats(files) {
   document.getElementById('chipCount-all').textContent     = files.length;
   document.getElementById('chipCount-pending').textContent = pending;
   document.getElementById('chipCount-done').textContent    = done;
-  document.getElementById('chipCount-failed').textContent  = failed;
+  document.getElementById('chipCount-failed').textContent    = failed;
+  const nsEl = document.getElementById('chipCount-no-saving');
+  if (nsEl) nsEl.textContent = noSaving;
 }
 
 // ============================================================
@@ -346,8 +387,45 @@ function applyFilter() {
     const matchSearch = !_searchQuery ||
       f.name.toLowerCase().includes(_searchQuery) ||
       (f.folder || '').toLowerCase().includes(_searchQuery);
-    row.style.display = (matchStatus && matchSearch) ? '' : 'none';
+    // Range filters (only applied when probe data is available)
+    const sizeMB = parseFloat((f.size || '0').replace(/,/g, '')) || 0;
+    const kbps   = f.bitrate_kbps || _fileBitrate(f);
+    const durMin = _parseDuration(f.duration) / 60;
+    const matchSize = (!_filterSizeMin || sizeMB >= +_filterSizeMin) &&
+                      (!_filterSizeMax || sizeMB <= +_filterSizeMax);
+    const matchBr   = (!_filterBrMin   || kbps   >= +_filterBrMin)   &&
+                      (!_filterBrMax   || kbps   <= +_filterBrMax);
+    const matchDur  = (!_filterDurMin  || durMin >= +_filterDurMin)  &&
+                      (!_filterDurMax  || durMin <= +_filterDurMax);
+    row.style.display = (matchStatus && matchSearch && matchSize && matchBr && matchDur) ? '' : 'none';
   });
+}
+
+function toggleFilterBar() {
+  const bar = document.getElementById('filterBar');
+  if (!bar) return;
+  bar.classList.toggle('d-none');
+}
+
+function onFilterChange() {
+  _filterSizeMin = document.getElementById('fSizeMin').value;
+  _filterSizeMax = document.getElementById('fSizeMax').value;
+  _filterBrMin   = document.getElementById('fBrMin').value;
+  _filterBrMax   = document.getElementById('fBrMax').value;
+  _filterDurMin  = document.getElementById('fDurMin').value;
+  _filterDurMax  = document.getElementById('fDurMax').value;
+  const hasFilter = _filterSizeMin || _filterSizeMax || _filterBrMin || _filterBrMax || _filterDurMin || _filterDurMax;
+  const btn = document.getElementById('filterToggleBtn');
+  if (btn) btn.classList.toggle('active', !!hasFilter);
+  applyFilter();
+}
+
+function clearRangeFilters() {
+  ['fSizeMin','fSizeMax','fBrMin','fBrMax','fDurMin','fDurMax'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  onFilterChange();
 }
 
 // ============================================================
@@ -405,17 +483,32 @@ function scanFolder(path) {
   localStorage.setItem('vc_last_folder', path);  // remember for re-scan and cleanup
   const rescanBtn = document.getElementById('rescanBtn');
   if (rescanBtn) rescanBtn.disabled = false;
+  const cleanupBtn2 = document.getElementById('cleanupBtn');
+  if (cleanupBtn2) cleanupBtn2.disabled = false;
   _estCancelled  = true;   // stop any in-flight estimation from previous scan
-  _estUserPaused = false;
+  // Restore estimation state from settings (don't override a deliberate user pause)
+  fetch('/api/settings').then(r => r.json()).then(s => { _estUserPaused = !(s.estimation_enabled); }).catch(() => {});
   _estAutoPaused = false;
   _estRunning    = false;
   const estStrip = document.getElementById('estStrip');
   if (estStrip) estStrip.classList.add('d-none');
   _files = [];
-  _activeFilter = 'all';
-  _searchQuery  = '';
+  _fileIndexByPath = {};
+  _probeTotal = 0;
+  _probeDone  = 0;
+  _scanStripPhase1();
+  _activeFilter  = 'all';
+  _searchQuery   = '';
+  _filterSizeMin = ''; _filterSizeMax = '';
+  _filterBrMin   = ''; _filterBrMax   = '';
+  _filterDurMin  = ''; _filterDurMax  = '';
   const sb = document.getElementById('searchBox');
   if (sb) sb.value = '';
+  ['fSizeMin','fSizeMax','fBrMin','fBrMax','fDurMin','fDurMax'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  const filterBtn = document.getElementById('filterToggleBtn');
+  if (filterBtn) filterBtn.classList.remove('active');
   const ss = document.getElementById('sortSelect');
   if (ss) ss.value = _sortBy;
   document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
@@ -435,28 +528,88 @@ function scanFolder(path) {
     const msg = JSON.parse(e.data);
     if (msg.type === 'folder') {
       const startIdx = _files.length;
-      msg.files.forEach(f => _files.push(f));
+      msg.files.forEach((f, i) => {
+        _fileIndexByPath[f.full_path] = startIdx + i;
+        _files.push(f);
+      });
       _appendRows(msg.files, startIdx);
       updateStats(_files);
-    } else if (msg.type === 'done') {
-      _scanEs.close(); _scanEs = null;
+      _scanStripPhase1(_files.length);
+    } else if (msg.type === 'probe') {
+      if (_probeDone === 0) _scanStripPhase2();
+      const idx = _fileIndexByPath[msg.full_path];
+      if (idx === undefined) return;
+      const f = _files[idx];
+      f.codec        = msg.codec;
+      f.duration     = msg.duration;
+      f.is_hi10      = msg.is_hi10;
+      f.streams      = msg.streams;
+      f.bitrate_kbps = msg.bitrate_kbps || (msg.streams && msg.streams.video
+        ? Math.round((msg.streams.video.bitrate || 0) / 1000) : 0);
+      _updateRowProbe(idx, f);
+      _probeDone++;
+      _scanStripProbeProgress();
+    } else if (msg.type === 'remove') {
+      const idx = _fileIndexByPath[msg.full_path];
+      if (idx === undefined) return;
+      _files.splice(idx, 1);
+      // Rebuild index map after removal
+      _fileIndexByPath = {};
+      _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });
+      const tr = document.getElementById('row-' + idx);
+      if (tr) tr.remove();
+      // Re-index remaining row id attributes
+      document.querySelectorAll('#queueBody tr[id^="row-"]').forEach((row, i) => {
+        row.id = 'row-' + i;
+      });
+      _probeTotal--;  // removed files don't count toward probe total
+      _scanStripProbeProgress();
+      updateStats(_files);
+    } else if (msg.type === 'scan_done') {
+      // Phase 1 complete — grid is fully populated, enable actions immediately.
+      // Phase 2 (ffprobe) will continue streaming for files without cached probe data.
       const totalGB = (msg.total_mb / 1024).toFixed(1);
       document.getElementById('totalSizeLabel').textContent = totalGB + ' GB total';
+      _probeTotal = msg.total_files;  // only files actually needing Phase 2/3 probe
+      const pendingCount = _files.filter(f => f.status === 'pending' || f.status === 'failed' || !f.status).length;
       if (_files.length === 0) {
         document.getElementById('queueBody').innerHTML =
           '<tr><td colspan="13" class="text-center text-secondary py-4">' +
-          'No unprocessed videos found.</td></tr>';
-        addLog('Scan complete \u2014 no unprocessed videos found.', 'ok');
+          'No video files found.</td></tr>';
+        addLog('Scan complete \u2014 no video files found.', 'ok');
         setButtonStates('idle');
+        _scanEs.close(); _scanEs = null;
+        _scanStripHide();
+      } else if (pendingCount === 0) {
+        addLog('Found ' + _files.length + ' files \u2014 all already converted.', 'ok');
+        setButtonStates('idle');
+        if (_probeTotal === 0) { _scanEs.close(); _scanEs = null; _scanStripHide(); }
+        else { _scanStripPhase2(); }
+        runEstimation(_files);
       } else {
-        addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB', 'ok');
+        const cached = _files.length - _probeTotal;
+        const cacheNote = cached > 0 ? ' (\u202f' + cached + ' cached)' : '';
+        if (_probeTotal > 0) {
+          addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB' + cacheNote + ' \u2014 probing\u2026', 'ok');
+          _scanStripPhase2();
+        } else {
+          addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB \u2014 all probe data cached.', 'ok');
+        }
         setButtonStates('ready');
         runEstimation(_files);
       }
+    } else if (msg.type === 'done') {
+      // Phase 2 complete — re-render with sort applied now that bitrates are known
+      _scanEs.close(); _scanEs = null;
+      _scanStripHide();
+      const totalGB = (msg.total_mb / 1024).toFixed(1);
+      document.getElementById('totalSizeLabel').textContent = totalGB + ' GB total';
+      populateTable(_files);
     } else if (msg.type === 'warning') {
       addLog('Skipped: ' + msg.message, 'warn');
     } else if (msg.type === 'error') {
       _scanEs.close(); _scanEs = null;
+      _scanStripHide();
       addLog('Scan error: ' + msg.message, 'err');
       setButtonStates('idle');
     }
@@ -464,9 +617,52 @@ function scanFolder(path) {
 
   _scanEs.onerror = function() {
     if (_scanEs) { _scanEs.close(); _scanEs = null; }
+    _scanStripHide();
     addLog('Scan connection lost.', 'err');
     setButtonStates('idle');
   };
+}
+
+// ============================================================
+// Scan strip helpers
+// ============================================================
+function _scanStripPhase1(count) {
+  const strip = document.getElementById('scanStrip');
+  const label = document.getElementById('scanStripLabel');
+  const bar   = document.getElementById('scanBar');
+  const icon  = document.getElementById('scanStripIcon');
+  if (!strip) return;
+  strip.classList.remove('d-none', 'scan-probing');
+  icon.className = 'bi bi-folder2-open est-strip-icon';
+  label.textContent = count > 0 ? 'Scanning\u2026 ' + count + ' files found' : 'Scanning\u2026';
+  // Indeterminate: animate bar between 5% and 25% to show activity
+  bar.style.transition = 'none';
+  bar.style.width = '5%';
+  requestAnimationFrame(() => {
+    bar.style.transition = 'width 1.8s ease-in-out';
+    bar.style.width = '25%';
+  });
+}
+function _scanStripPhase2() {
+  const strip = document.getElementById('scanStrip');
+  const icon  = document.getElementById('scanStripIcon');
+  if (!strip) return;
+  strip.classList.add('scan-probing');
+  icon.className = 'bi bi-cpu est-strip-icon';
+  _scanStripProbeProgress();
+}
+function _scanStripProbeProgress() {
+  const label = document.getElementById('scanStripLabel');
+  const bar   = document.getElementById('scanBar');
+  if (!label || !bar) return;
+  const pct = _probeTotal > 0 ? Math.round(_probeDone / _probeTotal * 100) : 0;
+  bar.style.transition = 'width .3s ease';
+  bar.style.width = pct + '%';
+  label.textContent = 'Probing ' + _probeDone + '\u202f/\u202f' + _probeTotal + '\u2026';
+}
+function _scanStripHide() {
+  const strip = document.getElementById('scanStrip');
+  if (strip) strip.classList.add('d-none');
 }
 
 // ============================================================
@@ -616,7 +812,7 @@ function _pollStatus() {
             ? (s.saved_mb / 1024).toFixed(1) + ' GB'
             : s.saved_mb.toFixed(0) + ' MB')
         : '\u2014';
-      const overallDone  = s.files ? s.files.filter(f => f.status === 'done' || f.status === 'failed').length : 0;
+      const overallDone  = s.files ? s.files.filter(f => f.status === 'done' || f.status === 'failed' || f.status === 'no_saving').length : 0;
       const overallTotal = s.total || 0;
       const overallPct   = overallTotal > 0 ? Math.round(overallDone / overallTotal * 100) : 0;
       document.getElementById('overallPct').textContent  = overallPct + '%';
@@ -648,11 +844,14 @@ function _pollStatus() {
           if (badgeCell) {
             const cls = sf.status === 'done'       ? 'badge-done'
                       : sf.status === 'failed'     ? 'badge-failed'
+                      : sf.status === 'no_saving'  ? 'badge-no-saving'
                       : sf.status === 'converting' ? 'badge-converting'
                       : 'badge-pending';
-            badgeCell.innerHTML = '<span class="badge ' + cls + '">' + (sf.status || 'pending') + '</span>';
+            const lbl = sf.status === 'no_saving' ? 'Skipped \u2013 Larger' : (sf.status || 'pending');
+            badgeCell.innerHTML = '<span class="badge ' + cls + '">' + lbl + '</span>';
             row.classList.toggle('tr-done',       sf.status === 'done');
             row.classList.toggle('tr-failed',     sf.status === 'failed');
+            row.classList.toggle('tr-no-saving',  sf.status === 'no_saving');
             row.classList.toggle('tr-converting', sf.status === 'converting');
           }
           // Output/Saved/% cells (cols 9, 10, 11)
@@ -667,7 +866,13 @@ function _pollStatus() {
 
       // Render new backend log lines (filter out verbose ffmpeg internals)
       if (s.log && s.log.length > _logCursor) {
+        const statusEl = document.getElementById('ffmpegStatus');
         s.log.slice(_logCursor).forEach(msg => {
+          // FFmpeg progress lines → single-line status bar (replace, not append)
+          if (/^frame=\s*\d+.*speed=/.test(msg)) {
+            if (statusEl) { statusEl.textContent = msg.trim(); statusEl.classList.remove('d-none'); }
+            return;
+          }
           if (_isVerboseLogLine(msg)) return;
           const cls = msg.startsWith('ERROR:') ? 'err'
                     : /^(Done\.|NOTE:|Skipped |Track \d+ pre-encoded)/.test(msg) ? 'ok'
@@ -678,6 +883,11 @@ function _pollStatus() {
       }
 
       // Transition state
+      if (s.state === 'done' || s.state === 'stopped') {
+        // Hide the ffmpeg status bar once the queue finishes
+        const statusEl2 = document.getElementById('ffmpegStatus');
+        if (statusEl2) statusEl2.classList.add('d-none');
+      }
       if (s.state === 'done') {
         _stopPolling();
         _isPaused = false;
@@ -695,6 +905,7 @@ function _pollStatus() {
 
 function startConversion() {
   if (_files.length === 0) return;
+  _cancelProbeStream();
   const anime = document.getElementById('animeMode').checked;
   const pendingFiles = _files.filter(f => f.status === 'pending' || f.status === 'failed');
   if (pendingFiles.length === 0) {
@@ -715,6 +926,11 @@ function startConversion() {
     if (d.ok) {
       _isPaused = false;
       _logCursor = 0;
+      // Clear log and hide ffmpeg status bar for fresh conversion
+      const _lb = document.getElementById('logBox');
+      if (_lb) _lb.innerHTML = '';
+      const _fs = document.getElementById('ffmpegStatus');
+      if (_fs) { _fs.textContent = ''; _fs.classList.add('d-none'); }
       setButtonStates('running');
       _startPolling();
     } else {
@@ -748,7 +964,7 @@ function stopConversion() {
     .then(r => r.json())
     .then(d => {
       if (d.ok) {
-        addLog('Stopping…', 'warn');
+        addLog('Stopping after current file completes…', 'warn');
         // Keep polling — _pollStatus will handle the stopped→ready transition
         // once the backend worker has actually terminated.
       }
@@ -1010,6 +1226,7 @@ function openSettings() {
       document.getElementById('swCrfVal').textContent = s.sw_hevc_crf;
       document.getElementById('settingsTempDir').value      = s.local_temp_dir;
       document.getElementById('settingsDefaultSort').value  = s.default_sort || 'bitrate';
+      document.getElementById('settingsEstimation').checked = !!s.estimation_enabled;
     })
     .catch(() => {}); // show modal even if fetch fails — defaults already in HTML
   _settingsModal = new bootstrap.Modal(document.getElementById('settingsModal'));
@@ -1018,10 +1235,11 @@ function openSettings() {
 
 function saveSettings() {
   const payload = {
-    qsv_quality:    parseInt(document.getElementById('qsvQuality').value, 10),
-    sw_hevc_crf:    parseInt(document.getElementById('swCrf').value, 10),
-    local_temp_dir: document.getElementById('settingsTempDir').value.trim(),
-    default_sort:   document.getElementById('settingsDefaultSort').value,
+    qsv_quality:         parseInt(document.getElementById('qsvQuality').value, 10),
+    sw_hevc_crf:         parseInt(document.getElementById('swCrf').value, 10),
+    local_temp_dir:      document.getElementById('settingsTempDir').value.trim(),
+    default_sort:        document.getElementById('settingsDefaultSort').value,
+    estimation_enabled:  document.getElementById('settingsEstimation').checked,
   };
   fetch('/api/settings', {
     method: 'POST',
@@ -1057,6 +1275,8 @@ function saveSettings() {
         const am = document.getElementById('animeMode');
         if (am) am.checked = s.anime_mode;
       }
+      // Estimation off by default — respect saved setting
+      _estUserPaused = !(s.estimation_enabled);
     })
     .catch(() => {});
 })();
@@ -1111,8 +1331,57 @@ function saveSettings() {
 // ============================================================
 // Re-scan current folder
 // ============================================================
+function _cancelProbeStream() {
+  if (_scanEs) { _scanEs.close(); _scanEs = null; _scanStripHide(); }
+}
+
 function rescanFolder() {
   if (_currentScanPath) scanFolder(_currentScanPath);
+}
+
+async function cleanupLegacyFolders() {
+  if (!_currentScanPath) return;
+  _cancelProbeStream();
+  const btn = document.getElementById('cleanupBtn');
+  if (btn) btn.disabled = true;
+
+  // Stop the estimation chain so no in-flight sample encode holds a file open.
+  // We can't abort a fetch already sent, so wait up to 12 s for it to finish.
+  if (_estRunning) {
+    _estCancelled = true;
+    _estRunning   = false;
+    await new Promise(resolve => {
+      const deadline = Date.now() + 12000;
+      const poll = setInterval(() => {
+        if (!_estRunning || Date.now() > deadline) { clearInterval(poll); resolve(); }
+      }, 200);
+    });
+  }
+
+  try {
+    const resp = await fetch('/api/cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: _currentScanPath }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      alert('Cleanup error: ' + (data.error || resp.statusText));
+      return;
+    }
+    const moved   = (data.moved   || []).length;
+    const skipped = (data.skipped || []).length;
+    const errors  = (data.errors  || []).length;
+    let msg = `Cleanup complete: ${moved} file(s) moved out of legacy folders.`;
+    if (skipped) msg += ` ${skipped} skipped (destination exists).`;
+    if (errors)  msg += ` ${errors} error(s).`;
+    alert(msg);
+    if (moved > 0) rescanFolder();
+  } catch (e) {
+    alert('Cleanup failed: ' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ============================================================

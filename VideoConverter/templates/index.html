@@ -34,7 +34,7 @@
   </div>
 </nav>
 
-<div class="container-fluid px-4">
+<div class="container-fluid px-4 d-flex flex-column flex-grow-1" style="min-height:0">
 
   <!-- Folder bar -->
   <div class="card mb-3">
@@ -43,6 +43,9 @@
       <span class="folder-path flex-grow-1" id="folderPath">No folder selected</span>
       <button class="btn btn-sm btn-outline-secondary" id="rescanBtn" onclick="rescanFolder()" disabled title="Re-scan folder">
         <i class="bi bi-arrow-clockwise"></i>
+      </button>
+      <button class="btn btn-sm btn-outline-secondary" id="cleanupBtn" onclick="cleanupLegacyFolders()" disabled title="Move files out of hevc/converted subfolders">
+        <i class="bi bi-folder-symlink me-1"></i>Clean up
       </button>
       <button class="btn btn-sm btn-outline-secondary" onclick="openBrowser()">
         <i class="bi bi-folder me-1"></i>Browse
@@ -106,11 +109,11 @@
     </div>
   </div>
 
-  <div class="row g-3">
+  <div class="row g-3 flex-grow-1" style="min-height:0">
 
     <!-- Video table -->
-    <div class="col-lg-8">
-      <div class="card h-100">
+    <div class="col-lg-8" style="min-height:0">
+      <div class="card h-100" id="queueCard">
         <div class="card-header d-flex justify-content-between align-items-center">
           <span><i class="bi bi-table me-2"></i>Video Queue</span>
           <span class="badge bg-secondary" id="totalSizeLabel">—</span>
@@ -125,11 +128,43 @@
             <option value="size">⇅ File size</option>
             <option value="name">⇅ Filename</option>
           </select>
+          <button class="btn btn-sm btn-outline-secondary" id="filterToggleBtn" onclick="toggleFilterBar()" title="Range filters">
+            <i class="bi bi-funnel me-1"></i>Filters
+          </button>
           <div class="ms-auto d-flex gap-1 flex-wrap">
             <button class="chip active" id="chip-all" onclick="setFilter('all')">All <span class="chip-count" id="chipCount-all">—</span></button>
             <button class="chip chip-pending" id="chip-pending" onclick="setFilter('pending')">Pending <span class="chip-count" id="chipCount-pending">—</span></button>
             <button class="chip chip-done" id="chip-done" onclick="setFilter('done')">Done <span class="chip-count" id="chipCount-done">—</span></button>
             <button class="chip chip-failed" id="chip-failed" onclick="setFilter('failed')">Failed <span class="chip-count" id="chipCount-failed">—</span></button>
+            <button class="chip chip-no-saving" id="chip-no_saving" onclick="setFilter('no_saving')">Skipped – Larger <span class="chip-count" id="chipCount-no-saving">—</span></button>
+          </div>
+        </div>
+        <!-- Range filter bar — hidden by default, toggled by Filters button -->
+        <div class="filter-bar d-none border-bottom px-3 py-2" id="filterBar">
+          <span class="filter-label">Size (MB)</span>
+          <input type="number" min="0" class="form-control form-control-sm filter-input" id="fSizeMin" placeholder="Min" oninput="onFilterChange()">
+          <span class="filter-sep">–</span>
+          <input type="number" min="0" class="form-control form-control-sm filter-input" id="fSizeMax" placeholder="Max" oninput="onFilterChange()">
+          <div class="vr mx-1"></div>
+          <span class="filter-label">Bitrate (kbps)</span>
+          <input type="number" min="0" class="form-control form-control-sm filter-input" id="fBrMin" placeholder="Min" oninput="onFilterChange()">
+          <span class="filter-sep">–</span>
+          <input type="number" min="0" class="form-control form-control-sm filter-input" id="fBrMax" placeholder="Max" oninput="onFilterChange()">
+          <div class="vr mx-1"></div>
+          <span class="filter-label">Duration (min)</span>
+          <input type="number" min="0" class="form-control form-control-sm filter-input" id="fDurMin" placeholder="Min" oninput="onFilterChange()">
+          <span class="filter-sep">–</span>
+          <input type="number" min="0" class="form-control form-control-sm filter-input" id="fDurMax" placeholder="Max" oninput="onFilterChange()">
+          <button class="btn btn-sm btn-link text-secondary p-0 ms-auto" onclick="clearRangeFilters()" title="Clear all range filters">
+            <i class="bi bi-x-circle me-1"></i>Clear
+          </button>
+        </div>
+        <!-- Scan progress strip — shown during phase 1 (folder scan) and phase 2 (ffprobe) -->
+        <div id="scanStrip" class="est-strip scan-strip d-none">
+          <i class="bi bi-folder2-open est-strip-icon" id="scanStripIcon"></i>
+          <span class="est-strip-label" id="scanStripLabel">Scanning…</span>
+          <div class="est-strip-bar-track">
+            <div class="est-strip-bar" id="scanBar"></div>
           </div>
         </div>
         <!-- Estimation progress strip — hidden until scan completes -->
@@ -165,7 +200,7 @@
     </div>
 
     <!-- Right panel -->
-    <div class="col-lg-4 d-flex flex-column gap-3">
+    <div class="col-lg-4 d-flex flex-column gap-3" style="min-height:0">
 
       <!-- Controls -->
       <div class="card">
@@ -235,9 +270,10 @@
       </div>
 
       <!-- Log -->
-      <div class="card flex-grow-1">
+      <div class="card flex-grow-1 d-flex flex-column" style="min-height:0">
         <div class="card-header"><i class="bi bi-terminal me-2"></i>Log</div>
-        <div class="card-body p-2">
+        <div class="card-body p-2 d-flex flex-column flex-grow-1" style="min-height:0">
+          <div id="ffmpegStatus" class="ffmpeg-status d-none"></div>
           <div class="log-box" id="logBox">
             <div class="log-ok">▸ Application started.</div>
           </div>
@@ -327,13 +363,22 @@
         </div>
 
         <h6 class="details-section-head">Queue</h6>
-        <div class="mb-4">
+        <div class="mb-3">
           <label class="form-label">Default sort order</label>
           <select class="form-select form-select-sm" id="settingsDefaultSort">
             <option value="bitrate">Bitrate (smart) — highest compression opportunity first</option>
             <option value="size">File size — largest first</option>
             <option value="name">Filename — alphabetical</option>
           </select>
+        </div>
+        <div class="mb-4">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="settingsEstimation">
+            <label class="form-check-label" for="settingsEstimation">
+              Enable estimated savings
+              <small class="text-secondary d-block">Runs ffmpeg test-encodes in the background. Slow — disable if not needed.</small>
+            </label>
+          </div>
         </div>
 
         <h6 class="details-section-head">Paths</h6>

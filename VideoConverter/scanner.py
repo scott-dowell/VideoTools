@@ -116,6 +116,8 @@ def _ffprobe(file_path: str) -> dict | None:
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         if result.returncode != 0:
@@ -260,24 +262,43 @@ def walk(root: str) -> Generator[dict, None, None]:
     """
     Recursively walk *root*, yielding SSE-compatible dict events.
 
-    Folder events are yielded depth-first, directory order alphabetical.
-    The DB is consulted (if initialised) to skip already-converted files.
+    Phase 1 — fast: stream the directory tree using os.walk() directly (no
+    upfront materialisation).  For each folder, collect candidate video files
+    via os.stat() only, then do a single batch DB query per folder to skip
+    already-done or currently-running files.  Yields folder events immediately
+    — no ffprobe, no per-file DB round-trips, no disk reads.
+
+    Phase 2 — probe: after all folder events are streamed, run ffprobe on each
+    queued file and emit probe / remove events.
+
+    Event types:
+      {"type": "folder",  "folder": str, "files": [minimal_file_dict, ...]}
+      {"type": "probe",   "full_path": str, "codec": str, "duration": str,
+                          "is_hi10": bool, "streams": {...}}
+      {"type": "remove",  "full_path": str, "reason": str}
+      {"type": "done",    "total_files": N, "total_mb": X}
+      {"type": "warning", "path": str, "message": str}
+      {"type": "error",   "message": str}
     """
     if not os.path.isdir(root):
         yield {"type": "error", "message": f"Not a directory: {root}"}
         return
 
-    total_files  = 0
-    total_bytes  = 0
+    total_bytes = 0
+    to_hash_check: list[dict] = []  # files with no DB record — need 2 MB hash read
+    to_probe: list[dict] = []       # files needing ffprobe (no cached bitrate)
+    to_probe_done: list[dict] = []  # done files with no output bitrate — probe to fill gap
 
+    # ----------------------------------------------------------------
+    # Phase 1 — fast folder scan (stat + one batch DB query per folder)
+    # ----------------------------------------------------------------
     try:
-        walk_iter = list(os.walk(root))
+        walk_gen = os.walk(root)
     except PermissionError as exc:
         yield {"type": "error", "message": str(exc)}
         return
 
-    for dirpath, dirnames, filenames in walk_iter:
-        # Alphabetical sub-directory traversal order
+    for dirpath, dirnames, filenames in walk_gen:
         dirnames.sort(key=str.lower)
 
         candidates = [
@@ -287,95 +308,231 @@ def walk(root: str) -> Generator[dict, None, None]:
         if not candidates:
             continue
 
-        folder_files: list[dict] = []
-
+        # Stat all candidates first (fast — no DB, no disk reads beyond metadata)
+        stat_results: list[tuple[str, str, float, int]] = []  # (full_path, filename, mtime, size)
         for filename in sorted(candidates, key=str.lower):
             full_path = os.path.join(dirpath, filename)
-
-            # ---- file stats ----
             try:
-                stat       = os.stat(full_path)
-                mtime      = stat.st_mtime
-                size_bytes = stat.st_size
+                st         = os.stat(full_path)
+                mtime      = st.st_mtime
+                size_bytes = st.st_size
             except OSError as exc:
                 yield {"type": "warning", "path": full_path, "message": str(exc)}
                 continue
-
-            # ---- zero-byte guard ----
             if size_bytes == 0:
-                yield {
-                    "type":    "warning",
-                    "path":    full_path,
-                    "message": "Empty file — skipping",
-                }
+                yield {"type": "warning", "path": full_path,
+                       "message": "Empty file — skipping"}
                 continue
+            stat_results.append((full_path.replace("\\", "/"), filename, mtime, size_bytes))
 
-            # ---- DB skip check ----
-            db_status = _db_lookup(full_path, mtime, size_bytes)
+        if not stat_results:
+            continue
+
+        # One batch DB lookup for all paths in this folder
+        folder_paths = [fp for fp, _, _, _ in stat_results]
+        known = db.get_latest_statuses_by_paths(folder_paths)
+
+        folder_files: list[dict] = []
+        rel_folder = os.path.relpath(dirpath, root)
+        if rel_folder == ".":
+            rel_folder = ""
+
+        for full_path, filename, mtime, size_bytes in stat_results:
+            db_info   = known.get(full_path) or {}
+            db_status = db_info.get("status")
+
+            # Cheap per-file fallbacks (no disk I/O):
+            #   1. output_path match — file IS the converted output sitting in-place
+            #   2. fingerprint match — file was moved/renamed (mtime + size preserved)
+            # Run when there is no record OR the record is only pending — a pending
+            # record with a mismatched mtime often means the file is the converted
+            # output whose mtime changed after the in-place replace.
+            if not db_info or db_status == "pending":
+                fallback_rec = (
+                    db.get_record_by_output(full_path)
+                    or db.get_record_by_fingerprint(mtime, size_bytes)
+                )
+                if fallback_rec:
+                    db_status = fallback_rec["status"]
+                    db_info = {
+                        "id":            fallback_rec["id"],
+                        "status":        db_status,
+                        "bitrate_kbps":  fallback_rec.get("source_bitrate_kbps"),
+                        "codec":         fallback_rec.get("source_codec"),
+                        "duration_secs": fallback_rec.get("source_duration_secs"),
+                    }
+                    db.update_source_path(fallback_rec["id"], full_path)
+
             if db_status == "done":
-                continue                       # silently skip committed conversions
+                # Include done files in the grid (read-only row, no re-encoding).
+                # If we don't have the output bitrate, queue for a one-time probe so
+                # the bitrate column is populated (and filterable) going forward.
+                size_mb = size_bytes / (1024 * 1024)
+                fp      = full_path.replace("\\", "/")
+                cached_bitrate = db_info.get("bitrate_kbps")
+                cached_codec   = db_info.get("codec") or ""
+                cached_dur     = db_info.get("duration_secs")
+                folder_files.append({
+                    "full_path":    fp,
+                    "name":         filename,
+                    "folder":       rel_folder.replace("\\", "/"),
+                    "size":         f"{size_mb:,.1f}",
+                    "codec":        cached_codec,
+                    "duration":     _format_duration(cached_dur) if cached_dur else "",
+                    "bitrate_kbps": cached_bitrate,
+                    "is_hi10":      False,
+                    "streams":      None,
+                    "status":       "done",
+                })
+                if cached_bitrate is None:
+                    record_id = db_info.get("id")
+                    if record_id:
+                        to_probe_done.append({"full_path": fp, "record_id": record_id})
+                continue
             if db_status == "running":
-                yield {
-                    "type":    "warning",
-                    "path":    full_path,
-                    "message": "Conversion already running in another session",
-                }
+                yield {"type": "warning", "path": full_path,
+                       "message": "Conversion already running in another session"}
                 continue
-
-            # ---- ffprobe ----
-            probe_data = _ffprobe(full_path)
-            if probe_data is None:
-                yield {
-                    "type":    "warning",
-                    "path":    full_path,
-                    "message": "ffprobe failed — skipping",
-                }
-                continue
-
-            parsed = _parse_probe(probe_data)
-
-            # ---- codec skip (AV1 — already at optimal efficiency) ----
-            if parsed["codec"] in _SKIP_CODECS:
-                continue
-
-            # ---- build file dict ----
-            rel_folder = os.path.relpath(dirpath, root)
-            if rel_folder == ".":
-                rel_folder = ""
 
             size_mb = size_bytes / (1024 * 1024)
+            fp      = full_path.replace("\\", "/")
+
+            # Use cached probe data if available — skip Phase 2 for this file.
+            cached_bitrate = db_info.get("bitrate_kbps")  # None means never probed
+            cached_codec   = db_info.get("codec") or ""
+            cached_dur     = db_info.get("duration_secs")
 
             file_dict: dict = {
-                "full_path": full_path.replace("\\", "/"),
-                "name":      filename,
-                "folder":    rel_folder.replace("\\", "/"),
-                "size":      f"{size_mb:,.1f}",
-                "codec":     (
-                    parsed["streams"]["video"]["codec"]
-                    if parsed["streams"]["video"] else "unknown"
-                ),
-                "duration":  _format_duration(parsed["duration_secs"]),
-                "is_hi10":   parsed["is_hi10"],
-                "streams":   parsed["streams"],
-                "status":    "pending",
+                "full_path":    fp,
+                "name":         filename,
+                "folder":       rel_folder.replace("\\", "/"),
+                "size":         f"{size_mb:,.1f}",
+                "codec":        cached_codec,
+                "duration":     _format_duration(cached_dur) if cached_dur else "",
+                "bitrate_kbps": cached_bitrate,
+                "is_hi10":      False,
+                "streams":      None,
+                "status":       db_status if (db_status and db_status != "pending") else "pending",
             }
 
             folder_files.append(file_dict)
-            total_files += 1
             total_bytes += size_bytes
+            if not db_info:
+                # No DB record — must hash-check in Phase 2 before deciding to probe
+                to_hash_check.append({"full_path": fp, "mtime": mtime})
+            elif cached_bitrate is None:
+                # Known pending file but never probed — queue for Phase 3 ffprobe
+                to_probe.append({"full_path": fp, "mtime": mtime})
 
         if folder_files:
-            rel_dir = os.path.relpath(dirpath, root)
-            if rel_dir == ".":
-                rel_dir = ""
             yield {
                 "type":   "folder",
-                "folder": rel_dir.replace("\\", "/"),
+                "folder": rel_folder.replace("\\", "/"),
                 "files":  folder_files,
             }
 
+    # ----------------------------------------------------------------
+    # Phase 2 — hash check for files with no DB record
+    # Reads the first 2 MB of each file to match against known source/output
+    # hashes.  Only runs for files that couldn't be matched cheaply in Phase 1.
+    # Survivors are forwarded to Phase 3 for ffprobe.
+    # ----------------------------------------------------------------
+    yield {
+        "type":        "scan_done",
+        "total_files": len(to_hash_check) + len(to_probe) + len(to_probe_done),
+        "total_mb":    total_bytes / (1024 * 1024),
+    }
+
+    for entry in to_hash_check:
+        fp    = entry["full_path"]
+        mtime = entry["mtime"]
+        file_hash = db.hash_file_head(fp)
+        if file_hash:
+            hash_rec = db.get_record_by_hash(file_hash)
+            if hash_rec and hash_rec["status"] == "done":
+                db.update_source_path(hash_rec["id"], fp)
+                yield {"type": "remove", "full_path": fp, "reason": "already converted (hash match)"}
+                continue
+        # No hash match — forward to Phase 3 for ffprobe
+        to_probe.append({"full_path": fp, "mtime": mtime})
+
+    # ----------------------------------------------------------------
+    # Phase 3 — ffprobe each file, emit probe / remove events
+    # ----------------------------------------------------------------
+    kept = 0
+    for entry in to_probe:
+        fp    = entry["full_path"]
+        mtime = entry["mtime"]
+        probe_data = _ffprobe(fp)
+        if probe_data is None:
+            yield {"type": "warning", "path": fp, "message": "ffprobe failed — skipping"}
+            yield {"type": "remove",  "full_path": fp, "reason": "ffprobe failed"}
+            continue
+
+        parsed = _parse_probe(probe_data)
+
+        if parsed["codec"] in _SKIP_CODECS:
+            yield {"type": "remove", "full_path": fp, "reason": "AV1 — already optimal"}
+            continue
+
+        video_info    = parsed["streams"]["video"]
+        display_codec = video_info["codec"] if video_info else "unknown"
+        bitrate_kbps  = round((video_info["bitrate"] or 0) / 1000) if video_info else 0
+        dur_secs      = parsed["duration_secs"]
+
+        # Persist probe result so future scans skip ffprobe for this file.
+        db.save_probe_result(fp, mtime, display_codec, bitrate_kbps, dur_secs)
+
+        yield {
+            "type":        "probe",
+            "full_path":   fp,
+            "codec":       display_codec,
+            "duration":    _format_duration(dur_secs),
+            "is_hi10":     parsed["is_hi10"],
+            "streams":     parsed["streams"],
+            "bitrate_kbps": bitrate_kbps,
+        }
+        kept += 1
+
+    # ----------------------------------------------------------------
+    # Phase 4 — probe done files with no output bitrate
+    # These are old records that pre-date output_bitrate_kbps storage.
+    # Must run BEFORE the 'done' event — the JS closes the SSE on 'done'.
+    # Probe the output file on disk, persist the result so future scans
+    # skip this phase, and emit probe events so the UI updates immediately.
+    # ----------------------------------------------------------------
+    for entry in to_probe_done:
+        fp        = entry["full_path"]
+        record_id = entry["record_id"]
+        probe_data = _ffprobe(fp)
+        if probe_data is None:
+            continue
+        parsed = _parse_probe(probe_data)
+        video_info    = parsed["streams"]["video"]
+        display_codec = video_info["codec"] if video_info else "HEVC"
+        bitrate_kbps  = round((video_info["bitrate"] or 0) / 1000) if video_info else 0
+        dur_secs      = parsed["duration_secs"]
+        if bitrate_kbps:
+            db.update_output_bitrate(record_id, bitrate_kbps)
+        # Also persist duration so it shows correctly on future scans
+        # (save_probe_result updates source_duration_secs which is reused for done rows)
+        try:
+            mtime = os.stat(fp).st_mtime
+            db.save_probe_result(fp, mtime, display_codec, bitrate_kbps, dur_secs)
+        except OSError:
+            pass
+        yield {
+            "type":        "probe",
+            "full_path":   fp,
+            "codec":       display_codec,
+            "duration":    _format_duration(dur_secs) if dur_secs else "",
+            "is_hi10":     parsed["is_hi10"],
+            "streams":     parsed["streams"],
+            "bitrate_kbps": bitrate_kbps,
+        }
+
     yield {
         "type":        "done",
-        "total_files": total_files,
+        "total_files": kept,
         "total_mb":    total_bytes / (1024 * 1024),
     }

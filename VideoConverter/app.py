@@ -37,8 +37,9 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Job state (mutated only while holding _job_lock)
 # ---------------------------------------------------------------------------
-_job_lock   = threading.Lock()
-_stop_event = threading.Event()
+_job_lock        = threading.Lock()
+_stop_event      = threading.Event()   # hard stop: kills ffmpeg mid-encode
+_soft_stop_event = threading.Event()   # soft stop: finishes current file, stops queue
 _ffmpeg_pid: list[int] = [0]   # _ffmpeg_pid[0] = current child PID; 0 means idle
 
 _job: dict = {
@@ -98,15 +99,51 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Windows error codes that indicate unrecoverable hardware / device failure.
+# When any of these are detected the entire queue is halted immediately.
+_FATAL_WINERRORS = {
+    19,    # ERROR_WRITE_PROTECT
+    21,    # ERROR_NOT_READY
+    23,    # ERROR_CRC  (data error / read failure)
+    1117,  # ERROR_IO_DEVICE  ("fatal device error")
+    1392,  # ERROR_FILE_CORRUPT
+}
+
+
+def _is_fatal_device_error(exc: BaseException) -> bool:
+    """Return True if *exc* looks like a fatal hardware/device I/O error."""
+    if isinstance(exc, OSError):
+        if getattr(exc, "winerror", None) in _FATAL_WINERRORS:
+            return True
+        # errno-based check (cross-platform fallback)
+        import errno as _errno
+        if exc.errno in (_errno.EIO, _errno.ENODEV, _errno.ENXIO):
+            return True
+    # Also catch device errors buried in error text (e.g. from ffmpeg stderr)
+    msg = str(exc).lower()
+    if "fatal device error" in msg or "i/o device error" in msg or "device error" in msg:
+        return True
+    return False
+
+
 def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
     """Runs in a daemon thread; processes the file queue sequentially."""
     total_saved = 0.0
 
     for idx, file_info in enumerate(files):
-        if _stop_event.is_set():
+        if _stop_event.is_set() or _soft_stop_event.is_set():
             break
 
         full_path = file_info["full_path"]
+
+        # Always check the live DB status — never trust what the client sent
+        db_status = db.get_latest_statuses_by_paths([full_path]).get(full_path, {}).get("status")
+        if db_status in ("done", "skipped", "no_saving"):
+            with _job_lock:
+                _job["files"][idx]["status"] = db_status
+                _job["current_index"] = idx
+            continue
+
         try:
             mtime      = os.path.getmtime(full_path)
             size_bytes = os.path.getsize(full_path)
@@ -147,11 +184,26 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         # the old source is removed explicitly below.
         output_dir = os.path.dirname(full_path)
 
+        _tmp_holder: list[str] = [""]  # set by compress_simple so _progress can stat it
+
         def _progress(pct: float, fps: float, eta: int) -> None:
             with _job_lock:
                 _job["progress_pct"] = pct
                 _job["fps"]          = fps
                 _job["eta_secs"]     = eta
+                # Live savings estimate: completed files + current file projection.
+                # We scale the partial temp size up by the inverse of progress so
+                # the estimate reflects the projected *full* output size, not just
+                # the bytes written so far.
+                tmp = _tmp_holder[0]
+                if tmp and pct > 1.0:
+                    try:
+                        live_out_bytes   = os.path.getsize(tmp)
+                        projected_full   = live_out_bytes / (pct / 100.0)
+                        live_saved       = max(0.0, size_bytes - projected_full) / (1024 * 1024)
+                        _job["saved_mb"] = total_saved + live_saved
+                    except OSError:
+                        pass
 
         # Per-file log capture so error details can be surfaced in the UI
         _file_log: list[str] = []
@@ -166,16 +218,30 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         if src_hash:
             db.update_source_hash(rec_id, src_hash)
 
-        result = converter.convert_video(
-            input_path  = full_path,
-            output_dir  = output_dir,
-            anime_mode  = anime_mode,
-            quality     = quality,
-            progress_cb = _progress,
-            stop_event  = _stop_event,
-            log         = _capture_log,
-            pid_holder  = _ffmpeg_pid,
-        )
+        try:
+            result = converter.convert_video(
+                input_path  = full_path,
+                output_dir  = output_dir,
+                anime_mode  = anime_mode,
+                quality     = quality,
+                progress_cb = _progress,
+                stop_event  = _stop_event,
+                log         = _capture_log,
+                pid_holder  = _ffmpeg_pid,
+                tmp_holder  = _tmp_holder,
+            )
+        except Exception as exc:
+            _job_log(f"UNHANDLED EXCEPTION during conversion: {exc}")
+            import traceback
+            error_tail = traceback.format_exc()
+            db.mark_failed(rec_id, error_tail, _utcnow())
+            with _job_lock:
+                _job["files"][idx]["status"]     = "failed"
+                _job["files"][idx]["error_tail"] = error_tail
+            if _is_fatal_device_error(exc):
+                _job_log("FATAL DEVICE ERROR — halting queue to prevent further damage.")
+                _stop_event.set()
+            continue
 
         if result["ok"]:
             out_norm = os.path.normpath(result["output_path"]) if result["output_path"] else ""
@@ -212,15 +278,18 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             else:
                 total_saved += result["saved_mb"]
                 out_hash = db.hash_file_head(result["output_path"]) if result.get("output_path") else None
+                _dur = result.get("duration_secs") or 0
+                _out_br = round(result["output_size_mb"] * 8192 / _dur) if _dur > 0 else None
                 db.mark_done(
-                    record_id      = rec_id,
-                    output_path    = result["output_path"],
-                    output_size_mb = result["output_size_mb"],
-                    saved_mb       = result["saved_mb"],
-                    saved_pct      = result["saved_pct"],
-                    completed_at   = _utcnow(),
-                    encoder_used   = result["encoder_used"],
-                    output_hash    = out_hash,
+                    record_id           = rec_id,
+                    output_path         = result["output_path"],
+                    output_size_mb      = result["output_size_mb"],
+                    saved_mb            = result["saved_mb"],
+                    saved_pct           = result["saved_pct"],
+                    completed_at        = _utcnow(),
+                    encoder_used        = result["encoder_used"],
+                    output_hash         = out_hash,
+                    output_bitrate_kbps = _out_br,
                 )
                 # Remove source when output path differs (e.g. MKV→MP4 in anime mode)
                 if out_norm and out_norm != src_norm:
@@ -246,16 +315,29 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                 (line[len("Running: "):] for line in _file_log if line.startswith("Running: ")),
                 "",
             )
-            error_tail = "\n".join(_file_log[-50:])
-            db.mark_failed(rec_id, error_tail, _utcnow())
             _clog = result.get("conv_logger")
-            if _clog:
-                _clog.failure(result.get("error", ""))
-            with _job_lock:
-                _job["files"][idx]["status"]     = "failed"
-                _job["files"][idx]["ffmpeg_cmd"] = ffmpeg_cmd
-                _job["files"][idx]["error_tail"] = error_tail
-            _job_log(f"Failed: {result.get('error', 'unknown')}")
+            if result.get("error") == "no_savings":
+                db.mark_no_saving(rec_id, _utcnow())
+                if _clog:
+                    _clog.failure("no_savings")
+                with _job_lock:
+                    _job["files"][idx]["status"] = "no_saving"
+                _job_log("Skipped – output was not smaller than source.")
+            else:
+                error_tail = "\n".join(_file_log[-50:])
+                db.mark_failed(rec_id, error_tail, _utcnow())
+                if _clog:
+                    _clog.failure(result.get("error", ""))
+                with _job_lock:
+                    _job["files"][idx]["status"]     = "failed"
+                    _job["files"][idx]["ffmpeg_cmd"] = ffmpeg_cmd
+                    _job["files"][idx]["error_tail"] = error_tail
+                _job_log(f"Failed: {result.get('error', 'unknown')}")
+                # Check if any logged line indicates a fatal device error
+                if any("device error" in line.lower() or "i/o device" in line.lower()
+                       for line in _file_log[-20:]):
+                    _job_log("FATAL DEVICE ERROR detected in ffmpeg output — halting queue.")
+                    _stop_event.set()
 
         with _job_lock:
             _job["saved_mb"] = total_saved
@@ -263,19 +345,21 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
     with _job_lock:
         # Use 'stopped' when the user requested cancellation so the UI can
         # distinguish an intentional stop from a completed queue.
-        _job["state"]        = "stopped" if _stop_event.is_set() else "done"
+        _stopped = _stop_event.is_set() or _soft_stop_event.is_set()
+        _job["state"]        = "stopped" if _stopped else "done"
         _job["current_file"] = ""
-        _job["progress_pct"] = _job["progress_pct"] if _stop_event.is_set() else 100.0
+        _job["progress_pct"] = _job["progress_pct"] if _stopped else 100.0
         _ffmpeg_pid[0]       = 0
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
 
 _SETTINGS_DEFAULTS = {
-    "qsv_quality":   config.QSV_QUALITY,
-    "sw_hevc_crf":   config.SW_HEVC_CRF,
-    "local_temp_dir": config.LOCAL_TEMP_DIR,
-    "default_sort":  "bitrate",   # bitrate | size | name
-    "anime_mode":    False,
+    "qsv_quality":        config.QSV_QUALITY,
+    "sw_hevc_crf":        config.SW_HEVC_CRF,
+    "local_temp_dir":     config.LOCAL_TEMP_DIR,
+    "default_sort":       "bitrate",   # bitrate | size | name
+    "anime_mode":         False,
+    "estimation_enabled": False,
 }
 
 def _load_settings() -> dict:
@@ -306,7 +390,7 @@ _SYSTEM_FOLDERS = {
 }
 
 # Folder names that were used by legacy pipelines and should be unwound.
-_LEGACY_FOLDERS = {"converted", "hevc"}
+_LEGACY_FOLDERS = {"converted", "hevc", "failed"}
 
 
 def _resolve_cleanup_dest(src_path: str) -> str | None:
@@ -327,8 +411,10 @@ def _resolve_cleanup_dest(src_path: str) -> str | None:
 def _cleanup_legacy_folders(root_path: str) -> dict:
     """
     Walk root_path recursively.  Any file found directly inside a folder named
-    'converted' or 'hevc' is moved up (at most two levels) so it sits beside
-    its former container.  Empty legacy folders are removed after the walk.
+    'converted', 'hevc', or 'failed' is moved up (at most two levels) so it
+    sits beside its former container.  Files rescued from a 'failed' folder
+    also have their DB records deleted so the next scan retries them cleanly.
+    Empty legacy folders are removed after the walk.
 
     Returns {"moved": [...], "skipped": [...], "errors": [...]}
     """
@@ -356,6 +442,11 @@ def _cleanup_legacy_folders(root_path: str) -> dict:
                     "from": src.replace("\\", "/"),
                     "to":   dest.replace("\\", "/"),
                 })
+                # Files rescued from a failed/ folder need their DB record cleared
+                # so the next scan treats them as fresh candidates.
+                if os.path.basename(os.path.dirname(src)).lower() == "failed":
+                    db.delete_records_by_path(src)
+                    db.delete_records_by_path(dest)
             except Exception as exc:
                 errors.append({
                     "path":   src.replace("\\", "/"),
@@ -516,6 +607,7 @@ def api_start():
         return jsonify({"error": "No files provided"}), 400
 
     _stop_event.clear()
+    _soft_stop_event.clear()
     with _job_lock:
         _job.update({
             "state":         "running",
@@ -560,9 +652,9 @@ def api_status():
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    """Signal the queue worker to stop after the current file (or kill mid-encode)."""
-    _stop_event.set()
-    _resume_ffmpeg()   # unblock if paused so it can see the stop_event
+    """Signal the queue worker to stop after the current file completes (soft stop)."""
+    _soft_stop_event.set()
+    _resume_ffmpeg()   # unblock if paused so the current file can finish
     with _job_lock:
         _job["paused"] = False
     return jsonify({"ok": True})
@@ -666,4 +758,7 @@ def api_open():
 
 if __name__ == "__main__":
     os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
+    recovered = db.reset_stale_running()
+    if recovered:
+        print(f"[startup] Reset {recovered} stale 'running' record(s) to 'pending'")
     app.run(port=config.FLASK_PORT, debug=config.FLASK_DEBUG)

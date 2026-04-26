@@ -72,13 +72,15 @@ def init_db(db_path: str) -> None:
                 source_size_bytes INTEGER,
                 source_size_mb    REAL,
                 source_codec      TEXT,
-                source_hash       TEXT,
-                output_path       TEXT,
-                output_size_mb    REAL,
-                output_hash       TEXT,
-                saved_mb          REAL,
-                saved_pct         INTEGER,
-                status            TEXT    NOT NULL DEFAULT 'pending',
+                source_hash          TEXT,
+                source_bitrate_kbps  INTEGER,
+                source_duration_secs REAL,
+                output_path          TEXT,
+                output_size_mb       REAL,
+                output_hash          TEXT,
+                saved_mb             REAL,
+                saved_pct            INTEGER,
+                status               TEXT    NOT NULL DEFAULT 'pending',
                 anime_mode        INTEGER DEFAULT 0,
                 encoder_used      TEXT,
                 started_at        TEXT,
@@ -92,9 +94,12 @@ def init_db(db_path: str) -> None:
         # Migration: add columns to existing databases that pre-date them.
         existing = {row[1] for row in conn.execute("PRAGMA table_info(conversions)")}
         for col, typedef in [
-            ("source_size_bytes", "INTEGER"),
-            ("source_hash",       "TEXT"),
-            ("output_hash",       "TEXT"),
+            ("source_size_bytes",    "INTEGER"),
+            ("source_hash",          "TEXT"),
+            ("output_hash",          "TEXT"),
+            ("source_bitrate_kbps",  "INTEGER"),
+            ("source_duration_secs", "REAL"),
+            ("output_bitrate_kbps",  "INTEGER"),
         ]:
             if col not in existing:
                 conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} {typedef}")
@@ -206,6 +211,60 @@ def update_source_hash(record_id: int, source_hash: str) -> None:
         )
 
 
+def get_latest_statuses_by_paths(paths: list) -> dict:
+    """
+    Return {source_path: {"id", "status", "bitrate_kbps", "codec", "duration_secs"}} for
+    the most recent DB record per path.  Only paths with an existing record are included.
+
+    For done records, bitrate_kbps is the output (post-conversion) bitrate:
+      1. output_bitrate_kbps if explicitly stored
+      2. Computed from output_size_mb / source_duration_secs as fallback
+      3. source_bitrate_kbps as last resort
+    For all other statuses, source_bitrate_kbps is returned.
+    """
+    if not paths:
+        return {}
+    with _connect() as conn:
+        placeholders = ",".join("?" * len(paths))
+        rows = conn.execute(
+            f"""
+            SELECT c.id, c.source_path, c.status,
+                   c.source_bitrate_kbps, c.source_codec, c.source_duration_secs,
+                   c.output_bitrate_kbps, c.output_size_mb
+              FROM conversions c
+             INNER JOIN (
+                 SELECT source_path, MAX(id) AS max_id
+                   FROM conversions
+                  WHERE source_path IN ({placeholders})
+                  GROUP BY source_path
+             ) latest ON c.id = latest.max_id
+            """,
+            paths,
+        ).fetchall()
+    result = {}
+    for row in rows:
+        status = row["status"]
+        if status == "done":
+            bitrate = row["output_bitrate_kbps"]
+            if not bitrate:
+                out_mb  = row["output_size_mb"]
+                dur_s   = row["source_duration_secs"]
+                if out_mb and dur_s and dur_s > 0:
+                    bitrate = round(out_mb * 8192 / dur_s)
+            if not bitrate:
+                bitrate = row["source_bitrate_kbps"]
+        else:
+            bitrate = row["source_bitrate_kbps"]
+        result[row["source_path"]] = {
+            "id":           row["id"],
+            "status":       status,
+            "bitrate_kbps": bitrate,
+            "codec":        row["source_codec"],
+            "duration_secs": row["source_duration_secs"],
+        }
+    return result
+
+
 def upsert_pending(
     source_path: str,
     source_mtime: float,
@@ -223,7 +282,11 @@ def upsert_pending(
             """
             INSERT INTO conversions (source_path, source_mtime, source_size_bytes, source_size_mb, source_codec, anime_mode, status)
             VALUES (?, ?, ?, ?, ?, ?, 'pending')
-            ON CONFLICT (source_path, source_mtime) DO UPDATE SET anime_mode = excluded.anime_mode
+            ON CONFLICT (source_path, source_mtime) DO UPDATE SET
+                anime_mode        = excluded.anime_mode,
+                source_size_bytes = COALESCE(conversions.source_size_bytes, excluded.source_size_bytes),
+                source_size_mb    = COALESCE(conversions.source_size_mb,    excluded.source_size_mb),
+                source_codec      = COALESCE(conversions.source_codec,      excluded.source_codec)
             """,
             (source_path, source_mtime, source_size_bytes, source_size_mb, source_codec, int(anime_mode)),
         )
@@ -232,6 +295,15 @@ def upsert_pending(
             (source_path, source_mtime),
         ).fetchone()
     return row["id"]
+
+
+def update_source_path(record_id: int, new_source_path: str) -> None:
+    """Update source_path on a record whose file has been moved/renamed."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE conversions SET source_path = ? WHERE id = ?",
+            (new_source_path, record_id),
+        )
 
 
 def mark_running(record_id: int, started_at: str) -> None:
@@ -243,6 +315,15 @@ def mark_running(record_id: int, started_at: str) -> None:
         )
 
 
+def reset_stale_running() -> int:
+    """Reset any 'running' records to 'pending' on startup (handles crash recovery)."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE conversions SET status = 'pending' WHERE status = 'running'"
+        )
+        return cur.rowcount
+
+
 def mark_done(
     record_id: int,
     output_path: str,
@@ -252,24 +333,35 @@ def mark_done(
     completed_at: str,
     encoder_used: str | None = None,
     output_hash: str | None = None,
+    output_bitrate_kbps: int | None = None,
 ) -> None:
     """Flip a record to status='done' and fill in output metrics."""
     with _connect() as conn:
         conn.execute(
             """
             UPDATE conversions
-               SET status         = 'done',
-                   output_path    = ?,
-                   output_size_mb = ?,
-                   saved_mb       = ?,
-                   saved_pct      = ?,
-                   completed_at   = ?,
-                   encoder_used   = ?,
-                   output_hash    = ?
+               SET status              = 'done',
+                   output_path         = ?,
+                   output_size_mb      = ?,
+                   saved_mb            = ?,
+                   saved_pct           = ?,
+                   completed_at        = ?,
+                   encoder_used        = ?,
+                   output_hash         = ?,
+                   output_bitrate_kbps = ?
              WHERE id = ?
             """,
             (output_path, output_size_mb, saved_mb, saved_pct,
-             completed_at, encoder_used, output_hash, record_id),
+             completed_at, encoder_used, output_hash, output_bitrate_kbps, record_id),
+        )
+
+
+def update_output_bitrate(record_id: int, bitrate_kbps: int) -> None:
+    """Store the output file bitrate for a done record (used when probing old records)."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE conversions SET output_bitrate_kbps = ? WHERE id = ?",
+            (bitrate_kbps, record_id),
         )
 
 
@@ -285,4 +377,57 @@ def mark_failed(record_id: int, error_tail: str | None, completed_at: str) -> No
              WHERE id = ?
             """,
             (error_tail, completed_at, record_id),
+        )
+
+
+def mark_no_saving(record_id: int, completed_at: str) -> None:
+    """Flip a record to status='no_saving' — encode succeeded but output was not smaller."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE conversions
+               SET status       = 'no_saving',
+                   error_tail   = NULL,
+                   completed_at = ?
+             WHERE id = ?
+            """,
+            (completed_at, record_id),
+        )
+
+
+def delete_records_by_path(source_path: str) -> int:
+    """Delete all DB records whose source_path matches.  Returns row count deleted."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM conversions WHERE source_path = ?",
+            (source_path,),
+        )
+        return cur.rowcount
+
+
+def save_probe_result(
+    source_path: str,
+    source_mtime: float,
+    codec: str | None,
+    bitrate_kbps: int | None,
+    duration_secs: float | None,
+) -> None:
+    """
+    Upsert probe data for a file so subsequent scans can skip ffprobe.
+    Creates a minimal pending record if none exists; otherwise updates
+    bitrate/duration and preserves existing codec if already set.
+    """
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversions
+                (source_path, source_mtime, source_codec,
+                 source_bitrate_kbps, source_duration_secs, status)
+            VALUES (?, ?, ?, ?, ?, 'pending')
+            ON CONFLICT (source_path, source_mtime) DO UPDATE SET
+                source_codec         = COALESCE(conversions.source_codec, excluded.source_codec),
+                source_bitrate_kbps  = excluded.source_bitrate_kbps,
+                source_duration_secs = excluded.source_duration_secs
+            """,
+            (source_path, source_mtime, codec, bitrate_kbps, duration_secs),
         )

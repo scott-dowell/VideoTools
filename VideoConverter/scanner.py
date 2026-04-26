@@ -347,7 +347,7 @@ def walk(root: str) -> Generator[dict, None, None]:
             # Run when there is no record OR the record is only pending — a pending
             # record with a mismatched mtime often means the file is the converted
             # output whose mtime changed after the in-place replace.
-            if not db_info or db_status == "pending":
+            if not db_info or db_status in ("pending", "queued"):
                 fallback_rec = (
                     db.get_record_by_output(full_path)
                     or db.get_record_by_fingerprint(mtime, size_bytes)
@@ -412,7 +412,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                 "bitrate_kbps": cached_bitrate,
                 "is_hi10":      False,
                 "streams":      None,
-                "status":       db_status if (db_status and db_status != "pending") else "pending",
+                "status":       db_status if (db_status and db_status not in ("pending", "queued")) else "pending",
             }
 
             folder_files.append(file_dict)

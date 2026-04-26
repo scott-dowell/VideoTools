@@ -134,7 +134,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         if _stop_event.is_set() or _soft_stop_event.is_set():
             break
 
-        full_path = file_info["full_path"]
+        full_path = file_info["full_path"].replace("\\", "/")
 
         # Always check the live DB status — never trust what the client sent
         db_status = db.get_latest_statuses_by_paths([full_path]).get(full_path, {}).get("status")

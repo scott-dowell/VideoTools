@@ -826,17 +826,23 @@ function _pollStatus() {
           : '<i class="bi bi-pause-fill me-1"></i>Pause';
       }
 
-      // Sync row badges + output cells from status.files
+      // Sync row badges + output cells from status.files.
+      // s.files only contains the SUBMITTED (pending/failed) subset — match by
+      // full_path so we never clobber done/skipped rows that weren't submitted.
       if (s.files) {
-        s.files.forEach((sf, idx) => {
+        const statusByPath = {};
+        s.files.forEach(sf => { if (sf.full_path) statusByPath[sf.full_path] = sf; });
+
+        _files.forEach((f, idx) => {
+          const sf = statusByPath[f.full_path];
+          if (!sf) return;
           // Sync into _files so local state matches
-          if (_files[idx]) {
-            _files[idx].status     = sf.status;
-            if (sf.output)  _files[idx].output  = sf.output;
-            if (sf.saved)   _files[idx].saved   = sf.saved;
-            if (sf.pct)     _files[idx].pct     = sf.pct;
-            if (sf.output_path) _files[idx].output_path = sf.output_path;
-          }
+          f.status = sf.status;
+          if (sf.output)      f.output      = sf.output;
+          if (sf.saved)       f.saved       = sf.saved;
+          if (sf.pct)         f.pct         = sf.pct;
+          if (sf.output_path) f.output_path = sf.output_path;
+
           const row = document.getElementById('row-' + idx);
           if (!row) return;
           // Status badge (col index 7)
@@ -919,7 +925,7 @@ function startConversion() {
   fetch('/api/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ files: _files, anime_mode: anime }),
+    body: JSON.stringify({ files: pendingFiles, anime_mode: anime }),
   })
   .then(r => r.json())
   .then(d => {

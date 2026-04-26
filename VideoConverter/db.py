@@ -48,6 +48,11 @@ import sqlite3
 from contextlib import contextmanager
 
 
+def _norm(path: str | None) -> str | None:
+    """Normalise a filesystem path to forward slashes for consistent DB storage."""
+    return path.replace("\\", "/") if path else path
+
+
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
@@ -153,7 +158,7 @@ def get_record(source_path: str, source_mtime: float) -> dict | None:
     with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM conversions WHERE source_path = ? AND source_mtime = ?",
-            (source_path, source_mtime),
+            (_norm(source_path), source_mtime),
         ).fetchone()
     return dict(row) if row else None
 
@@ -163,7 +168,7 @@ def get_record_by_output(output_path: str) -> dict | None:
     Return a done record whose output_path matches, normalised to forward slashes.
     Used by the scanner to recognise already-converted files that changed extension.
     """
-    normalised = output_path.replace("\\", "/")
+    normalised = _norm(output_path)
     with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM conversions WHERE REPLACE(output_path, '\\', '/') = ? AND status = 'done'",
@@ -224,8 +229,9 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
     """
     if not paths:
         return {}
+    normed = [_norm(p) for p in paths]
     with _connect() as conn:
-        placeholders = ",".join("?" * len(paths))
+        placeholders = ",".join("?" * len(normed))
         rows = conn.execute(
             f"""
             SELECT c.id, c.source_path, c.status,
@@ -239,7 +245,7 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
                   GROUP BY source_path
              ) latest ON c.id = latest.max_id
             """,
-            paths,
+            normed,
         ).fetchall()
     result = {}
     for row in rows:
@@ -277,6 +283,7 @@ def upsert_pending(
     Insert a new pending row or return the existing row's id if it already exists.
     Returns the record id.
     """
+    source_path = _norm(source_path)
     with _connect() as conn:
         conn.execute(
             """
@@ -302,7 +309,7 @@ def update_source_path(record_id: int, new_source_path: str) -> None:
     with _connect() as conn:
         conn.execute(
             "UPDATE conversions SET source_path = ? WHERE id = ?",
-            (new_source_path, record_id),
+            (_norm(new_source_path), record_id),
         )
 
 
@@ -351,7 +358,7 @@ def mark_done(
                    output_bitrate_kbps = ?
              WHERE id = ?
             """,
-            (output_path, output_size_mb, saved_mb, saved_pct,
+            (_norm(output_path), output_size_mb, saved_mb, saved_pct,
              completed_at, encoder_used, output_hash, output_bitrate_kbps, record_id),
         )
 
@@ -400,7 +407,7 @@ def delete_records_by_path(source_path: str) -> int:
     with _connect() as conn:
         cur = conn.execute(
             "DELETE FROM conversions WHERE source_path = ?",
-            (source_path,),
+            (_norm(source_path),),
         )
         return cur.rowcount
 
@@ -417,6 +424,7 @@ def save_probe_result(
     Creates a minimal pending record if none exists; otherwise updates
     bitrate/duration and preserves existing codec if already set.
     """
+    source_path = _norm(source_path)
     with _connect() as conn:
         conn.execute(
             """

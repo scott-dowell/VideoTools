@@ -868,16 +868,15 @@ def remux_to_mp4(
     # ------------------------------------------------------------------
     # OCR bitmap subs
     # ------------------------------------------------------------------
-    import bitmap_subs as _bsubs
-
     srt_paths: list[str] = []
-    if pgs_sub_indices and not _bsubs.DEPS_OK:
-        log(
-            "ERROR: bitmap subtitle track(s) found but OCR dependencies are not installed. "
-            "Run: pip install easyocr Pillow pysubs2"
-        )
-        return False, ""
     if pgs_sub_indices:
+        import bitmap_subs as _bsubs
+        if not _bsubs.DEPS_OK:
+            log(
+                "ERROR: bitmap subtitle track(s) found but OCR dependencies are not installed. "
+                "Run: pip install easyocr Pillow pysubs2"
+            )
+            return False, ""
         log(f"OCR bitmap subs ({len(pgs_sub_indices)} track(s))...")
         try:
             srt_paths = _bsubs.ocr_bitmap_subs_to_srt(
@@ -1036,21 +1035,66 @@ def remux_to_mp4(
             files.append(tmp_audio)
         return files
 
+    def _extract_text_subs_to_srt() -> list[str] | None:
+        """
+        Pre-extract ASS/text sub tracks to temp SRT files so the muxer sees
+        simple timestamps instead of complex ASS events that cause DTS overflow.
+        Returns a list of SRT paths (one per track in english_text_subs),
+        or None if any extraction fails.
+        """
+        if not english_text_subs:
+            return []
+        extracted: list[str] = []
+        for i, si in enumerate(english_text_subs):
+            out_srt = os.path.join(
+                config.LOCAL_TEMP_DIR, f"_textsub_{os.getpid()}_{i}.srt"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-map", f"0:{si}", "-c:s", "srt", out_srt,
+            ]
+            log(f"Pre-extracting text sub track {i+1}/{len(english_text_subs)} to SRT...")
+            r = subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=120,
+            )
+            if r.returncode != 0 or not os.path.exists(out_srt) or os.path.getsize(out_srt) == 0:
+                log(f"Text sub extraction failed for track {i+1} (rc={r.returncode}) — dropping track")
+                # partial cleanup
+                for f in extracted:
+                    if os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
+                return None
+            extracted.append(out_srt)
+        return extracted
+
     def _build_cmd(
         include_subs: bool,
         extra_flags: list[str] | None = None,
         pre_audio: list[str | None] | None = None,
+        extracted_text_srts: list[str] | None = None,
     ) -> tuple[list[str], str]:
-        """Build the ffmpeg remux command."""
+        """
+        Build the ffmpeg remux command.
+        When extracted_text_srts is provided, those pre-extracted SRT files are
+        used instead of inline ASS→mov_text conversion from english_text_subs.
+        """
+        _ext_srts = extracted_text_srts or []
         cmd = ["ffmpeg", "-y", "-i", input_path]
 
-        # Append SRT files as additional inputs (inputs 1..len(srt_paths))
+        # Append OCR SRT files as additional inputs (inputs 1..len(srt_paths))
         for srt in srt_paths:
             cmd += ["-i", srt]
 
+        # Append pre-extracted text sub SRT files (after OCR SRTs)
+        for srt in _ext_srts:
+            cmd += ["-i", srt]
+
         # Append pre-encoded audio files as extra inputs
-        # (inputs len(srt_paths)+1 .. len(srt_paths)+len(non-None pre_audio))
-        pre_audio_start_idx = 1 + len(srt_paths)
+        pre_audio_start_idx = 1 + len(srt_paths) + len(_ext_srts)
         if pre_audio:
             for af in pre_audio:
                 if af is not None:
@@ -1084,18 +1128,32 @@ def remux_to_mp4(
 
         # Subtitles
         if include_subs:
-            # Text subs from source (-> mov_text)
-            for si in english_text_subs:
-                cmd += ["-map", f"0:{si}"]
-            # OCR'd SRT files (inputs 1..N) (-> mov_text)
-            for j in range(len(srt_paths)):
-                cmd += ["-map", f"{j+1}:s:0"]
-            # Tag OCR'd tracks with English language (they were selected as English above)
-            text_sub_offset = len(english_text_subs)
-            for j in range(len(srt_paths)):
-                cmd += [f"-metadata:s:s:{text_sub_offset + j}", "language=eng"]
-            # Convert text+OCR subtitle streams to mov_text
-            sub_count = len(english_text_subs) + len(srt_paths)
+            if _ext_srts:
+                # Pre-extracted SRTs replace inline ASS mapping — skip english_text_subs
+                ext_srt_base = 1 + len(srt_paths)
+                for j in range(len(srt_paths)):
+                    cmd += ["-map", f"{j+1}:s:0"]
+                for j in range(len(_ext_srts)):
+                    cmd += ["-map", f"{ext_srt_base + j}:s:0"]
+                # Tag both OCR and extracted tracks as English
+                for j in range(len(srt_paths)):
+                    cmd += [f"-metadata:s:s:{j}", "language=eng"]
+                for j in range(len(_ext_srts)):
+                    cmd += [f"-metadata:s:s:{len(srt_paths) + j}", "language=eng"]
+                sub_count = len(srt_paths) + len(_ext_srts)
+            else:
+                # Text subs from source (-> mov_text)
+                for si in english_text_subs:
+                    cmd += ["-map", f"0:{si}"]
+                # OCR'd SRT files (inputs 1..N) (-> mov_text)
+                for j in range(len(srt_paths)):
+                    cmd += ["-map", f"{j+1}:s:0"]
+                # Tag OCR'd tracks with English language
+                text_sub_offset = len(english_text_subs)
+                for j in range(len(srt_paths)):
+                    cmd += [f"-metadata:s:s:{text_sub_offset + j}", "language=eng"]
+                sub_count = len(english_text_subs) + len(srt_paths)
+
             if sub_count > 0:
                 cmd += ["-c:s", "mov_text"]
             # dvd_subtitle/vobsub tracks — copy directly (become bin_data in MP4)
@@ -1114,14 +1172,16 @@ def remux_to_mp4(
     # ------------------------------------------------------------------
     try:
         encoder_used = ""
-        _pre_audio: list[str | None] | None = None   # populated on pre-encode attempts
+        _pre_audio: list[str | None] | None = None       # populated on pre-encode attempts
+        _extracted_text_srts: list[str] | None = None   # populated on sub-extraction attempt
 
-        for attempt, (inc_subs, extra, use_preenc) in enumerate([
-            (True,  None,                                                               False),  # 0: normal
-            (True,  ["-max_interleave_delta", "0"],                                   False),  # 1: DTS fix
-            (True,  ["-fflags", "+genpts", "-avoid_negative_ts", "make_zero"],       False),  # 2: aggressive DTS fix
-            (True,  None,                                                               True),   # 3: pre-encode audio
-            (False, None,                                                               True),   # 4: pre-encode audio, no subs
+        for attempt, (inc_subs, extra, use_preenc, use_extracted_subs) in enumerate([
+            (True,  None,                                                               False, False),  # 0: normal
+            (True,  ["-max_interleave_delta", "0"],                                   False, False),  # 1: DTS fix
+            (True,  ["-fflags", "+genpts", "-avoid_negative_ts", "make_zero"],       False, False),  # 2: aggressive DTS fix
+            (True,  None,                                                               True,  False),  # 3: pre-encode audio
+            (True,  None,                                                               True,  True),   # 4: pre-extract text subs → SRT
+            (False, None,                                                               True,  False),  # 5: no subs (last resort)
         ]):
             if stop_event.is_set():
                 return False, ""
@@ -1134,9 +1194,20 @@ def remux_to_mp4(
                     log("Audio pre-encode failed — giving up.")
                     return False, ""
 
+            # On the first sub-extraction attempt, pre-extract text subs to SRT
+            if use_extracted_subs and _extracted_text_srts is None:
+                if not english_text_subs:
+                    continue  # nothing to extract; skip to no-subs fallback
+                log("Subtitle DTS fix — pre-extracting text subs to SRT for cleaner muxing...")
+                _extracted_text_srts = _extract_text_subs_to_srt()
+                if not _extracted_text_srts:
+                    log("Text sub extraction failed — skipping to no-subs fallback.")
+                    continue
+
             cmd, enc = _build_cmd(
                 inc_subs, extra,
                 pre_audio=_pre_audio if use_preenc else None,
+                extracted_text_srts=_extracted_text_srts if use_extracted_subs else None,
             )
             encoder_used = enc
             if attempt == 0:
@@ -1146,13 +1217,15 @@ def remux_to_mp4(
             elif attempt == 2:
                 log("DTS fix retry — trying -fflags +genpts -avoid_negative_ts make_zero")
             elif attempt == 4:
+                log("Retrying with pre-extracted SRT subtitles (avoids ASS→mov_text DTS issues)")
+            elif attempt == 5:
                 if english_text_subs or pgs_sub_indices or copy_bitmap_indices:
                     log(
-                        "ERROR: remux failed and could not be resolved with subtitles present. "
-                        "Aborting to preserve subtitle tracks."
+                        "WARNING: all subtitle remux attempts failed — retrying without "
+                        "subtitle tracks. Output MP4 will have no subtitles."
                     )
-                    return False, ""
-                log("Retrying without subtitle streams")
+                else:
+                    log("Retrying without subtitle streams")
 
             if os.path.exists(tmp_path):
                 try:
@@ -1299,6 +1372,14 @@ def remux_to_mp4(
                 if af and os.path.exists(af):
                     try:
                         os.remove(af)
+                    except OSError:
+                        pass
+        # Clean up any pre-extracted text sub SRT files
+        if _extracted_text_srts:
+            for srt in _extracted_text_srts:
+                if srt and os.path.exists(srt):
+                    try:
+                        os.remove(srt)
                     except OSError:
                         pass
 

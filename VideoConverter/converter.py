@@ -503,7 +503,7 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
             "-i",  input_path,
             "-c:v", "hevc_qsv",
             "-global_quality", str(quality),
-            "-an",           # skip audio — faster
+            "-c:a", "copy",  # passthrough audio so sample size includes audio bytes
             "-f", "matroska",
             tmp_path,
         ]

@@ -46,6 +46,7 @@ function _sortFiles(files) {
   if (_sortBy === 'bitrate') arr.sort((a, b) => _fileBitrate(b) - _fileBitrate(a));
   else if (_sortBy === 'size') arr.sort((a, b) => (parseFloat((b.size||'0').replace(/,/g,''))||0) - (parseFloat((a.size||'0').replace(/,/g,''))||0));
   else if (_sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name));
+  else if (_sortBy === 'est_saving') arr.sort((a, b) => (b.est_pct || 0) - (a.est_pct || 0));
   return arr;
 }
 
@@ -771,6 +772,11 @@ function _estTick(pending, i) {
             '<span class="text-success fw-semibold">' + data.estimated_saving_pct + '%</span>' +
             '<br><small class="text-secondary">' + data.estimated_saving_mb + '\u202fMB</small>';
         }
+      }
+      // Store back into _files so sort-by-estimated-savings can use it
+      if (idx !== undefined && _files[idx]) {
+        _files[idx].est_pct = data.error ? 0 : (data.estimated_saving_pct || 0);
+        _files[idx].est_mb  = data.error ? 0 : (data.estimated_saving_mb  || 0);
       }
       _estDone++;
       _updateEstStrip();

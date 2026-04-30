@@ -195,8 +195,9 @@ def _parse_probe(probe: dict) -> dict:
     h          = video_stream.get("height", 0)
     resolution = f"{w}x{h}" if w and h else "unknown"
 
-    # Prefer stream-level bitrate; fall back to container bitrate
-    bitrate_raw = video_stream.get("bit_rate") or fmt.get("bit_rate") or 0
+    # Prefer container bitrate (all streams, consistent with file size / duration);
+    # fall back to stream-level if container doesn't report it.
+    bitrate_raw = fmt.get("bit_rate") or video_stream.get("bit_rate") or 0
     bitrate     = int(bitrate_raw or 0)
 
     hdr_transfers = {"smpte2084", "arib-std-b67", "smpte428"}

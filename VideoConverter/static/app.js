@@ -379,26 +379,44 @@ function onSearchInput(val) {
   applyFilter();
 }
 
+function _fileMatchesFilter(f) {
+  const matchStatus = _activeFilter === 'all' || f.status === _activeFilter;
+  const matchSearch = !_searchQuery ||
+    f.name.toLowerCase().includes(_searchQuery) ||
+    (f.folder || '').toLowerCase().includes(_searchQuery);
+  const sizeMB = parseFloat((f.size || '0').replace(/,/g, '')) || 0;
+  const kbps   = f.bitrate_kbps || _fileBitrate(f);
+  const durMin = _parseDuration(f.duration) / 60;
+  const matchSize = (!_filterSizeMin || sizeMB >= +_filterSizeMin) &&
+                    (!_filterSizeMax || sizeMB <= +_filterSizeMax);
+  const matchBr   = (!_filterBrMin   || kbps   >= +_filterBrMin)   &&
+                    (!_filterBrMax   || kbps   <= +_filterBrMax);
+  const matchDur  = (!_filterDurMin  || durMin >= +_filterDurMin)  &&
+                    (!_filterDurMax  || durMin <= +_filterDurMax);
+  return matchStatus && matchSearch && matchSize && matchBr && matchDur;
+}
+
 function applyFilter() {
+  const tbody = document.getElementById('queueBody');
+  // Separate matching vs non-matching, preserving current _files order (which
+  // reflects the last sort applied by setSortBy / populateTable).
+  const matching    = [];
+  const nonMatching = [];
   _files.forEach((f, i) => {
     const row = document.getElementById('row-' + i);
     if (!row) return;
-    const matchStatus = _activeFilter === 'all' || f.status === _activeFilter;
-    const matchSearch = !_searchQuery ||
-      f.name.toLowerCase().includes(_searchQuery) ||
-      (f.folder || '').toLowerCase().includes(_searchQuery);
-    // Range filters (only applied when probe data is available)
-    const sizeMB = parseFloat((f.size || '0').replace(/,/g, '')) || 0;
-    const kbps   = f.bitrate_kbps || _fileBitrate(f);
-    const durMin = _parseDuration(f.duration) / 60;
-    const matchSize = (!_filterSizeMin || sizeMB >= +_filterSizeMin) &&
-                      (!_filterSizeMax || sizeMB <= +_filterSizeMax);
-    const matchBr   = (!_filterBrMin   || kbps   >= +_filterBrMin)   &&
-                      (!_filterBrMax   || kbps   <= +_filterBrMax);
-    const matchDur  = (!_filterDurMin  || durMin >= +_filterDurMin)  &&
-                      (!_filterDurMax  || durMin <= +_filterDurMax);
-    row.style.display = (matchStatus && matchSearch && matchSize && matchBr && matchDur) ? '' : 'none';
+    if (_fileMatchesFilter(f)) {
+      row.style.display = '';
+      matching.push(row);
+    } else {
+      row.style.display = 'none';
+      nonMatching.push(row);
+    }
   });
+  // Re-append matching rows first (in sort order), then hidden ones at the end
+  // so the DOM order matches the active sort when a filter is applied.
+  matching.forEach(r => tbody.appendChild(r));
+  nonMatching.forEach(r => tbody.appendChild(r));
 }
 
 function toggleFilterBar() {
@@ -913,7 +931,9 @@ function startConversion() {
   if (_files.length === 0) return;
   _cancelProbeStream();
   const anime = document.getElementById('animeMode').checked;
-  const pendingFiles = _files.filter(f => f.status === 'pending' || f.status === 'failed');
+  const pendingFiles = _files.filter(f =>
+    (f.status === 'pending' || f.status === 'failed') && _fileMatchesFilter(f)
+  );
   if (pendingFiles.length === 0) {
     addLog('No pending files to convert.', 'warn');
     return;

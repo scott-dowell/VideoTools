@@ -601,7 +601,7 @@ function scanFolder(path) {
       } else if (pendingCount === 0) {
         addLog('Found ' + _files.length + ' files \u2014 all already converted.', 'ok');
         setButtonStates('idle');
-        if (_probeTotal === 0) { _scanEs.close(); _scanEs = null; _scanStripHide(); }
+        if (_probeTotal === 0) { _scanEs.close(); _scanEs = null; _scanStripHide(); setSortBy(_sortBy); }
         else { _scanStripPhase2(); }
         runEstimation(_files);
       } else {
@@ -612,6 +612,7 @@ function scanFolder(path) {
           _scanStripPhase2();
         } else {
           addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB \u2014 all probe data cached.', 'ok');
+          setSortBy(_sortBy);
         }
         setButtonStates('ready');
         runEstimation(_files);
@@ -622,7 +623,7 @@ function scanFolder(path) {
       _scanStripHide();
       const totalGB = (msg.total_mb / 1024).toFixed(1);
       document.getElementById('totalSizeLabel').textContent = totalGB + ' GB total';
-      populateTable(_files);
+      setSortBy(_sortBy);
     } else if (msg.type === 'warning') {
       addLog('Skipped: ' + msg.message, 'warn');
     } else if (msg.type === 'error') {
@@ -1288,6 +1289,12 @@ function saveSettings() {
 }
 
 // Load settings on startup and apply defaults
+// Set the dropdown to the JS default immediately so it's correct before the fetch resolves.
+document.addEventListener('DOMContentLoaded', function() {
+  const ss = document.getElementById('sortSelect');
+  if (ss) ss.value = _sortBy;
+});
+
 (function _applyStartupSettings() {
   fetch('/api/settings')
     .then(r => r.json())
@@ -1338,7 +1345,7 @@ function saveSettings() {
         const rb = document.getElementById('rescanBtn');
         if (rb) rb.disabled = false;
       }
-      populateTable(_files);
+      setSortBy(_sortBy);
       updateStats(_files);
       if (s.state === 'running') {
         setButtonStates('running');

@@ -778,6 +778,9 @@ function _estTick(pending, i) {
         _files[idx].est_pct = data.error ? 0 : (data.estimated_saving_pct || 0);
         _files[idx].est_mb  = data.error ? 0 : (data.estimated_saving_mb  || 0);
       }
+      // If currently sorted by est_saving, re-apply the sort live so the table
+      // reorders itself as each result arrives.
+      if (_sortBy === 'est_saving') setSortBy('est_saving');
       _estDone++;
       _updateEstStrip();
       // Delay before next: longer when crossing folder boundary

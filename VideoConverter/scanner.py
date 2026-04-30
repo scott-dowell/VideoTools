@@ -360,6 +360,9 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "bitrate_kbps":  fallback_rec.get("source_bitrate_kbps"),
                         "codec":         fallback_rec.get("source_codec"),
                         "duration_secs": fallback_rec.get("source_duration_secs"),
+                        "output_size_mb": fallback_rec.get("output_size_mb"),
+                        "saved_mb":      fallback_rec.get("saved_mb"),
+                        "saved_pct":     fallback_rec.get("saved_pct"),
                     }
                     db.update_source_path(fallback_rec["id"], full_path)
 
@@ -372,6 +375,9 @@ def walk(root: str) -> Generator[dict, None, None]:
                 cached_bitrate = db_info.get("bitrate_kbps")
                 cached_codec   = db_info.get("codec") or ""
                 cached_dur     = db_info.get("duration_secs")
+                out_mb_val  = db_info.get("output_size_mb")
+                saved_mb_val = db_info.get("saved_mb")
+                saved_pct_val = db_info.get("saved_pct")
                 folder_files.append({
                     "full_path":    fp,
                     "name":         filename,
@@ -383,6 +389,9 @@ def walk(root: str) -> Generator[dict, None, None]:
                     "is_hi10":      False,
                     "streams":      None,
                     "status":       "done",
+                    "output":       str(round(out_mb_val, 1)) if out_mb_val else None,
+                    "saved":        str(round(saved_mb_val, 1)) if saved_mb_val else None,
+                    "pct":          str(saved_pct_val) if saved_pct_val is not None else None,
                 })
                 if cached_bitrate is None:
                     record_id = db_info.get("id")

@@ -236,7 +236,7 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             f"""
             SELECT c.id, c.source_path, c.status,
                    c.source_bitrate_kbps, c.source_codec, c.source_duration_secs,
-                   c.output_bitrate_kbps, c.output_size_mb
+                   c.output_bitrate_kbps, c.output_size_mb, c.saved_mb, c.saved_pct
               FROM conversions c
              INNER JOIN (
                  SELECT source_path, MAX(id) AS max_id
@@ -262,11 +262,14 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
         else:
             bitrate = row["source_bitrate_kbps"]
         result[row["source_path"]] = {
-            "id":           row["id"],
-            "status":       status,
-            "bitrate_kbps": bitrate,
-            "codec":        row["source_codec"],
+            "id":            row["id"],
+            "status":        status,
+            "bitrate_kbps":  bitrate,
+            "codec":         row["source_codec"],
             "duration_secs": row["source_duration_secs"],
+            "output_size_mb": row["output_size_mb"],
+            "saved_mb":      row["saved_mb"],
+            "saved_pct":     row["saved_pct"],
         }
     return result
 

@@ -14,4 +14,8 @@ if ($procs) {
 }
 
 Write-Host "Starting Flask..." -ForegroundColor Cyan
-& "$venv\python.exe" $app
+$logDir = "$PSScriptRoot\VideoConverter\logs"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$crashLog = "$logDir\flask_crash.log"
+# Use cmd /c to redirect stderr cleanly to the crash log without PowerShell wrapping it
+cmd /c "`"$venv\python.exe`" `"$app`" 2>>`"$crashLog`""

@@ -697,8 +697,13 @@ def api_scan():
         return jsonify({"error": "Invalid path"}), 400
 
     def _generate():
-        for event in scanner.walk(path):
-            yield f"data: {json.dumps(event)}\n\n"
+        try:
+            for event in scanner.walk(path):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            import traceback
+            app.logger.error("Scanner error: %s\n%s", exc, traceback.format_exc())
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
     return Response(
         stream_with_context(_generate()),

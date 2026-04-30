@@ -1547,7 +1547,7 @@ def convert_video(
                 "saved_mb":       0.0,
                 "saved_pct":      0,
                 "encoder_used":   encoder_used,
-                "error":          "anime encode failed",
+                "error":          "no_savings" if encoder_used == "no_savings" else "anime encode failed",
                 "conv_logger":    clog,
             }
 

@@ -736,7 +736,7 @@ let _estPendingFiles = [];
 let _estPendingIndex = 0;
 
 function runEstimation(files) {
-  const pending = files.filter(f => (f.status === 'pending') && f.full_path);
+  const pending = files.filter(f => (f.status === 'pending' || f.status === 'failed') && f.full_path);
   _estCancelled  = false;
   _estDone       = 0;
   _estTotal      = pending.length;

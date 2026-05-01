@@ -13,7 +13,8 @@ let _filterBrMin   = ''; let _filterBrMax   = '';
 let _filterDurMin  = ''; let _filterDurMax  = '';
 let _appState     = 'idle';  // idle | scanning | ready | running | done | stopped
 let _dragSrcIndex = null;
-let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name'
+let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'duration' | 'est_saving'
+let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
 
 // Estimation background task state
@@ -43,15 +44,36 @@ function _fileBitrate(f) {
 
 function _sortFiles(files) {
   const arr = [...files];
-  if (_sortBy === 'bitrate') arr.sort((a, b) => _fileBitrate(b) - _fileBitrate(a));
-  else if (_sortBy === 'size') arr.sort((a, b) => (parseFloat((b.size||'0').replace(/,/g,''))||0) - (parseFloat((a.size||'0').replace(/,/g,''))||0));
-  else if (_sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name));
-  else if (_sortBy === 'est_saving') arr.sort((a, b) => (b.est_pct || 0) - (a.est_pct || 0));
+  const mul = _sortDir === 'asc' ? -1 : 1;
+  if (_sortBy === 'bitrate') arr.sort((a, b) => (_fileBitrate(b) - _fileBitrate(a)) * mul);
+  else if (_sortBy === 'size') arr.sort((a, b) => ((parseFloat((b.size||'0').replace(/,/g,''))||0) - (parseFloat((a.size||'0').replace(/,/g,''))||0)) * mul);
+  else if (_sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name) * mul);
+  else if (_sortBy === 'duration') arr.sort((a, b) => (_parseDuration(b.duration) - _parseDuration(a.duration)) * mul);
+  else if (_sortBy === 'est_saving') arr.sort((a, b) => ((b.est_pct || 0) - (a.est_pct || 0)) * mul);
   return arr;
+}
+
+function _updateSortDirBtn() {
+  const btn = document.getElementById('sortDirBtn');
+  if (!btn) return;
+  if (_sortDir === 'desc') {
+    btn.innerHTML = '<i class="bi bi-sort-down"></i>';
+    btn.title = 'Descending — click for ascending';
+  } else {
+    btn.innerHTML = '<i class="bi bi-sort-up"></i>';
+    btn.title = 'Ascending — click for descending';
+  }
+}
+
+function toggleSortDir() {
+  _sortDir = _sortDir === 'desc' ? 'asc' : 'desc';
+  _updateSortDirBtn();
+  setSortBy(_sortBy);
 }
 
 function setSortBy(val) {
   _sortBy = val;
+  _updateSortDirBtn();
   // Re-sort and re-render, preserving current _files order in _files
   const sorted = _sortFiles(_files);
   // Push sort order back into _files so drag picks up from here
@@ -334,7 +356,8 @@ function updateStats(files) {
                         .reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
   const donePct  = files.length ? Math.round(done   / files.length * 100) : 0;
   const failPct  = files.length ? Math.round(failed / files.length * 100) : 0;
-  const avgRatio = origMB > 0    ? Math.round(savedMB / origMB * 100) : 0;
+  const origTotalMB = origMB + savedMB; // output size + saved = original size
+  const avgRatio = origTotalMB > 0 ? Math.round(savedMB / origTotalMB * 100) : 0;
 
   // Values
   document.getElementById('statTotal').textContent  = files.length;
@@ -345,7 +368,7 @@ function updateStats(files) {
   // Sub-labels
   document.getElementById('statTotalSub').textContent  = totalMB > 0 ? (totalMB / 1024).toFixed(1) + ' GB · ' + pending + ' remaining' : '—';
   document.getElementById('statDoneSub').textContent   = donePct  > 0 ? donePct  + '% of queue complete' : '—';
-  document.getElementById('statSavedSub').textContent  = avgRatio > 0 ? 'avg ' + avgRatio + '% compression ratio' : '—';
+  document.getElementById('statSavedSub').textContent  = avgRatio > 0 ? 'avg ' + avgRatio + '% savings' : '—';
   document.getElementById('statFailedSub').textContent = failed   > 0 ? failPct + '% failure rate' : 'No failures';
 
   // Progress strips
@@ -1306,6 +1329,7 @@ function saveSettings() {
 document.addEventListener('DOMContentLoaded', function() {
   const ss = document.getElementById('sortSelect');
   if (ss) ss.value = _sortBy;
+  _updateSortDirBtn();
 });
 
 (function _applyStartupSettings() {
@@ -1316,6 +1340,7 @@ document.addEventListener('DOMContentLoaded', function() {
         _sortBy = s.default_sort;
         const ss = document.getElementById('sortSelect');
         if (ss) ss.value = _sortBy;
+        _updateSortDirBtn();
       }
       if (s.anime_mode !== undefined) {
         const am = document.getElementById('animeMode');

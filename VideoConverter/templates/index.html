@@ -126,9 +126,13 @@
           <select class="form-select form-select-sm" style="max-width:160px" onchange="setSortBy(this.value)" id="sortSelect">
             <option value="bitrate" selected>⇅ Bitrate (smart)</option>
             <option value="size">⇅ File size</option>
+            <option value="duration">⇅ Duration</option>
             <option value="name">⇅ Filename</option>
             <option value="est_saving">⇅ Est. Savings</option>
           </select>
+          <button class="btn btn-sm btn-outline-secondary" id="sortDirBtn" onclick="toggleSortDir()" title="Descending — click for ascending">
+            <i class="bi bi-sort-down"></i>
+          </button>
           <button class="btn btn-sm btn-outline-secondary" id="filterToggleBtn" onclick="toggleFilterBar()" title="Range filters">
             <i class="bi bi-funnel me-1"></i>Filters
           </button>
@@ -369,6 +373,7 @@
           <select class="form-select form-select-sm" id="settingsDefaultSort">
             <option value="bitrate">Bitrate (smart) — highest compression opportunity first</option>
             <option value="size">File size — largest first</option>
+            <option value="duration">Duration — longest first</option>
             <option value="name">Filename — alphabetical</option>
           </select>
         </div>

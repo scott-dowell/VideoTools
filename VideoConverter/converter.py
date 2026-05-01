@@ -211,9 +211,16 @@ def _run_ffmpeg(
         _reader_thread = threading.Thread(target=_reader, daemon=True)
         _reader_thread.start()
 
+        # Track last time we received any output from ffmpeg.
+        # If the process produces no output for this many seconds we treat it
+        # as hung (e.g. QSV driver freeze at startup) and kill it.
+        _HUNG_TIMEOUT_SECS = 120
+        _last_output_time  = time.monotonic()
+
         while True:
             try:
                 line = _line_queue.get(timeout=0.5)
+                _last_output_time = time.monotonic()
             except queue.Empty:
                 # No output yet — check whether we should abort
                 if stop_event.is_set():
@@ -221,6 +228,13 @@ def _run_ffmpeg(
                     proc.wait()
                     _reader_thread.join(timeout=5)
                     log("Stopped by user.")
+                    return False
+                # Kill if the process is alive but has been silent too long
+                if proc.poll() is None and (time.monotonic() - _last_output_time) > _HUNG_TIMEOUT_SECS:
+                    proc.kill()
+                    proc.wait()
+                    _reader_thread.join(timeout=5)
+                    log(f"ERROR: ffmpeg produced no output for {_HUNG_TIMEOUT_SECS}s — killed (hung process).")
                     return False
                 continue
 

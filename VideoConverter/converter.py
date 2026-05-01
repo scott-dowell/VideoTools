@@ -322,13 +322,14 @@ def compress_simple(
     pid_holder: list[int] | None = None,
     conv_logger: "_conv_log.ConversionLogger | None" = None,
     tmp_holder: list[str] | None = None,
+    force_sw: bool = False,
 ) -> tuple[bool, str]:
     """
     Normal-mode compression.
 
     - Keeps source container (MP4→MP4, MKV→MKV, anything else→MKV)
     - Copies all audio and subtitle tracks unchanged
-    - Tries hevc_qsv first, falls back to libx265
+    - Tries hevc_qsv first (unless force_sw=True), falls back to libx265
     - Discards output and returns (False, "") if result is not smaller than source
 
     Returns (True, encoder_used) if a smaller output file was produced,
@@ -352,15 +353,19 @@ def compress_simple(
 
     encoder_used = ""
     try:
-        # Try QSV first
-        encoder_used = "hevc_qsv"
-        log("Compressing with hevc_qsv...")
-        qsv_log = conv_logger.tee(log, "compress_qsv") if conv_logger else log
-        success = _run_ffmpeg(
-            _qsv_cmd(input_path, tmp_path, quality), qsv_log, stop_event,
-            duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
-            output_path=tmp_path,
-        )
+        # Try QSV first (unless the caller requested SW-only for this file)
+        if force_sw:
+            log("Force SW mode: skipping hevc_qsv.")
+            success = False  # fall straight through to SW block below
+        else:
+            encoder_used = "hevc_qsv"
+            log("Compressing with hevc_qsv...")
+            qsv_log = conv_logger.tee(log, "compress_qsv") if conv_logger else log
+            success = _run_ffmpeg(
+                _qsv_cmd(input_path, tmp_path, quality), qsv_log, stop_event,
+                duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
+                output_path=tmp_path,
+            )
         if not success:
             if stop_event.is_set():
                 return False, ""
@@ -1532,6 +1537,7 @@ def convert_video(
     log: LogFn | None = None,
     pid_holder: list[int] | None = None,
     tmp_holder: list[str] | None = None,
+    force_sw: bool = False,
 ) -> dict:
     """
     Convert a single video file.  Returns a result dict:
@@ -1630,6 +1636,7 @@ def convert_video(
         pid_holder  = pid_holder,
         conv_logger = clog,
         tmp_holder  = tmp_holder,
+        force_sw    = force_sw,
     )
 
     if not ok:

@@ -87,6 +87,7 @@ def init_db(db_path: str) -> None:
                 saved_pct            INTEGER,
                 status               TEXT    NOT NULL DEFAULT 'pending',
                 anime_mode        INTEGER DEFAULT 0,
+                force_sw          INTEGER DEFAULT 0,
                 encoder_used      TEXT,
                 started_at        TEXT,
                 completed_at      TEXT,
@@ -105,6 +106,7 @@ def init_db(db_path: str) -> None:
             ("source_bitrate_kbps",  "INTEGER"),
             ("source_duration_secs", "REAL"),
             ("output_bitrate_kbps",  "INTEGER"),
+            ("force_sw",             "INTEGER DEFAULT 0"),
         ]:
             if col not in existing:
                 conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} {typedef}")
@@ -236,7 +238,8 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             f"""
             SELECT c.id, c.source_path, c.status,
                    c.source_bitrate_kbps, c.source_codec, c.source_duration_secs,
-                   c.output_bitrate_kbps, c.output_size_mb, c.saved_mb, c.saved_pct
+                   c.output_bitrate_kbps, c.output_size_mb, c.saved_mb, c.saved_pct,
+                   c.force_sw
               FROM conversions c
              INNER JOIN (
                  SELECT source_path, MAX(id) AS max_id
@@ -270,6 +273,7 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             "output_size_mb": row["output_size_mb"],
             "saved_mb":      row["saved_mb"],
             "saved_pct":     row["saved_pct"],
+            "force_sw":      bool(row["force_sw"]),
         }
     return result
 
@@ -297,6 +301,7 @@ def upsert_pending(
                 source_size_bytes = COALESCE(conversions.source_size_bytes, excluded.source_size_bytes),
                 source_size_mb    = COALESCE(conversions.source_size_mb,    excluded.source_size_mb),
                 source_codec      = COALESCE(conversions.source_codec,      excluded.source_codec)
+                -- force_sw is intentionally NOT reset here; it persists across retries
             """,
             (source_path, source_mtime, source_size_bytes, source_size_mb, source_codec, int(anime_mode)),
         )
@@ -314,6 +319,16 @@ def update_source_path(record_id: int, new_source_path: str) -> None:
             "UPDATE conversions SET source_path = ? WHERE id = ?",
             (_norm(new_source_path), record_id),
         )
+
+
+def set_force_sw(source_path: str, value: bool) -> int:
+    """Set or clear the force_sw flag on all records for a given source path."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE conversions SET force_sw = ? WHERE source_path = ?",
+            (int(value), _norm(source_path)),
+        )
+        return cur.rowcount
 
 
 def mark_running(record_id: int, started_at: str) -> None:

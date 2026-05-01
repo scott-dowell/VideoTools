@@ -137,12 +137,14 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         full_path = file_info["full_path"].replace("\\", "/")
 
         # Always check the live DB status — never trust what the client sent
-        db_status = db.get_latest_statuses_by_paths([full_path]).get(full_path, {}).get("status")
+        db_rec = db.get_latest_statuses_by_paths([full_path]).get(full_path, {})
+        db_status = db_rec.get("status")
         if db_status in ("done", "skipped", "no_saving"):
             with _job_lock:
                 _job["files"][idx]["status"] = db_status
                 _job["current_index"] = idx
             continue
+        force_sw = bool(db_rec.get("force_sw", False))
 
         try:
             mtime      = os.path.getmtime(full_path)
@@ -229,6 +231,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                 log         = _capture_log,
                 pid_holder  = _ffmpeg_pid,
                 tmp_holder  = _tmp_holder,
+                force_sw    = force_sw,
             )
         except Exception as exc:
             _job_log(f"UNHANDLED EXCEPTION during conversion: {exc}")
@@ -759,27 +762,38 @@ def api_open():
 
 @app.route("/api/update_status", methods=["POST"])
 def api_update_status():
-    """Manually set the status of one or more files (e.g. skip or reset to pending)."""
+    """Manually set the status and/or force_sw flag of one or more files."""
     data  = request.get_json(force=True) or {}
     paths = data.get("paths", [])
     new_status = data.get("status", "")
+    force_sw   = data.get("force_sw", None)  # None = don't change it
+
     ALLOWED = {"skipped", "pending", "failed"}
-    if new_status not in ALLOWED:
+    if new_status and new_status not in ALLOWED:
         return jsonify({"error": f"status must be one of {ALLOWED}"}), 400
     if not paths:
         return jsonify({"error": "No paths provided"}), 400
+    if not new_status and force_sw is None:
+        return jsonify({"error": "Provide at least one of: status, force_sw"}), 400
 
     updated = 0
     with db._connect() as con:
         cur = con.cursor()
         for path in paths:
             norm = path.replace("\\", "/")
-            cur.execute(
-                "UPDATE conversions SET status=?, started_at=NULL, completed_at=NULL, error_tail=NULL "
-                "WHERE source_path=?",
-                (new_status, norm),
-            )
-            updated += cur.rowcount
+            if new_status:
+                cur.execute(
+                    "UPDATE conversions SET status=?, started_at=NULL, completed_at=NULL, error_tail=NULL "
+                    "WHERE source_path=?",
+                    (new_status, norm),
+                )
+                updated += cur.rowcount
+            if force_sw is not None:
+                cur.execute(
+                    "UPDATE conversions SET force_sw=? WHERE source_path=?",
+                    (1 if force_sw else 0, norm),
+                )
+                updated += cur.rowcount
     return jsonify({"ok": True, "updated": updated})
 
 

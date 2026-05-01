@@ -224,7 +224,11 @@ function buildRow(f, index) {
   const tdEst = document.createElement('td');
   tdEst.className = 'text-end';
   tdEst.id = 'est-' + index;
-  if (f.status === 'done' || f.status === 'failed') {
+  if (f.est_pct !== undefined && f.est_pct > 0) {
+    tdEst.innerHTML =
+      '<span class="text-success fw-semibold">' + f.est_pct + '%</span>' +
+      '<br><small class="text-secondary">' + (f.est_mb || 0) + '\u202fMB</small>';
+  } else if (f.status === 'done' || f.status === 'failed' || f.status === 'no_saving') {
     tdEst.textContent = '\u2014';
   } else {
     tdEst.innerHTML = '<span class="text-secondary" style="font-size:.75rem">…</span>';

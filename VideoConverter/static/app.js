@@ -224,7 +224,7 @@ function buildRow(f, index) {
   const tdEst = document.createElement('td');
   tdEst.className = 'text-end';
   tdEst.id = 'est-' + index;
-  if (f.est_pct !== undefined && f.est_pct > 0) {
+  if (f.est_pct !== undefined) {
     tdEst.innerHTML =
       '<span class="text-success fw-semibold">' + f.est_pct + '%</span>' +
       '<br><small class="text-secondary">' + (f.est_mb || 0) + '\u202fMB</small>';

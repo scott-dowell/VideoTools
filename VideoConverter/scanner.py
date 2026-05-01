@@ -423,6 +423,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                 "is_hi10":      False,
                 "streams":      None,
                 "status":       db_status if (db_status and db_status not in ("pending", "queued")) else "pending",
+                "force_sw":     bool(db_info.get("force_sw", False)),
             }
 
             folder_files.append(file_dict)

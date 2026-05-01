@@ -27,6 +27,21 @@ let _estDone        = 0;
 let _estTotal       = 0;
 let _estLastFolder  = null;
 
+// Build status badge HTML (includes SW indicator when force_sw is true)
+function _badgeHtml(status, force_sw) {
+  const cls = status === 'done'       ? 'badge-done'
+            : status === 'failed'     ? 'badge-failed'
+            : status === 'no_saving'  ? 'badge-no-saving'
+            : status === 'skipped'    ? 'badge-skipped'
+            : status === 'converting' ? 'badge-converting'
+            : 'badge-pending';
+  const lbl = status === 'no_saving' ? 'Skipped \u2013 Larger'
+            : status === 'skipped'   ? 'Skipped \u2013 Manual'
+            : (status || 'pending');
+  const sw  = force_sw ? ' <small style="font-size:.7em;opacity:.85" class="text-warning">SW</small>' : '';
+  return '<span class="badge ' + cls + '">' + lbl + sw + '</span>';
+}
+
 // Parse "H:MM:SS" or "MM:SS" → seconds
 function _parseDuration(d) {
   if (!d) return 0;
@@ -234,16 +249,7 @@ function buildRow(f, index) {
 
   // col 5 — Status badge
   const tdStatus = document.createElement('td');
-  const badgeClass = f.status === 'done'       ? 'badge-done'
-                   : f.status === 'failed'     ? 'badge-failed'
-                   : f.status === 'no_saving'  ? 'badge-no-saving'
-                   : f.status === 'skipped'    ? 'badge-skipped'
-                   : f.status === 'converting' ? 'badge-converting'
-                   : 'badge-pending';
-  const badgeLabel  = f.status === 'no_saving' ? 'Skipped \u2013 Larger'
-                    : f.status === 'skipped'   ? 'Skipped \u2013 Manual'
-                    : (f.status || 'pending');
-  tdStatus.innerHTML = '<span class="badge ' + badgeClass + '">' + badgeLabel + '</span>';
+  tdStatus.innerHTML = _badgeHtml(f.status, f.force_sw);
   tr.appendChild(tdStatus);
 
   // col 5b — Est. saving
@@ -929,6 +935,7 @@ function _pollStatus() {
           if (!sf) return;
           // Sync into _files so local state matches
           f.status = sf.status;
+          if (sf.force_sw !== undefined) f.force_sw = sf.force_sw;
           if (sf.output)      f.output      = sf.output;
           if (sf.saved)       f.saved       = sf.saved;
           if (sf.pct)         f.pct         = sf.pct;
@@ -939,16 +946,7 @@ function _pollStatus() {
           // Status badge (col index 7)
           const badgeCell = row.cells[7];
           if (badgeCell) {
-            const cls = sf.status === 'done'       ? 'badge-done'
-                      : sf.status === 'failed'     ? 'badge-failed'
-                      : sf.status === 'no_saving'  ? 'badge-no-saving'
-                      : sf.status === 'skipped'    ? 'badge-skipped'
-                      : sf.status === 'converting' ? 'badge-converting'
-                      : 'badge-pending';
-            const lbl = sf.status === 'no_saving' ? 'Skipped \u2013 Larger'
-                      : sf.status === 'skipped'   ? 'Skipped \u2013 Manual'
-                      : (sf.status || 'pending');
-            badgeCell.innerHTML = '<span class="badge ' + cls + '">' + lbl + '</span>';
+            badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw);
             row.classList.toggle('tr-done',       sf.status === 'done');
             row.classList.toggle('tr-failed',     sf.status === 'failed');
             row.classList.toggle('tr-no-saving',  sf.status === 'no_saving');
@@ -1166,6 +1164,18 @@ function showRowMenu(index, btn) {
       () => unskipFile(index)));
   }
 
+  if (isPending || isFailed || isSkipped) {
+    if (f.force_sw) {
+      _rowMenu.appendChild(_menuDivider());
+      _rowMenu.appendChild(_menuItem('bi-cpu text-secondary', 'Remove SW-only flag',
+        () => unforceSw(index)));
+    } else {
+      _rowMenu.appendChild(_menuDivider());
+      _rowMenu.appendChild(_menuItem('bi-cpu text-warning', 'Force SW encode (skip QSV)',
+        () => forceSw(index)));
+    }
+  }
+
   if (isPending) {
     _rowMenu.appendChild(_menuDivider());
     _rowMenu.appendChild(_menuItem('bi-x-circle text-danger', 'Remove from Queue',
@@ -1308,7 +1318,7 @@ function skipFile(index) {
       if (row) {
         row.classList.remove('tr-failed', 'tr-pending');
         row.classList.add('tr-skipped');
-        row.cells[7].innerHTML = '<span class="badge badge-skipped">Skipped \u2013 Manual</span>';
+        row.cells[7].innerHTML = _badgeHtml('skipped', _files[index].force_sw);
       }
       updateStats(_files);
       addLog('Skipped: ' + f.name, 'warn');
@@ -1333,12 +1343,59 @@ function unskipFile(index) {
       const row = document.getElementById('row-' + index);
       if (row) {
         row.classList.remove('tr-skipped');
-        row.cells[7].innerHTML = '<span class="badge badge-pending">pending</span>';
+        row.cells[7].innerHTML = _badgeHtml('pending', _files[index].force_sw);
       }
       updateStats(_files);
       addLog('Reset to pending: ' + f.name, 'info');
     } else {
       addLog('Un-skip failed: ' + (d.error || 'unknown'), 'err');
+    }
+  })
+  .catch(() => addLog('Could not reach server.', 'err'));
+}
+
+function forceSw(index) {
+  const f = _files[index];
+  fetch('/api/update_status', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: [f.full_path], status: 'pending', force_sw: true }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      _files[index].force_sw = true;
+      _files[index].status = 'pending';
+      const row = document.getElementById('row-' + index);
+      if (row) {
+        row.classList.remove('tr-skipped', 'tr-failed');
+        row.cells[7].innerHTML = _badgeHtml('pending', true);
+      }
+      updateStats(_files);
+      addLog('SW-only mode enabled: ' + f.name, 'warn');
+    } else {
+      addLog('Force SW failed: ' + (d.error || 'unknown'), 'err');
+    }
+  })
+  .catch(() => addLog('Could not reach server.', 'err'));
+}
+
+function unforceSw(index) {
+  const f = _files[index];
+  fetch('/api/update_status', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: [f.full_path], force_sw: false }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      _files[index].force_sw = false;
+      const row = document.getElementById('row-' + index);
+      if (row) row.cells[7].innerHTML = _badgeHtml(_files[index].status, false);
+      addLog('SW-only mode cleared: ' + f.name, 'info');
+    } else {
+      addLog('Clear SW failed: ' + (d.error || 'unknown'), 'err');
     }
   })
   .catch(() => addLog('Could not reach server.', 'err'));

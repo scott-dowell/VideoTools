@@ -16,6 +16,7 @@ let _dragSrcIndex = null;
 let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'duration' | 'est_saving'
 let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
+let _sessionSavedMB = null;   // null = no run this session, number = MB saved this run
 
 // Estimation background task state
 let _estUserPaused  = false;  // user clicked the strip
@@ -236,9 +237,12 @@ function buildRow(f, index) {
   const badgeClass = f.status === 'done'       ? 'badge-done'
                    : f.status === 'failed'     ? 'badge-failed'
                    : f.status === 'no_saving'  ? 'badge-no-saving'
+                   : f.status === 'skipped'    ? 'badge-skipped'
                    : f.status === 'converting' ? 'badge-converting'
                    : 'badge-pending';
-  const badgeLabel  = f.status === 'no_saving' ? 'Skipped – Larger' : (f.status || 'pending');
+  const badgeLabel  = f.status === 'no_saving' ? 'Skipped \u2013 Larger'
+                    : f.status === 'skipped'   ? 'Skipped \u2013 Manual'
+                    : (f.status || 'pending');
   tdStatus.innerHTML = '<span class="badge ' + badgeClass + '">' + badgeLabel + '</span>';
   tr.appendChild(tdStatus);
 
@@ -250,10 +254,10 @@ function buildRow(f, index) {
     tdEst.innerHTML =
       '<span class="text-success fw-semibold">' + f.est_pct + '%</span>' +
       '<br><small class="text-secondary">' + (f.est_mb || 0) + '\u202fMB</small>';
-  } else if (f.status === 'done' || f.status === 'failed' || f.status === 'no_saving') {
+  } else if (f.status === 'done' || f.status === 'failed' || f.status === 'no_saving' || f.status === 'skipped') {
     tdEst.textContent = '\u2014';
   } else {
-    tdEst.innerHTML = '<span class="text-secondary" style="font-size:.75rem">…</span>';
+    tdEst.innerHTML = '<span class="text-secondary" style="font-size:.75rem">\u2026</span>';
   }
   tr.appendChild(tdEst);
 
@@ -350,6 +354,7 @@ function updateStats(files) {
   const done      = files.filter(f => f.status === 'done').length;
   const failed    = files.filter(f => f.status === 'failed').length;
   const noSaving  = files.filter(f => f.status === 'no_saving').length;
+  const skipped    = files.filter(f => f.status === 'skipped').length;
   const pending   = files.filter(f => f.status === 'pending').length;
   const savedMB  = files.reduce((s, f) => s + (f.saved  ? parseFloat(f.saved.replace(/,/g, ''))  || 0 : 0), 0);
   const origMB   = files.filter(f => f.status === 'done')
@@ -390,6 +395,8 @@ function updateStats(files) {
   document.getElementById('chipCount-failed').textContent    = failed;
   const nsEl = document.getElementById('chipCount-no-saving');
   if (nsEl) nsEl.textContent = noSaving;
+  const skEl = document.getElementById('chipCount-skipped');
+  if (skEl) skEl.textContent = skipped;
 }
 
 // ============================================================
@@ -422,6 +429,32 @@ function _fileMatchesFilter(f) {
   const matchDur  = (!_filterDurMin  || durMin >= +_filterDurMin)  &&
                     (!_filterDurMax  || durMin <= +_filterDurMax);
   return matchStatus && matchSearch && matchSize && matchBr && matchDur;
+}
+
+function _updateSessionCard() {
+  const el = document.getElementById('statSession');
+  const sub = document.getElementById('statSessionSub');
+  const bar = document.getElementById('statSessionBar');
+  if (!el) return;
+  if (_sessionSavedMB === null) {
+    el.textContent  = '—';
+    if (sub) sub.textContent = 'No conversions yet';
+    if (bar) bar.style.width = '0%';
+  } else {
+    const gb = _sessionSavedMB / 1024;
+    el.textContent = gb >= 1 ? gb.toFixed(1) + ' GB' : _sessionSavedMB.toFixed(0) + ' MB';
+    if (sub) sub.textContent = 'this run';
+    // Bar: proportional to total saved card's bar (cap at 100%)
+    // Use ratio vs total saved for relative sense, or just show fill capped at bar width
+    if (bar) {
+      const totalEl  = document.getElementById('statSaved');
+      const totalTxt = totalEl ? totalEl.textContent : '';
+      const totalMB  = totalTxt.endsWith('GB')
+        ? parseFloat(totalTxt) * 1024
+        : parseFloat(totalTxt) || 0;
+      bar.style.width = (totalMB > 0 ? Math.min(100, Math.round(_sessionSavedMB / totalMB * 100)) : 0) + '%';
+    }
+  }
 }
 
 function applyFilter() {
@@ -542,6 +575,8 @@ function scanFolder(path) {
   _fileIndexByPath = {};
   _probeTotal = 0;
   _probeDone  = 0;
+  _sessionSavedMB = null;
+  _updateSessionCard();
   _scanStripPhase1();
   _activeFilter  = 'all';
   _searchQuery   = '';
@@ -867,6 +902,7 @@ function _pollStatus() {
             ? (s.saved_mb / 1024).toFixed(1) + ' GB'
             : s.saved_mb.toFixed(0) + ' MB')
         : '\u2014';
+      if (s.saved_mb !== undefined) { _sessionSavedMB = s.saved_mb || 0; _updateSessionCard(); }
       const overallDone  = s.files ? s.files.filter(f => f.status === 'done' || f.status === 'failed' || f.status === 'no_saving').length : 0;
       const overallTotal = s.total || 0;
       const overallPct   = overallTotal > 0 ? Math.round(overallDone / overallTotal * 100) : 0;
@@ -906,13 +942,17 @@ function _pollStatus() {
             const cls = sf.status === 'done'       ? 'badge-done'
                       : sf.status === 'failed'     ? 'badge-failed'
                       : sf.status === 'no_saving'  ? 'badge-no-saving'
+                      : sf.status === 'skipped'    ? 'badge-skipped'
                       : sf.status === 'converting' ? 'badge-converting'
                       : 'badge-pending';
-            const lbl = sf.status === 'no_saving' ? 'Skipped \u2013 Larger' : (sf.status || 'pending');
+            const lbl = sf.status === 'no_saving' ? 'Skipped \u2013 Larger'
+                      : sf.status === 'skipped'   ? 'Skipped \u2013 Manual'
+                      : (sf.status || 'pending');
             badgeCell.innerHTML = '<span class="badge ' + cls + '">' + lbl + '</span>';
             row.classList.toggle('tr-done',       sf.status === 'done');
             row.classList.toggle('tr-failed',     sf.status === 'failed');
             row.classList.toggle('tr-no-saving',  sf.status === 'no_saving');
+            row.classList.toggle('tr-skipped',    sf.status === 'skipped');
             row.classList.toggle('tr-converting', sf.status === 'converting');
           }
           // Output/Saved/% cells (cols 9, 10, 11)
@@ -975,6 +1015,8 @@ function startConversion() {
     addLog('No pending files to convert.', 'warn');
     return;
   }
+  _sessionSavedMB = 0;
+  _updateSessionCard();
   addLog('Starting conversion queue\u2026', 'info');
   addLog(anime
     ? 'Anime mode: ON \u2014 remux to MP4, AAC transcode, OCR subs'
@@ -1082,6 +1124,7 @@ function showRowMenu(index, btn) {
   const isDone       = f.status === 'done';
   const isFailed     = f.status === 'failed';
   const isPending    = f.status === 'pending';
+  const isSkipped    = f.status === 'skipped';
   const isConverting = f.status === 'converting';
 
   // Target path: converted output if done, otherwise source
@@ -1110,6 +1153,18 @@ function showRowMenu(index, btn) {
   _rowMenu.appendChild(_menuDivider());
   _rowMenu.appendChild(_menuItem('bi-info-circle', 'Video Details',
     () => viewDetails(index)));
+
+  if (isPending || isFailed) {
+    _rowMenu.appendChild(_menuDivider());
+    _rowMenu.appendChild(_menuItem('bi-slash-circle text-warning', 'Skip this file',
+      () => skipFile(index)));
+  }
+
+  if (isSkipped) {
+    _rowMenu.appendChild(_menuDivider());
+    _rowMenu.appendChild(_menuItem('bi-arrow-clockwise', 'Un-skip (reset to pending)',
+      () => unskipFile(index)));
+  }
 
   if (isPending) {
     _rowMenu.appendChild(_menuDivider());
@@ -1236,6 +1291,57 @@ function retryFile(index) {
   }
   _files[index].status = 'pending';
   addLog('Queued for retry: ' + f.name, 'info');
+}
+
+function skipFile(index) {
+  const f = _files[index];
+  fetch('/api/update_status', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: [f.full_path], status: 'skipped' }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      _files[index].status = 'skipped';
+      const row = document.getElementById('row-' + index);
+      if (row) {
+        row.classList.remove('tr-failed', 'tr-pending');
+        row.classList.add('tr-skipped');
+        row.cells[7].innerHTML = '<span class="badge badge-skipped">Skipped \u2013 Manual</span>';
+      }
+      updateStats(_files);
+      addLog('Skipped: ' + f.name, 'warn');
+    } else {
+      addLog('Skip failed: ' + (d.error || 'unknown'), 'err');
+    }
+  })
+  .catch(() => addLog('Could not reach server.', 'err'));
+}
+
+function unskipFile(index) {
+  const f = _files[index];
+  fetch('/api/update_status', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: [f.full_path], status: 'pending' }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      _files[index].status = 'pending';
+      const row = document.getElementById('row-' + index);
+      if (row) {
+        row.classList.remove('tr-skipped');
+        row.cells[7].innerHTML = '<span class="badge badge-pending">pending</span>';
+      }
+      updateStats(_files);
+      addLog('Reset to pending: ' + f.name, 'info');
+    } else {
+      addLog('Un-skip failed: ' + (d.error || 'unknown'), 'err');
+    }
+  })
+  .catch(() => addLog('Could not reach server.', 'err'));
 }
 
 function removeFromQueue(index) {

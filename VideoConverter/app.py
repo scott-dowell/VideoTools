@@ -757,6 +757,32 @@ def api_open():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/update_status", methods=["POST"])
+def api_update_status():
+    """Manually set the status of one or more files (e.g. skip or reset to pending)."""
+    data  = request.get_json(force=True) or {}
+    paths = data.get("paths", [])
+    new_status = data.get("status", "")
+    ALLOWED = {"skipped", "pending", "failed"}
+    if new_status not in ALLOWED:
+        return jsonify({"error": f"status must be one of {ALLOWED}"}), 400
+    if not paths:
+        return jsonify({"error": "No paths provided"}), 400
+
+    updated = 0
+    with db._connect() as con:
+        cur = con.cursor()
+        for path in paths:
+            norm = path.replace("\\", "/")
+            cur.execute(
+                "UPDATE conversions SET status=?, started_at=NULL, completed_at=NULL, error_tail=NULL "
+                "WHERE source_path=?",
+                (new_status, norm),
+            )
+            updated += cur.rowcount
+    return jsonify({"ok": True, "updated": updated})
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

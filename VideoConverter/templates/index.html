@@ -55,7 +55,7 @@
 
   <!-- Stat cards -->
   <div class="row g-3 mb-3">
-    <div class="col-6 col-md-3">
+    <div class="col-6 col-md">
       <div class="stat-card">
         <div class="d-flex justify-content-between align-items-start">
           <div>
@@ -68,7 +68,7 @@
         <div class="stat-bar-track mt-2"><div class="stat-bar" id="statTotalBar" style="width:0%"></div></div>
       </div>
     </div>
-    <div class="col-6 col-md-3">
+    <div class="col-6 col-md">
       <div class="stat-card">
         <div class="d-flex justify-content-between align-items-start">
           <div>
@@ -81,7 +81,7 @@
         <div class="stat-bar-track mt-2"><div class="stat-bar stat-bar-done" id="statDoneBar" style="width:0%"></div></div>
       </div>
     </div>
-    <div class="col-6 col-md-3">
+    <div class="col-6 col-md">
       <div class="stat-card">
         <div class="d-flex justify-content-between align-items-start">
           <div>
@@ -94,7 +94,20 @@
         <div class="stat-bar-track mt-2"><div class="stat-bar stat-bar-saved" id="statSavedBar" style="width:0%"></div></div>
       </div>
     </div>
-    <div class="col-6 col-md-3">
+    <div class="col-6 col-md">
+      <div class="stat-card">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <div class="stat-value" id="statSession" style="color:#58a6ff">—</div>
+            <div class="stat-label"><i class="bi bi-stopwatch me-1"></i>Session savings</div>
+          </div>
+          <i class="bi bi-stopwatch-fill stat-icon" style="color:#58a6ff"></i>
+        </div>
+        <div class="stat-sub" id="statSessionSub">No conversions yet</div>
+        <div class="stat-bar-track mt-2"><div class="stat-bar" id="statSessionBar" style="width:0%; background:#58a6ff"></div></div>
+      </div>
+    </div>
+    <div class="col-6 col-md">
       <div class="stat-card">
         <div class="d-flex justify-content-between align-items-start">
           <div>
@@ -142,6 +155,7 @@
             <button class="chip chip-done" id="chip-done" onclick="setFilter('done')">Done <span class="chip-count" id="chipCount-done">—</span></button>
             <button class="chip chip-failed" id="chip-failed" onclick="setFilter('failed')">Failed <span class="chip-count" id="chipCount-failed">—</span></button>
             <button class="chip chip-no-saving" id="chip-no_saving" onclick="setFilter('no_saving')">Skipped – Larger <span class="chip-count" id="chipCount-no-saving">—</span></button>
+            <button class="chip chip-skipped" id="chip-skipped" onclick="setFilter('skipped')">Skipped – Manual <span class="chip-count" id="chipCount-skipped">—</span></button>
           </div>
         </div>
         <!-- Range filter bar — hidden by default, toggled by Filters button -->

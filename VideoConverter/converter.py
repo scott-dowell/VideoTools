@@ -376,10 +376,41 @@ def compress_simple(
                 output_path=tmp_path,
             )
 
+        if not success and not stop_event.is_set():
+            # Both QSV and SW failed — try SW again with -err_detect ignore_err
+            # to push through corrupt reference frame errors (e.g. "Reference N >= M").
+            log("SW failed — retrying with -err_detect ignore_err to handle corrupt source...")
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            encoder_used = "libx265"
+            sw_quality = quality if quality <= 51 else config.SW_HEVC_CRF
+            sw_log2 = conv_logger.tee(log, "compress_sw_corrupt") if conv_logger else log
+            corrupt_cmd = [
+                "ffmpeg", "-y",
+                "-stats_period", "1",
+                "-fflags", "+discardcorrupt",
+                "-err_detect", "ignore_err",
+                "-i", input_path,
+                "-c:v", "libx265",
+                "-crf", str(sw_quality),
+                "-preset", "medium",
+                "-c:a", "copy",
+                "-c:s", "copy",
+                "-map", "0:v:0",
+                "-map", "0:a?",
+                "-map", "0:s?",
+                tmp_path,
+            ]
+            success = _run_ffmpeg(
+                corrupt_cmd, sw_log2, stop_event,
+                duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
+                output_path=tmp_path,
+            )
+
         if not success or not os.path.exists(tmp_path):
             log("Encode failed.")
             if conv_logger:
-                conv_logger.mark_fail_at("compress phase (QSV and SW both failed)")
+                conv_logger.mark_fail_at("compress phase (QSV, SW, and SW+ignore_err all failed)")
             return False, ""
 
         enc_size = os.path.getsize(tmp_path)

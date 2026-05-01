@@ -844,8 +844,10 @@ def remux_to_mp4(
         title = tags.get("title", "")
         eng   = _is_potentially_english(lang, title)
         if codec in TEXT_SUB_CODECS:
-            if eng:
-                english_text_subs.append(s["index"])
+            # Keep all text subtitle tracks regardless of language — they are
+            # tiny and mislabeled language tags (common in anime rips) should
+            # not cause dialogue subs to be silently dropped.
+            english_text_subs.append(s["index"])
         elif codec in PGS_SUB_CODECS:
             if eng:
                 pgs_sub_indices.append(s["index"])

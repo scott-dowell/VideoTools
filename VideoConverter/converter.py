@@ -718,11 +718,12 @@ def _verify_output(output_path: str, src_duration: float) -> tuple[bool, str]:
 def _aac_encoder() -> str:
     """Return the correct AAC encoder for this platform.
 
-    On Windows the built-in 'aac' encoder triggers an FP overflow on E-cores.
-    'aac_mf' (Media Foundation) does not have this bug.
+    Native 'aac' is used on all platforms.  On Windows it must be run via
+    _run_with_pcores_only() to avoid the FP-overflow crash on Intel E-cores.
+    We no longer use 'aac_mf' (Windows Media Foundation) because it shares
+    the same MFT subsystem as QSV and hangs silently on this hardware.
     """
-    import sys
-    return "aac_mf" if sys.platform == "win32" else "aac"
+    return "aac"
 
 
 def is_hi10(input_path: str) -> bool:
@@ -1010,67 +1011,38 @@ def remux_to_mp4(
                 "-avoid_negative_ts", "make_zero",
                 "-i", input_path,
                 "-map", f"0:{ai}",
-                "-c:a", "aac_mf",
+                "-c:a", "aac",
                 "-vn", "-sn",
                 tmp_audio,
             ]
             log(f"Pre-encoding audio track {i+1}/{len(audio_streams)} to AAC...")
-            r = subprocess.run(
+            # Use P-core pinning to avoid native aac FP-overflow on Intel E-cores.
+            r = _run_with_pcores_only(
                 cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
             )
             # Write raw stderr to its own step log regardless of outcome
             if conv_logger:
                 conv_logger.write_step(
-                    f"audio_track_{i+1}_aac_mf", r.stderr or ""
+                    f"audio_track_{i+1}_aac", r.stderr or ""
                 )
-            # Verify with ffprobe — do not rely on exit code because aac_mf
-            # returns non-zero for harmless DTS warnings even on good output.
+            # Verify with ffprobe — do not rely solely on exit code.
             if not _is_valid_audio(tmp_audio):
-                # aac_mf failed (may be a Windows MFT crash / access violation
-                # on specific audio content).  Fall back to native aac.
-                log(f"aac_mf failed for track {i+1} (rc={r.returncode}) — "
-                    "retrying with native aac encoder...")
+                log(f"AAC pre-encode failed for track {i+1} (rc={r.returncode})")
                 err_lines = (r.stderr or "").strip().splitlines()
                 for el in err_lines[-5:]:
                     if el.strip():
-                        log(f"  [aac_mf stderr] {el.rstrip()}")
+                        log(f"  [aac stderr] {el.rstrip()}")
                 if os.path.exists(tmp_audio):
                     try:
                         os.remove(tmp_audio)
                     except OSError:
                         pass
-                # Native aac fallback — still use DTS-fix flags.
-                # On Windows, restrict the subprocess to P-cores only to avoid
-                # the floating-point overflow bug in native aac on Intel E-cores.
-                cmd_native = [
-                    "ffmpeg", "-y",
-                    "-fflags", "+genpts",
-                    "-avoid_negative_ts", "make_zero",
-                    "-i", input_path,
-                    "-map", f"0:{ai}",
-                    "-c:a", "aac",
-                    "-vn", "-sn",
-                    tmp_audio,
-                ]
-                r2 = _run_with_pcores_only(
-                    cmd_native, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
-                )
-                # Write native aac stderr to its own step log
-                if conv_logger:
-                    conv_logger.write_step(
-                        f"audio_track_{i+1}_native_aac", r2.stderr or ""
-                    )
                 if not _is_valid_audio(tmp_audio):
-                    log(f"Audio pre-encode failed for track {i+1} (aac_mf and native aac both failed)")
+                    log(f"Audio pre-encode failed for track {i+1}")
                     if conv_logger:
                         conv_logger.mark_fail_at(
-                            f"audio track {i+1} pre-encode "
-                            f"(aac_mf rc={r.returncode}, native aac also failed)"
+                            f"audio track {i+1} pre-encode (aac rc={r.returncode})"
                         )
-                    err2 = (r2.stderr or "").strip().splitlines()
-                    for el in err2[-5:]:
-                        if el.strip():
-                            log(f"  [aac stderr] {el.rstrip()}")
                     if os.path.exists(tmp_audio):
                         try:
                             os.remove(tmp_audio)
@@ -1240,7 +1212,7 @@ def remux_to_mp4(
 
             # On the first pre-encode attempt, run the pre-encode step
             if use_preenc and _pre_audio is None:
-                log("aac_mf failed — pre-encoding audio tracks individually with aac_mf...")
+                log("AAC mux failed — pre-encoding audio tracks individually with native aac...")
                 _pre_audio = _preencode_audio_to_aac()
                 if _pre_audio is None:
                     log("Audio pre-encode failed — giving up.")
@@ -1357,8 +1329,8 @@ def remux_to_mp4(
                 ""
             )
             is_silent = last_meaningful == "" or last_meaningful.startswith("frame=")
-            # aac_mf crash: Windows Media Foundation encoder failure (mid-encode or at init)
-            is_aac_mf_fail = any("[aac_mf @" in l for l in output_lines)
+            # aac encoder crashes (access violation, MFT hang) also retry via pre-encode path.
+            is_aac_mf_fail = any("[aac_mf @" in l or "[aac @" in l for l in output_lines)
 
             if not is_ts_error and not is_silent and not is_aac_mf_fail:
                 if attempt == 0:

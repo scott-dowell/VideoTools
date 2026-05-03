@@ -19,7 +19,7 @@ File dict shape (one entry per qualifying video file):
     "duration":  str,           # "M:SS" or "H:MM:SS"
     "is_hi10":   bool,          # True for 10-bit H.264 → remux path
     "streams": {
-      "video": {"codec", "profile", "resolution", "fps", "bitrate", "hdr"},
+      "video": {"codec", "profile", "resolution", "fps", "hdr"},
       "audio": [{"track", "codec", "channels", "language", "bitrate", "title"}],
       "subs":  [{"track", "codec", "language", "title"}],
     },
@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 from typing import Generator
 
 import db
@@ -195,11 +196,6 @@ def _parse_probe(probe: dict) -> dict:
     h          = video_stream.get("height", 0)
     resolution = f"{w}x{h}" if w and h else "unknown"
 
-    # Prefer container bitrate (all streams, consistent with file size / duration);
-    # fall back to stream-level if container doesn't report it.
-    bitrate_raw = fmt.get("bit_rate") or video_stream.get("bit_rate") or 0
-    bitrate     = int(bitrate_raw or 0)
-
     hdr_transfers = {"smpte2084", "arib-std-b67", "smpte428"}
     hdr = video_stream.get("color_transfer", "").lower() in hdr_transfers
 
@@ -208,7 +204,6 @@ def _parse_probe(probe: dict) -> dict:
         "profile":    profile,
         "resolution": resolution,
         "fps":        _parse_fps(video_stream.get("r_frame_rate", "0/1")),
-        "bitrate":    bitrate,
         "hdr":        hdr,
     }
 
@@ -368,37 +363,52 @@ def walk(root: str) -> Generator[dict, None, None]:
                     db.update_source_path(fallback_rec["id"], full_path)
 
             if db_status == "done":
-                # Include done files in the grid (read-only row, no re-encoding).
-                # If we don't have the output bitrate, queue for a one-time probe so
-                # the bitrate column is populated (and filterable) going forward.
-                size_mb = size_bytes / (1024 * 1024)
-                fp      = full_path.replace("\\", "/")
-                cached_bitrate = db_info.get("bitrate_kbps")
-                cached_codec   = db_info.get("codec") or ""
-                cached_dur     = db_info.get("duration_secs")
-                out_mb_val  = db_info.get("output_size_mb")
-                saved_mb_val = db_info.get("saved_mb")
-                saved_pct_val = db_info.get("saved_pct")
-                folder_files.append({
-                    "full_path":    fp,
-                    "name":         filename,
-                    "folder":       rel_folder.replace("\\", "/"),
-                    "size":         f"{size_mb:,.1f}",
-                    "codec":        cached_codec,
-                    "duration":     _format_duration(cached_dur) if cached_dur else "",
-                    "bitrate_kbps": cached_bitrate,
-                    "is_hi10":      False,
-                    "streams":      None,
-                    "status":       "done",
-                    "output":       str(round(out_mb_val, 1)) if out_mb_val else None,
-                    "saved":        str(round(saved_mb_val, 1)) if saved_mb_val else None,
-                    "pct":          str(saved_pct_val) if saved_pct_val is not None else None,
-                })
-                if cached_bitrate is None:
+                # If sidecar subtitle files exist alongside the file, reset to pending
+                # so the converter will re-mux them in on the next conversion.
+                _SIDECAR_EXTS = {".srt", ".ass", ".ssa"}
+                _src_path = Path(full_path)
+                _has_sidecars = any(
+                    _src_path.parent.joinpath(_src_path.stem + ext).exists()
+                    for ext in _SIDECAR_EXTS
+                )
+                if _has_sidecars:
                     record_id = db_info.get("id")
                     if record_id:
-                        to_probe_done.append({"full_path": fp, "record_id": record_id})
-                continue
+                        db.reset_done_to_pending(record_id)
+                    db_status = "pending"
+                    # fall through to normal pending handling below
+                else:
+                    # Include done files in the grid (read-only row, no re-encoding).
+                    # If we don't have the output bitrate, queue for a one-time probe so
+                    # the bitrate column is populated (and filterable) going forward.
+                    size_mb = size_bytes / (1024 * 1024)
+                    fp      = full_path.replace("\\", "/")
+                    cached_bitrate = db_info.get("bitrate_kbps")
+                    cached_codec   = db_info.get("codec") or ""
+                    cached_dur     = db_info.get("duration_secs")
+                    out_mb_val  = db_info.get("output_size_mb")
+                    saved_mb_val = db_info.get("saved_mb")
+                    saved_pct_val = db_info.get("saved_pct")
+                    folder_files.append({
+                        "full_path":    fp,
+                        "name":         filename,
+                        "folder":       rel_folder.replace("\\", "/"),
+                        "size":         f"{size_mb:,.1f}",
+                        "codec":        cached_codec,
+                        "duration":     _format_duration(cached_dur) if cached_dur else "",
+                        "bitrate_kbps": cached_bitrate,
+                        "is_hi10":      False,
+                        "streams":      None,
+                        "status":       "done",
+                        "output":       str(round(out_mb_val, 1)) if out_mb_val else None,
+                        "saved":        str(round(saved_mb_val, 1)) if saved_mb_val else None,
+                        "pct":          str(saved_pct_val) if saved_pct_val is not None else None,
+                    })
+                    if cached_bitrate is None:
+                        record_id = db_info.get("id")
+                        if record_id:
+                            to_probe_done.append({"full_path": fp, "record_id": record_id})
+                    continue
             if db_status == "running":
                 yield {"type": "warning", "path": full_path,
                        "message": "Conversion already running in another session"}
@@ -488,8 +498,9 @@ def walk(root: str) -> Generator[dict, None, None]:
 
         video_info    = parsed["streams"]["video"]
         display_codec = video_info["codec"] if video_info else "unknown"
-        bitrate_kbps  = round((video_info["bitrate"] or 0) / 1000) if video_info else 0
         dur_secs      = parsed["duration_secs"]
+        size_bytes    = os.path.getsize(fp)
+        bitrate_kbps  = round(size_bytes * 8 / dur_secs / 1000) if dur_secs > 0 else 0
 
         # Persist probe result so future scans skip ffprobe for this file.
         db.save_probe_result(fp, mtime, display_codec, bitrate_kbps, dur_secs)
@@ -521,8 +532,12 @@ def walk(root: str) -> Generator[dict, None, None]:
         parsed = _parse_probe(probe_data)
         video_info    = parsed["streams"]["video"]
         display_codec = video_info["codec"] if video_info else "HEVC"
-        bitrate_kbps  = round((video_info["bitrate"] or 0) / 1000) if video_info else 0
         dur_secs      = parsed["duration_secs"]
+        try:
+            size_bytes = os.path.getsize(fp)
+        except OSError:
+            size_bytes = 0
+        bitrate_kbps  = round(size_bytes * 8 / dur_secs / 1000) if (dur_secs > 0 and size_bytes > 0) else 0
         if bitrate_kbps:
             db.update_output_bitrate(record_id, bitrate_kbps)
         # Also persist duration so it shows correctly on future scans

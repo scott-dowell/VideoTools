@@ -101,7 +101,10 @@
             <div class="stat-value" id="statSession" style="color:#58a6ff">—</div>
             <div class="stat-label"><i class="bi bi-stopwatch me-1"></i>Session savings</div>
           </div>
-          <i class="bi bi-stopwatch-fill stat-icon" style="color:#58a6ff"></i>
+          <div class="text-end">
+            <div id="statSessionElapsed" style="font-size:.8rem;font-weight:600;color:#58a6ff;opacity:.7;white-space:nowrap"></div>
+            <div style="font-size:.65rem;color:#8b949e" id="statSessionElapsedLabel"></div>
+          </div>
         </div>
         <div class="stat-sub" id="statSessionSub">No conversions yet</div>
         <div class="stat-bar-track mt-2"><div class="stat-bar" id="statSessionBar" style="width:0%; background:#58a6ff"></div></div>
@@ -204,12 +207,12 @@
                   <th>Folder</th><th>Filename</th><th class="text-end">Size</th><th class="text-end">Bitrate</th><th>Codec</th>
                   <th>Duration</th><th>Status</th>
                   <th class="text-end">Est. saving</th>
-                  <th>Output</th><th>Saved</th><th>%</th><th></th>
+                  <th>Output</th><th>Saved</th><th class="text-end">%</th><th class="text-end">Time</th><th></th>
                 </tr>
               </thead>
               <tbody id="queueBody">
                 <tr id="emptyRow">
-                  <td colspan="13" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
+                  <td colspan="14" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
                 </tr>
               </tbody>
             </table>
@@ -285,6 +288,10 @@
               <div class="text-secondary" style="font-size:.72rem">saved</div>
             </div>
           </div>
+          <div class="mt-2 pt-2 border-top d-flex justify-content-between align-items-center">
+            <small class="text-secondary"><i class="bi bi-stopwatch me-1"></i>File elapsed</small>
+            <span class="fw-semibold text-info" id="elapsedVal" style="font-size:.9rem">—</span>
+          </div>
         </div>
       </div>
 
@@ -323,7 +330,10 @@
         <pre class="bg-body-secondary rounded p-2 small" style="height:260px;overflow-y:auto;" id="errModalTail">—</pre>
       </div>
       <div class="modal-footer">
-        <small class="text-secondary flex-grow-1" id="errModalLogPath"></small>
+        <small class="text-secondary flex-grow-1 text-truncate" id="errModalLogPath" style="font-family:Consolas,monospace;font-size:.72rem"></small>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="errModalOpenLog" style="display:none">
+          <i class="bi bi-folder2-open me-1"></i>Open log folder
+        </button>
         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
       </div>
     </div>

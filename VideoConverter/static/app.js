@@ -17,6 +17,9 @@ let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'duration' | 'es
 let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
 let _sessionSavedMB = null;   // null = no run this session, number = MB saved this run
+let _sessionStartedAt = 0;        // unix epoch (s) when current session started; 0 = not started
+let _sessionElapsedTimer = null;  // setInterval ID for the live session elapsed clock
+let _fileElapsedTimer    = null;  // setInterval ID for the live per-file elapsed clock
 
 // Estimation background task state
 let _estUserPaused  = false;  // user clicked the strip
@@ -49,6 +52,17 @@ function _parseDuration(d) {
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   return 0;
+}
+
+// Format elapsed seconds as "Xm Ys" or "Xh MMm SSs"
+function _fmtDuration(secs) {
+  secs = Math.max(0, Math.floor(secs));
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (h > 0) return h + 'h ' + String(m).padStart(2, '0') + 'm ' + String(s).padStart(2, '0') + 's';
+  if (m > 0) return m + 'm ' + String(s).padStart(2, '0') + 's';
+  return s + 's';
 }
 
 // Compute bitrate in kbps from file object
@@ -285,7 +299,14 @@ function buildRow(f, index) {
   if (f.pct) tdPct.innerHTML = '<strong>' + f.pct + '%</strong>';
   tr.appendChild(tdPct);
 
-  // col 9 — Actions
+  // col 12 — Conversion time
+  const tdTime = document.createElement('td');
+  tdTime.className = 'text-end text-secondary';
+  tdTime.style.whiteSpace = 'nowrap';
+  tdTime.textContent = f.conv_secs ? _fmtDuration(f.conv_secs) : '';
+  tr.appendChild(tdTime);
+
+  // col 13 — Actions
   const tdAct = document.createElement('td');
   tdAct.style.width = '32px';
   const btn = document.createElement('button');
@@ -346,7 +367,7 @@ function populateTable(files) {
   const tbody = document.getElementById('queueBody');
   tbody.innerHTML = '';
   if (files.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="13" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
     return;
   }
   // Attach computed bitrate
@@ -461,6 +482,41 @@ function _updateSessionCard() {
       bar.style.width = (totalMB > 0 ? Math.min(100, Math.round(_sessionSavedMB / totalMB * 100)) : 0) + '%';
     }
   }
+}
+
+function _startElapsedTimer(startTs) {
+  _sessionStartedAt = startTs;
+  if (_sessionElapsedTimer) clearInterval(_sessionElapsedTimer);
+  const _tick = () => {
+    const secs = Math.max(0, Math.floor(Date.now() / 1000 - _sessionStartedAt));
+    const formatted = _fmtDuration(secs);
+    const el2 = document.getElementById('statSessionElapsed');
+    if (el2) el2.textContent = formatted;
+    const lbl = document.getElementById('statSessionElapsedLabel');
+    if (lbl) lbl.textContent = 'elapsed';
+  };
+  _tick();
+  _sessionElapsedTimer = setInterval(_tick, 1000);
+}
+
+function _stopElapsedTimer() {
+  if (_sessionElapsedTimer) { clearInterval(_sessionElapsedTimer); _sessionElapsedTimer = null; }
+}
+
+function _startFileElapsedTimer(fileStartTs) {
+  if (_fileElapsedTimer) clearInterval(_fileElapsedTimer);
+  const _tick = () => {
+    const el = document.getElementById('elapsedVal');
+    if (el) el.textContent = _fmtDuration(Math.max(0, Date.now() / 1000 - fileStartTs));
+  };
+  _tick();
+  _fileElapsedTimer = setInterval(_tick, 1000);
+}
+
+function _stopFileElapsedTimer() {
+  if (_fileElapsedTimer) { clearInterval(_fileElapsedTimer); _fileElapsedTimer = null; }
+  const el = document.getElementById('elapsedVal');
+  if (el) el.textContent = '—';
 }
 
 function applyFilter() {
@@ -909,6 +965,8 @@ function _pollStatus() {
             : s.saved_mb.toFixed(0) + ' MB')
         : '\u2014';
       if (s.saved_mb !== undefined) { _sessionSavedMB = s.saved_mb || 0; _updateSessionCard(); }
+      if (s.session_started_at && _sessionStartedAt !== s.session_started_at) _startElapsedTimer(s.session_started_at);
+      if (s.file_started_at && s.state === 'running') _startFileElapsedTimer(s.file_started_at);
       const overallDone  = s.files ? s.files.filter(f => f.status === 'done' || f.status === 'failed' || f.status === 'no_saving').length : 0;
       const overallTotal = s.total || 0;
       const overallPct   = overallTotal > 0 ? Math.round(overallDone / overallTotal * 100) : 0;
@@ -940,6 +998,10 @@ function _pollStatus() {
           if (sf.saved)       f.saved       = sf.saved;
           if (sf.pct)         f.pct         = sf.pct;
           if (sf.output_path) f.output_path = sf.output_path;
+          if (sf.conv_secs  !== undefined) f.conv_secs  = sf.conv_secs;
+          if (sf.ffmpeg_cmd !== undefined) f.ffmpeg_cmd = sf.ffmpeg_cmd;
+          if (sf.error_tail !== undefined) f.error_tail = sf.error_tail;
+          if (sf.log_dir    !== undefined) f.log_dir    = sf.log_dir;
 
           const row = document.getElementById('row-' + idx);
           if (!row) return;
@@ -959,6 +1021,8 @@ function _pollStatus() {
             if (row.cells[10]) row.cells[10].textContent = sf.saved   ? sf.saved   + ' MB' : '';
             if (row.cells[11]) row.cells[11].innerHTML   = sf.pct     ? '<strong>' + sf.pct + '%</strong>' : '';
           }
+          if (sf.conv_secs !== undefined && row.cells[12])
+            row.cells[12].textContent = sf.conv_secs > 0 ? _fmtDuration(sf.conv_secs) : '';
         });
         updateStats(_files);
       }
@@ -989,11 +1053,15 @@ function _pollStatus() {
       }
       if (s.state === 'done') {
         _stopPolling();
+        _stopElapsedTimer();
+        _stopFileElapsedTimer();
         _isPaused = false;
         setButtonStates('ready');
         addLog('Queue complete. Saved ' + (s.saved_mb || 0).toFixed(1) + ' MB total.', 'ok');
       } else if (s.state === 'stopped') {
         _stopPolling();
+        _stopElapsedTimer();
+        _stopFileElapsedTimer();
         _isPaused = false;
         setButtonStates('ready');
         addLog('Conversion stopped.', 'warn');
@@ -1015,6 +1083,12 @@ function startConversion() {
   }
   _sessionSavedMB = 0;
   _updateSessionCard();
+  _stopElapsedTimer();
+  _stopFileElapsedTimer();
+  const _elEl2 = document.getElementById('statSessionElapsed');
+  if (_elEl2) _elEl2.textContent = '';
+  const _elLbl = document.getElementById('statSessionElapsedLabel');
+  if (_elLbl) _elLbl.textContent = '';
   addLog('Starting conversion queue\u2026', 'info');
   addLog(anime
     ? 'Anime mode: ON \u2014 remux to MP4, AAC transcode, OCR subs'
@@ -1216,9 +1290,19 @@ function copyPath(path) {
 function viewErrorLog(index) {
   const f = _files[index];
   document.getElementById('errModalFilename').textContent = f.name;
-  document.getElementById('errModalCmd').textContent      = f.ffmpeg_cmd  || '(not yet recorded — backend not connected)';
-  document.getElementById('errModalTail').textContent     = f.error_tail  || '(not yet recorded — backend not connected)';
-  document.getElementById('errModalLogPath').textContent  = f.log_path    ? 'Full log: ' + f.log_path : '';
+  document.getElementById('errModalCmd').textContent  = f.ffmpeg_cmd  || '(no FFmpeg command recorded)';
+  document.getElementById('errModalTail').textContent = f.error_tail  || '(no error output recorded)';
+  const logPathEl = document.getElementById('errModalLogPath');
+  if (logPathEl) logPathEl.textContent = f.log_dir ? 'Log folder: ' + f.log_dir : '';
+  const openLogBtn = document.getElementById('errModalOpenLog');
+  if (openLogBtn) {
+    if (f.log_dir) {
+      openLogBtn.style.display = '';
+      openLogBtn.onclick = () => apiOpen(f.log_dir, 'folder');
+    } else {
+      openLogBtn.style.display = 'none';
+    }
+  }
   new bootstrap.Modal(document.getElementById('errorLogModal')).show();
 }
 

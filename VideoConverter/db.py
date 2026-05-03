@@ -349,6 +349,15 @@ def reset_stale_running() -> int:
         return cur.rowcount
 
 
+def reset_done_to_pending(record_id: int) -> None:
+    """Reset a 'done' record back to 'pending' so it is re-queued on next scan."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE conversions SET status = 'pending' WHERE id = ?",
+            (record_id,),
+        )
+
+
 def mark_done(
     record_id: int,
     output_path: str,

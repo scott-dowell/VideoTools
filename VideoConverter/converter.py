@@ -21,6 +21,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -29,6 +30,31 @@ from typing import Callable
 
 import config
 import conv_log as _conv_log
+
+# ---------------------------------------------------------------------------
+# Persistent OCR worker — loads EasyOCR model once, handles all queue jobs
+# ---------------------------------------------------------------------------
+
+_ocr_worker: 'subprocess.Popen | None' = None
+_ocr_worker_lock = threading.Lock()
+
+
+def _get_ocr_worker() -> 'subprocess.Popen':
+    """Return the persistent OCR worker process, starting it if needed."""
+    global _ocr_worker
+    with _ocr_worker_lock:
+        if _ocr_worker is None or _ocr_worker.poll() is not None:
+            _bsubs_script = os.path.join(os.path.dirname(__file__), "bitmap_subs.py")
+            _ocr_worker = subprocess.Popen(
+                [sys.executable, _bsubs_script, "--server"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,   # inherit parent stderr so log messages appear in the console
+                text=True,
+                bufsize=1,
+            )
+        return _ocr_worker
+
 
 # ---------------------------------------------------------------------------
 # Windows P-core helper
@@ -841,6 +867,18 @@ def remux_to_mp4(
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
     sub_streams   = [s for s in streams if s.get("codec_type") == "subtitle"]
 
+    # ------------------------------------------------------------------
+    # Detect external subtitle files alongside the source
+    # Matches files with the same stem (.srt, .ass, .ssa)
+    # ------------------------------------------------------------------
+    _EXT_SUB_EXTS = {".srt", ".ass", ".ssa"}
+    ext_sub_paths: list[str] = []
+    _src_stem_lower = Path(input_path).stem.lower()
+    for _p in sorted(Path(input_path).parent.iterdir()):
+        if _p.suffix.lower() in _EXT_SUB_EXTS and _p.stem.lower() == _src_stem_lower:
+            ext_sub_paths.append(str(_p))
+            log(f"Found external subtitle: {_p.name}")
+
     if not video_streams:
         log("ERROR: no video stream found")
         return False, ""
@@ -869,6 +907,92 @@ def remux_to_mp4(
             for s in audio_streams
         ) if audio_streams else True
         if all_aac and not has_bitmap:
+            if ext_sub_paths:
+                # Sub-inject path: copy all streams + mux in sidecar subs (no re-encode)
+                log(f"MP4 sub-inject: copying streams and merging {len(ext_sub_paths)} sidecar subtitle(s)...")
+                _si_tmp = os.path.join(
+                    config.LOCAL_TEMP_DIR, f"_subinject_{os.getpid()}.mp4"
+                )
+                os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
+                if tmp_holder is not None:
+                    tmp_holder[0] = _si_tmp
+                _si_cmd = ["ffmpeg", "-y", "-i", input_path]
+                for sp in ext_sub_paths:
+                    _si_cmd += ["-i", sp]
+                _si_cmd += ["-map", "0"]
+                _existing_sub_count = sum(
+                    1 for s in sub_streams
+                )
+                for j in range(len(ext_sub_paths)):
+                    _si_cmd += ["-map", f"{j+1}:s:0"]
+                _si_cmd += ["-c", "copy", "-c:s", "mov_text"]
+                for j in range(len(ext_sub_paths)):
+                    _si_cmd += [f"-metadata:s:s:{_existing_sub_count + j}", "language=eng"]
+                _si_cmd += ["-movflags", "+faststart", _si_tmp]
+                log(f"Running: {' '.join(_si_cmd)}")
+                try:
+                    _si_proc = subprocess.run(
+                        _si_cmd, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=300,
+                    )
+                except FileNotFoundError:
+                    log("ERROR: ffmpeg not found.")
+                    return False, ""
+                if conv_logger:
+                    conv_logger.write_phase("sub_inject", _si_proc.stdout + _si_proc.stderr)
+                if _si_proc.returncode != 0 or not os.path.exists(_si_tmp):
+                    log("Sub-inject failed:")
+                    for _l in (_si_proc.stdout + _si_proc.stderr).splitlines()[-20:]:
+                        if _l.strip():
+                            log(_l)
+                    if os.path.exists(_si_tmp):
+                        os.remove(_si_tmp)
+                    return False, ""
+                os.makedirs(output_dir, exist_ok=True)
+                _si_final = os.path.join(output_dir, Path(input_path).stem + ".mp4")
+                import shutil as _shutil
+                try:
+                    os.replace(_si_tmp, _si_final)
+                except OSError as _e:
+                    if _e.winerror == 17:
+                        _shutil.move(_si_tmp, _si_final)
+                    else:
+                        if os.path.exists(_si_tmp):
+                            os.remove(_si_tmp)
+                        raise
+                # Verify subtitle streams are actually present in the output
+                try:
+                    _verify_proc = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-print_format", "json",
+                         "-show_streams", _si_final],
+                        capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=30,
+                    )
+                    _verify_streams = json.loads(_verify_proc.stdout).get("streams", [])
+                    _out_sub_count = sum(
+                        1 for s in _verify_streams if s.get("codec_type") == "subtitle"
+                    )
+                    _expected = _existing_sub_count + len(ext_sub_paths)
+                except Exception as _ve:
+                    log(f"WARNING: could not verify subtitle streams: {_ve}")
+                    _out_sub_count = -1
+                    _expected = -1
+
+                if _out_sub_count != -1 and _out_sub_count < _expected:
+                    log(
+                        f"WARNING: expected {_expected} subtitle stream(s) in output "
+                        f"but found {_out_sub_count} — sidecar files NOT deleted."
+                    )
+                else:
+                    log(f"Verified {_out_sub_count} subtitle stream(s) in output.")
+                    for _sp in ext_sub_paths:
+                        try:
+                            os.remove(_sp)
+                            log(f"Removed sidecar: {Path(_sp).name}")
+                        except OSError as _re:
+                            log(f"WARNING: could not remove sidecar {Path(_sp).name}: {_re}")
+                log(f"Done. Subs merged → {_si_final}")
+                return True, "copy"
             log("MP4 fast-path: already MP4 + AAC, no bitmap subs — compressing directly.")
             return compress_simple(
                 input_path, output_dir, log, stop_event,
@@ -920,6 +1044,8 @@ def remux_to_mp4(
 
     # ------------------------------------------------------------------
     # OCR bitmap subs
+    # Run in a subprocess so a native crash inside PyTorch/EasyOCR cannot
+    # take down the Flask server process.
     # ------------------------------------------------------------------
     srt_paths: list[str] = []
     if pgs_sub_indices:
@@ -931,17 +1057,23 @@ def remux_to_mp4(
             )
             return False, ""
         log(f"OCR bitmap subs ({len(pgs_sub_indices)} track(s))...")
+        os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
         try:
-            srt_paths = _bsubs.ocr_bitmap_subs_to_srt(
-                input_path=input_path,
-                lang="en",
-                out_dir=config.LOCAL_TEMP_DIR,
-                all_streams=False,
-                verbose=False,
-                log_fn=log,
-            )
+            _worker = _get_ocr_worker()
+            _job = json.dumps({"input_path": input_path, "out_dir": config.LOCAL_TEMP_DIR, "lang": "en"})
+            _worker.stdin.write(_job + "\n")
+            _worker.stdin.flush()
+            _result_line = _worker.stdout.readline()
+            if not _result_line:
+                log("ERROR: OCR worker closed unexpectedly — aborting to preserve subtitles")
+                return False, ""
+            _result = json.loads(_result_line.strip())
+            if not _result.get("ok"):
+                log(f"ERROR: OCR worker reported failure: {_result.get('error')} — aborting to preserve subtitles")
+                return False, ""
+            srt_paths = _result["paths"]
         except Exception as exc:
-            log(f"ERROR: bitmap sub OCR failed: {exc} — aborting to preserve subtitles")
+            log(f"ERROR: OCR worker failed: {exc} — aborting to preserve subtitles")
             return False, ""
     if copy_bitmap_indices:
         log(f"Copying {len(copy_bitmap_indices)} dvd_subtitle/vobsub track(s) directly into MP4...")
@@ -1018,7 +1150,7 @@ def remux_to_mp4(
             log(f"Pre-encoding audio track {i+1}/{len(audio_streams)} to AAC...")
             # Use P-core pinning to avoid native aac FP-overflow on Intel E-cores.
             r = _run_with_pcores_only(
-                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=600,
             )
             # Write raw stderr to its own step log regardless of outcome
             if conv_logger:
@@ -1113,12 +1245,18 @@ def remux_to_mp4(
         for srt in srt_paths:
             cmd += ["-i", srt]
 
-        # Append pre-extracted text sub SRT files (after OCR SRTs)
+        # Append external subtitle files (inputs after OCR SRTs)
+        _ext_sub_base = 1 + len(srt_paths)
+        for srt in ext_sub_paths:
+            cmd += ["-i", srt]
+
+        # Append pre-extracted text sub SRT files (after external subs)
+        _pre_ext_srt_base = _ext_sub_base + len(ext_sub_paths)
         for srt in _ext_srts:
             cmd += ["-i", srt]
 
         # Append pre-encoded audio files as extra inputs
-        pre_audio_start_idx = 1 + len(srt_paths) + len(_ext_srts)
+        pre_audio_start_idx = _pre_ext_srt_base + len(_ext_srts)
         if pre_audio:
             for af in pre_audio:
                 if af is not None:
@@ -1154,17 +1292,20 @@ def remux_to_mp4(
         if include_subs:
             if _ext_srts:
                 # Pre-extracted SRTs replace inline ASS mapping — skip english_text_subs
-                ext_srt_base = 1 + len(srt_paths)
                 for j in range(len(srt_paths)):
                     cmd += ["-map", f"{j+1}:s:0"]
+                for j in range(len(ext_sub_paths)):
+                    cmd += ["-map", f"{_ext_sub_base + j}:s:0"]
                 for j in range(len(_ext_srts)):
-                    cmd += ["-map", f"{ext_srt_base + j}:s:0"]
-                # Tag both OCR and extracted tracks as English
+                    cmd += ["-map", f"{_pre_ext_srt_base + j}:s:0"]
+                # Tag OCR, external, and extracted tracks as English
                 for j in range(len(srt_paths)):
                     cmd += [f"-metadata:s:s:{j}", "language=eng"]
-                for j in range(len(_ext_srts)):
+                for j in range(len(ext_sub_paths)):
                     cmd += [f"-metadata:s:s:{len(srt_paths) + j}", "language=eng"]
-                sub_count = len(srt_paths) + len(_ext_srts)
+                for j in range(len(_ext_srts)):
+                    cmd += [f"-metadata:s:s:{len(srt_paths) + len(ext_sub_paths) + j}", "language=eng"]
+                sub_count = len(srt_paths) + len(ext_sub_paths) + len(_ext_srts)
             else:
                 # Text subs from source (-> mov_text)
                 for si in english_text_subs:
@@ -1172,11 +1313,16 @@ def remux_to_mp4(
                 # OCR'd SRT files (inputs 1..N) (-> mov_text)
                 for j in range(len(srt_paths)):
                     cmd += ["-map", f"{j+1}:s:0"]
-                # Tag OCR'd tracks with English language
+                # External subtitle files
+                for j in range(len(ext_sub_paths)):
+                    cmd += ["-map", f"{_ext_sub_base + j}:s:0"]
+                # Tag OCR'd and external tracks with English language
                 text_sub_offset = len(english_text_subs)
                 for j in range(len(srt_paths)):
                     cmd += [f"-metadata:s:s:{text_sub_offset + j}", "language=eng"]
-                sub_count = len(english_text_subs) + len(srt_paths)
+                for j in range(len(ext_sub_paths)):
+                    cmd += [f"-metadata:s:s:{text_sub_offset + len(srt_paths) + j}", "language=eng"]
+                sub_count = len(english_text_subs) + len(srt_paths) + len(ext_sub_paths)
 
             if sub_count > 0:
                 cmd += ["-c:s", "mov_text"]
@@ -1322,13 +1468,17 @@ def remux_to_mp4(
             _TS_PATTERNS = ("out of order", "non-monotonic", "non monotonous",
                             "invalid duration", "dts")
             is_ts_error = any(p in lo for p in _TS_PATTERNS)
-            # Silent crash: all captured lines are progress/header lines, no clear error
-            last_meaningful = next(
-                (l.rstrip() for l in reversed(output_lines)
-                 if l.strip() and "frame=" not in l and "[out#" not in l),
-                ""
+            # Silent crash: ffmpeg exited non-zero but its last output line was a
+            # progress line (frame=...) or stats line — meaning it died mid-encode
+            # with no explicit error message.  Search backwards to the actual last
+            # non-empty line (do NOT skip frame= lines this time).
+            last_line = next((l.rstrip() for l in reversed(output_lines) if l.strip()), "")
+            is_silent = (
+                last_line == ""
+                or "frame=" in last_line
+                or last_line.startswith("[out#")
+                or last_line.startswith("Lsize=")
             )
-            is_silent = last_meaningful == "" or last_meaningful.startswith("frame=")
             # aac encoder crashes (access violation, MFT hang) also retry via pre-encode path.
             is_aac_mf_fail = any("[aac_mf @" in l or "[aac @" in l for l in output_lines)
 
@@ -1427,6 +1577,31 @@ def compress_and_remux(
     codec decision, then remux_to_mp4 handles the container conversion.
     """
     import tempfile
+
+    # Fast-exit: if source is already an MP4 and has sidecar subtitle files,
+    # skip compression entirely — just inject the subs via stream-copy.
+    # Compressing again would be wasteful and the intermediate temp file
+    # wouldn't have the sidecars next to it, so inject would never fire.
+    if Path(input_path).suffix.lower() == ".mp4":
+        _EXT_SUB_EXTS = {".srt", ".ass", ".ssa"}
+        _src = Path(input_path)
+        _has_sidecars = any(
+            _src.parent.joinpath(_src.stem + _ext).exists()
+            for _ext in _EXT_SUB_EXTS
+        )
+        if _has_sidecars:
+            log("MP4 with sidecar subtitles — skipping compression, injecting subs directly.")
+            return remux_to_mp4(
+                input_path=input_path,
+                output_dir=output_dir,
+                log=log,
+                stop_event=stop_event,
+                quality=quality,
+                progress_cb=progress_cb,
+                pid_holder=pid_holder,
+                conv_logger=conv_logger,
+                tmp_holder=tmp_holder,
+            )
 
     # Step 1: compress to a unique temp subdir so the path never collides
     # with compress_simple's own internal tmp_path (which also lives in

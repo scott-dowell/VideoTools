@@ -467,3 +467,74 @@ def ocr_bitmap_subs_to_srt(
                 log_fn(f"  Saved {len(subs)} lines -> {srt_path}")
 
     return srt_paths
+
+
+# ---------------------------------------------------------------------------
+# Subprocess worker entry-point
+#
+# One-shot mode (legacy):
+#   python bitmap_subs.py <input_path> <out_dir> <lang> <result_json>
+#   Writes JSON list of SRT paths to <result_json> on success.
+#
+# Persistent server mode (preferred — loads model once, handles many jobs):
+#   python bitmap_subs.py --server
+#   Reads newline-delimited JSON job objects from stdin.
+#   Writes newline-delimited JSON result objects to stdout.
+#   Log/progress messages go to stderr so stdout stays clean.
+#   Job schema:  {"input_path": str, "out_dir": str, "lang": str,
+#                 "all_streams": bool, "verbose": bool}
+#   Result schema: {"ok": true, "paths": [...]}
+#              or  {"ok": false, "error": "..."}
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import sys as _sys
+
+    if len(_sys.argv) == 2 and _sys.argv[1] == "--server":
+        import json as _json
+        _log = lambda msg: print(msg, file=_sys.stderr, flush=True)
+        for _line in _sys.stdin:
+            _line = _line.strip()
+            if not _line:
+                continue
+            try:
+                _job = _json.loads(_line)
+                _paths = ocr_bitmap_subs_to_srt(
+                    input_path=_job["input_path"],
+                    lang=_job.get("lang", "en"),
+                    out_dir=_job.get("out_dir"),
+                    all_streams=_job.get("all_streams", False),
+                    verbose=_job.get("verbose", False),
+                    log_fn=_log,
+                )
+                print(_json.dumps({"ok": True, "paths": _paths}), flush=True)
+            except Exception as _e:
+                import traceback as _tb
+                _tb.print_exc(file=_sys.stderr)
+                print(_json.dumps({"ok": False, "error": str(_e)}), flush=True)
+        _sys.exit(0)
+
+    if len(_sys.argv) != 5:
+        print("Usage: bitmap_subs.py <input_path> <out_dir> <lang> <result_json>",
+              file=_sys.stderr)
+        print("       bitmap_subs.py --server   (persistent worker mode)",
+              file=_sys.stderr)
+        _sys.exit(2)
+    _input, _out_dir, _lang, _result_json = _sys.argv[1:]
+    try:
+        _paths = ocr_bitmap_subs_to_srt(
+            input_path=_input,
+            lang=_lang,
+            out_dir=_out_dir,
+            all_streams=False,
+            verbose=False,
+            log_fn=lambda msg: print(msg, flush=True),
+        )
+        import json as _json
+        with open(_result_json, "w", encoding="utf-8") as _f:
+            _json.dump(_paths, _f)
+        _sys.exit(0)
+    except Exception as _e:
+        import traceback as _tb
+        print(f"OCR worker error: {_e}", file=_sys.stderr)
+        _tb.print_exc(file=_sys.stderr)
+        _sys.exit(1)

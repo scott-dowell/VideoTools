@@ -8,6 +8,7 @@ import os
 import shutil
 import string
 import threading
+import time
 from datetime import datetime, timezone
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
@@ -43,21 +44,23 @@ _soft_stop_event = threading.Event()   # soft stop: finishes current file, stops
 _ffmpeg_pid: list[int] = [0]   # _ffmpeg_pid[0] = current child PID; 0 means idle
 
 _job: dict = {
-    "state":         "idle",   # idle | running | done
-    "current_index": 0,
-    "total":         0,
-    "current_file":  "",
-    "progress_pct":  0.0,
-    "fps":           0.0,
-    "eta_secs":      0,
-    "saved_mb":      0.0,
-    "encoder":       "",
-    "files":         [],
-    "log":           [],
-    "paused":        False,
+    "state":           "idle",   # idle | running | done
+    "current_index":   0,
+    "total":           0,
+    "current_file":    "",
+    "file_started_at": 0.0,
+    "progress_pct":    0.0,
+    "fps":             0.0,
+    "eta_secs":        0,
+    "saved_mb":        0.0,
+    "encoder":         "",
+    "files":           [],
+    "log":             [],
+    "paused":          False,
 }
 
 _PROCESS_ALL_ACCESS = 0x1F0FFF
+_session_started_at: float = 0.0   # set when /api/start is called
 
 
 def _suspend_ffmpeg() -> None:
@@ -168,8 +171,9 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         )
 
         with _job_lock:
-            _job["current_index"] = idx
-            _job["current_file"]  = full_path
+            _job["current_index"]   = idx
+            _job["current_file"]    = full_path
+            _job["file_started_at"] = time.time()
             _job["progress_pct"]  = 0.0
             _job["fps"]           = 0.0
             _job["eta_secs"]      = 0
@@ -220,6 +224,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         if src_hash:
             db.update_source_hash(rec_id, src_hash)
 
+        _conv_start = time.time()
         try:
             result = converter.convert_video(
                 input_path  = full_path,
@@ -241,11 +246,13 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             with _job_lock:
                 _job["files"][idx]["status"]     = "failed"
                 _job["files"][idx]["error_tail"] = error_tail
+                _job["files"][idx]["conv_secs"]  = max(0, int(time.time() - _conv_start))
             if _is_fatal_device_error(exc):
                 _job_log("FATAL DEVICE ERROR — halting queue to prevent further damage.")
                 _stop_event.set()
             continue
 
+        _conv_secs = max(0, int(time.time() - _conv_start))
         if result["ok"]:
             out_norm = os.path.normpath(result["output_path"]) if result["output_path"] else ""
             src_norm = os.path.normpath(full_path)
@@ -278,6 +285,8 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                 with _job_lock:
                     _job["files"][idx]["status"]     = "failed"
                     _job["files"][idx]["error_tail"] = f"track verification: {track_reason}"
+                    _job["files"][idx]["conv_secs"]  = _conv_secs
+                    _job["files"][idx]["log_dir"]    = str(_clog.run_dir) if _clog else ""
             else:
                 total_saved += result["saved_mb"]
                 out_hash = db.hash_file_head(result["output_path"]) if result.get("output_path") else None
@@ -311,6 +320,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                         "saved":      str(round(result["saved_mb"], 1)),
                         "pct":        str(result["saved_pct"]),
                         "output_path": result["output_path"],
+                        "conv_secs":  _conv_secs,
                     })
         else:
             # Harvest error details from the per-file log capture
@@ -324,7 +334,8 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                 if _clog:
                     _clog.failure("no_savings")
                 with _job_lock:
-                    _job["files"][idx]["status"] = "no_saving"
+                    _job["files"][idx]["status"]    = "no_saving"
+                    _job["files"][idx]["conv_secs"] = _conv_secs
                 _job_log("Skipped – output was not smaller than source.")
             else:
                 error_tail = "\n".join(_file_log[-50:])
@@ -335,6 +346,8 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                     _job["files"][idx]["status"]     = "failed"
                     _job["files"][idx]["ffmpeg_cmd"] = ffmpeg_cmd
                     _job["files"][idx]["error_tail"] = error_tail
+                    _job["files"][idx]["conv_secs"]  = _conv_secs
+                    _job["files"][idx]["log_dir"]    = str(_clog.run_dir) if _clog else ""
                 _job_log(f"Failed: {result.get('error', 'unknown')}")
                 # Check if any logged line indicates a fatal device error
                 if any("device error" in line.lower() or "i/o device" in line.lower()
@@ -609,6 +622,8 @@ def api_start():
     if not files:
         return jsonify({"error": "No files provided"}), 400
 
+    global _session_started_at
+    _session_started_at = time.time()
     _stop_event.clear()
     _soft_stop_event.clear()
     with _job_lock:
@@ -650,7 +665,9 @@ def api_start():
 def api_status():
     """Return current job state."""
     with _job_lock:
-        return jsonify(dict(_job))
+        data = dict(_job)
+    data["session_started_at"] = _session_started_at
+    return jsonify(data)
 
 
 @app.route("/api/stop", methods=["POST"])

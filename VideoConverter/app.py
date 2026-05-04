@@ -814,6 +814,153 @@ def api_update_status():
     return jsonify({"ok": True, "updated": updated})
 
 
+@app.route("/api/diagnose")
+def api_diagnose():
+    """Run ffprobe and return a structured diagnostic report for a file."""
+    path = request.args.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    path = os.path.normpath(path)
+    if not os.path.exists(path):
+        return jsonify({"error": "File not found"}), 404
+
+    import subprocess as _sp
+    from pathlib import Path as _Path
+
+    report: dict = {"path": path, "sections": []}
+
+    def _section(title: str, lines: list) -> None:
+        report["sections"].append({"title": title, "lines": lines})
+
+    # 1. Basic file info
+    stat = os.stat(path)
+    size_mb = stat.st_size / 1024 / 1024
+    _section("File", [
+        f"Path   : {path}",
+        f"Size   : {size_mb:.1f} MB ({stat.st_size:,} bytes)",
+        f"Ext    : {_Path(path).suffix.lower()}",
+    ])
+
+    # 2. ffprobe streams
+    streams = []
+    duration = 0.0
+    br_kbps = 0
+    try:
+        probe = _sp.run(
+            ["ffprobe", "-v", "quiet",
+             "-probesize", "100M", "-analyzeduration", "100M",
+             "-print_format", "json", "-show_streams", "-show_format", path],
+            capture_output=True, text=True, timeout=60,
+        )
+        pdata    = json.loads(probe.stdout)
+        streams  = pdata.get("streams", [])
+        fmt      = pdata.get("format", {})
+        duration = float(fmt.get("duration") or 0)
+        br_kbps  = int(fmt.get("bit_rate") or 0) // 1000
+        stream_lines = [
+            f"Duration : {duration:.1f}s  |  Bitrate: {br_kbps} kbps  |  Format: {fmt.get('format_name', '')}"
+        ]
+        for s in streams:
+            idx   = s.get("index", "?")
+            ctype = s.get("codec_type", "?")
+            cname = s.get("codec_name", "?")
+            lang  = s.get("tags", {}).get("language", "")
+            title = s.get("tags", {}).get("title", "")
+            extra = ""
+            if ctype == "video":
+                extra = f"  {s.get('width','')}x{s.get('height','')}  {s.get('pix_fmt','')}  {s.get('r_frame_rate','')}"
+            elif ctype == "audio":
+                extra = f"  {s.get('sample_rate','')} Hz  {s.get('channel_layout','')}  {int(s.get('bit_rate') or 0) // 1000} kbps"
+            elif ctype == "subtitle":
+                extra = "  (default)" if s.get("disposition", {}).get("default") else ""
+            meta = (f"  lang={lang}" if lang else "") + (f"  title={title!r}" if title else "")
+            stream_lines.append(f"  #{idx} {ctype:9} {cname:25}{meta}{extra}")
+        _section("Streams", stream_lines)
+    except Exception as e:
+        _section("Streams", [f"ERROR: {e}"])
+
+    # 3. Sidecar subtitle files
+    _SIDECAR_EXTS = {".srt", ".ass", ".ssa"}
+    src = _Path(path)
+    sidecars = [p for ext in _SIDECAR_EXTS for p in [src.parent / (src.stem + ext)] if p.exists()]
+    if sidecars:
+        _section("Sidecar subtitles", [f"  {p.name}  ({p.stat().st_size // 1024} KB)" for p in sidecars])
+    else:
+        _section("Sidecar subtitles", ["  (none)"])
+
+    # 4. DB record
+    norm = path.replace("\\", "/")
+    with db._connect() as con:
+        row = con.execute(
+            "SELECT id, status, force_sw, error_tail, started_at, completed_at, output_path "
+            "FROM conversions WHERE source_path=?",
+            (norm,),
+        ).fetchone()
+    if row:
+        db_lines = [
+            f"  id={row['id']}  status={row['status']}  force_sw={bool(row['force_sw'])}",
+            f"  started={row['started_at'] or '—'}  completed={row['completed_at'] or '—'}",
+            f"  output={row['output_path'] or '—'}",
+        ]
+        if row["error_tail"]:
+            db_lines.append("  error_tail:")
+            for el in row["error_tail"].splitlines()[-8:]:
+                db_lines.append(f"    {el}")
+        _section("Database record", db_lines)
+    else:
+        _section("Database record", ["  (no record found)"])
+
+    # 5. Log files (most recent run)
+    log_base = os.path.join(os.path.dirname(__file__), "logs")
+    stem_lower = src.stem.lower()
+    log_dirs = []
+    if os.path.isdir(log_base):
+        log_dirs = sorted(
+            [d for d in os.scandir(log_base) if d.is_dir() and stem_lower in d.name.lower()],
+            key=lambda d: d.name,
+        )
+    if log_dirs:
+        log_dir = log_dirs[-1]
+        log_lines = [f"  Directory: {log_dir.name}"]
+        for lf in sorted(os.scandir(log_dir.path), key=lambda f: f.name):
+            if lf.is_file() and lf.name.endswith(".log"):
+                kb = lf.stat().st_size // 1024
+                log_lines.append(f"  {lf.name}  ({kb} KB)")
+        _section("Log files (most recent run)", log_lines)
+    else:
+        _section("Log files (most recent run)", ["  (none found)"])
+
+    # 6. Conversion notes
+    v_streams   = [s for s in streams if s.get("codec_type") == "video"]
+    a_streams   = [s for s in streams if s.get("codec_type") == "audio"]
+    s_streams   = [s for s in streams if s.get("codec_type") == "subtitle"]
+    pgs_codecs  = {"hdmv_pgs_subtitle", "pgssub"}
+    text_codecs = {"ass", "subrip", "srt", "webvtt", "mov_text"}
+    has_pgs     = any(s.get("codec_name", "").lower() in pgs_codecs for s in s_streams)
+    is_hi10     = any(s.get("pix_fmt", "").lower() in ("yuv420p10le", "yuv420p10be") for s in v_streams)
+    is_mp4      = src.suffix.lower() == ".mp4"
+    all_aac     = all(s.get("codec_name", "").lower() in ("aac", "aac_latm") for s in a_streams) if a_streams else False
+    recs = []
+    if is_hi10:
+        recs.append("Hi10 video — QSV unsupported, will use libx265 software encoder")
+    if has_pgs:
+        recs.append("PGS bitmap subs — OCR required (EasyOCR worker)")
+    if any(s.get("codec_name", "").lower() in text_codecs for s in s_streams) and not is_mp4:
+        recs.append("Text subs (ASS/SRT) — if typesetter track, attempt 4 (SRT timestamp spread) may be needed")
+    if is_mp4 and all_aac and not has_pgs:
+        if sidecars:
+            recs.append("MP4 + AAC + no bitmap subs + sidecars -> fast-path: stream-copy + inject sidecars")
+        else:
+            recs.append("MP4 + AAC + no bitmap subs -> fast-path: compress_simple (no remux)")
+    if sidecars:
+        recs.append(f"Sidecar subs: {', '.join(p.name for p in sidecars)}")
+    if duration > 0 and 0 < br_kbps < 2000:
+        recs.append(f"Low bitrate ({br_kbps} kbps) — savings may be minimal or negative")
+    _section("Conversion notes", recs if recs else ["  (nothing unusual)"])
+
+    return jsonify(report)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

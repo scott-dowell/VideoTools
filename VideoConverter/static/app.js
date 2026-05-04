@@ -1225,6 +1225,8 @@ function showRowMenu(index, btn) {
   _rowMenu.appendChild(_menuDivider());
   _rowMenu.appendChild(_menuItem('bi-info-circle', 'Video Details',
     () => viewDetails(index)));
+  _rowMenu.appendChild(_menuItem('bi-stethoscope text-warning', 'Diagnose',
+    () => diagnoseFile(index)));
 
   if (isPending || isFailed) {
     _rowMenu.appendChild(_menuDivider());
@@ -1374,6 +1376,60 @@ function viewDetails(index) {
 
   body.innerHTML = html;
   new bootstrap.Modal(document.getElementById('detailsModal')).show();
+}
+
+function diagnoseFile(index) {
+  const f = _files[index];
+  const modal = new bootstrap.Modal(document.getElementById('diagnoseModal'));
+  const titleEl = document.getElementById('diagnoseModalTitle');
+  const spinner = document.getElementById('diagnoseSpinner');
+  const output  = document.getElementById('diagnoseOutput');
+  const copyBtn = document.getElementById('diagnoseCopyBtn');
+
+  titleEl.textContent = f.name;
+  spinner.style.display = '';
+  output.style.display  = 'none';
+  copyBtn.style.display = 'none';
+  output.textContent    = '';
+  modal.show();
+
+  fetch('/api/diagnose?path=' + encodeURIComponent(f.full_path))
+    .then(r => r.json())
+    .then(data => {
+      spinner.style.display = 'none';
+      if (data.error) {
+        output.textContent = 'ERROR: ' + data.error;
+        output.style.display = '';
+        return;
+      }
+      const lines = [];
+      lines.push('=== Diagnostic Report ===');
+      lines.push('File: ' + data.path);
+      lines.push('');
+      (data.sections || []).forEach(sec => {
+        lines.push('── ' + sec.title + ' ──');
+        (sec.lines || []).forEach(l => lines.push(l));
+        lines.push('');
+      });
+      output.textContent = lines.join('\n');
+      output.style.display  = '';
+      copyBtn.style.display = '';
+    })
+    .catch(err => {
+      spinner.style.display = 'none';
+      output.textContent = 'Network error: ' + err;
+      output.style.display = '';
+    });
+}
+
+function copyDiagnostics() {
+  const text = document.getElementById('diagnoseOutput').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById('diagnoseCopyBtn');
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied!';
+    setTimeout(() => { btn.innerHTML = orig; }, 2000);
+  });
 }
 
 function retryFile(index) {

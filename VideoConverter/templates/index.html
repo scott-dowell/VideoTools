@@ -361,13 +361,35 @@
   </div>
 </div>
 
-<!-- Settings Modal -->
-<div class="modal fade" id="settingsModal" tabindex="-1">
-  <div class="modal-dialog modal-dialog-scrollable" style="max-width:480px">
+<!-- Diagnose Modal -->
+<div class="modal fade" id="diagnoseModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title"><i class="bi bi-gear-fill me-2 text-secondary"></i>Settings</h5>
+        <div>
+          <h5 class="modal-title mb-0"><i class="bi bi-stethoscope text-warning me-2"></i>Diagnostics</h5>
+          <small class="text-secondary" id="diagnoseModalTitle" style="font-family:Consolas,monospace;font-size:.75rem"></small>
+        </div>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0">
+        <div id="diagnoseSpinner" class="text-center text-secondary py-4">
+          <div class="spinner-border spinner-border-sm"></div> Running diagnostics…
+        </div>
+        <pre id="diagnoseOutput" class="m-0 p-3" style="display:none;font-size:.8rem;white-space:pre-wrap;word-break:break-all;max-height:520px;overflow-y:auto;background:var(--bs-body-bg);"></pre>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="diagnoseCopyBtn" style="display:none" onclick="copyDiagnostics()">
+          <i class="bi bi-clipboard me-1"></i>Copy to clipboard
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal fade" id="settingsModal" tabindex="-1">
       </div>
       <div class="modal-body">
 

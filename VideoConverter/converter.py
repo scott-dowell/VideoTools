@@ -1195,6 +1195,9 @@ def remux_to_mp4(
         """
         Pre-extract ASS/text sub tracks to temp SRT files so the muxer sees
         simple timestamps instead of complex ASS events that cause DTS overflow.
+        After extraction, sanitizes each SRT with pysubs2 to remove any cues
+        with timestamps beyond the video duration (corrupt out-of-range entries
+        that cause ffmpeg to enter an infinite DTS-correction loop).
         Returns a list of SRT paths (one per track in english_text_subs),
         or None if any extraction fails.
         """
@@ -1224,6 +1227,33 @@ def remux_to_mp4(
                         except OSError:
                             pass
                 return None
+            # Sanitize: spread any cues that share the same start time apart by
+            # 1 ms each.  ASS "typesetter" tracks store animations as many
+            # simultaneous events (one cue per character/layer), which all land on
+            # the same DTS when converted to SRT.  ffmpeg then enters an infinite
+            # DTS-monotonicity correction loop when muxing those cues into
+            # mov_text.  Offsetting duplicates by 1 ms each is imperceptible but
+            # makes every DTS strictly monotonic.
+            try:
+                import pysubs2 as _pysubs2
+                _subs = _pysubs2.load(out_srt)
+                _subs.events.sort(key=lambda _e: (_e.start, _e.end))
+                _prev_start = -1
+                _offset = 0
+                for _e in _subs.events:
+                    if _e.start == _prev_start:
+                        _offset += 1
+                        _e.start += _offset
+                        if _e.end <= _e.start:
+                            _e.end = _e.start + 1
+                    else:
+                        _prev_start = _e.start
+                        _offset = 0
+                _subs.save(out_srt)
+                if _offset > 0:
+                    log(f"  Spread same-timestamp cues (max offset {_offset} ms) in sub track {i+1}")
+            except Exception as _se:
+                log(f"  WARNING: SRT de-duplicate failed: {_se} — using as-is")
             extracted.append(out_srt)
         return extracted
 
@@ -1405,6 +1435,12 @@ def remux_to_mp4(
 
             # Capture stderr separately so we can inspect it for DTS errors
             log(f"Running: {' '.join(cmd)}")
+            # Wall-clock deadline: stream-copy remux should complete in well
+            # under 2× the file's duration; encode passes take longer but
+            # still shouldn't exceed 10×.  Attempt 4 does a re-encode of audio
+            # but not video, so 4× is generous.  Using 4× with a 120 s floor
+            # catches any DTS-loop hang without timing out normal encodes.
+            _remux_deadline = time.monotonic() + max(120, duration * 4)
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -1419,6 +1455,7 @@ def remux_to_mp4(
 
                 output_lines: list[str] = []
                 dts_error = False
+                _timed_out = False
 
                 for line in proc.stdout:
                     output_lines.append(line)
@@ -1427,6 +1464,16 @@ def remux_to_mp4(
                         proc.wait()
                         log("Stopped by user.")
                         return False, ""
+                    if time.monotonic() > _remux_deadline:
+                        proc.kill()
+                        proc.wait()
+                        _timed_out = True
+                        log(
+                            f"WARNING: remux attempt {attempt+1} exceeded wall-clock "
+                            f"timeout ({int(duration * 10)}s) — likely stuck in DTS "
+                            f"warning loop. Killing and retrying."
+                        )
+                        break
                     # DTS overflow detection
                     if "out of order" in line.lower() or "dts" in line.lower() and "out of order" in line.lower():
                         dts_error = True
@@ -1443,7 +1490,8 @@ def remux_to_mp4(
                             except Exception:
                                 pass
 
-                proc.wait()
+                if not _timed_out:
+                    proc.wait()
                 if pid_holder is not None:
                     pid_holder[0] = 0
 
@@ -1457,17 +1505,18 @@ def remux_to_mp4(
                     f"remux_attempt_{attempt+1}", "".join(output_lines)
                 )
 
-            if proc.returncode == 0 and os.path.exists(tmp_path):
+            if proc.returncode == 0 and os.path.exists(tmp_path) and not _timed_out:
                 break  # success
 
             # Classify the failure: timestamp-related errors trigger retries;
             # unknown/silent failures (last line is a progress line) also retry;
             # aac_mf encoder crashes (Windows MFT) also retry via pre-encode path.
+            # A wall-clock timeout is treated as a DTS error to force the next attempt.
             full_output = "".join(output_lines)
             lo = full_output.lower()
             _TS_PATTERNS = ("out of order", "non-monotonic", "non monotonous",
                             "invalid duration", "dts")
-            is_ts_error = any(p in lo for p in _TS_PATTERNS)
+            is_ts_error = _timed_out or any(p in lo for p in _TS_PATTERNS)
             # Silent crash: ffmpeg exited non-zero but its last output line was a
             # progress line (frame=...) or stats line — meaning it died mid-encode
             # with no explicit error message.  Search backwards to the actual last

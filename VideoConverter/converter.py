@@ -1169,25 +1169,16 @@ def remux_to_mp4(
                         os.remove(tmp_audio)
                     except OSError:
                         pass
-                if not _is_valid_audio(tmp_audio):
-                    log(f"Audio pre-encode failed for track {i+1}")
-                    if conv_logger:
-                        conv_logger.mark_fail_at(
-                            f"audio track {i+1} pre-encode (aac rc={r.returncode})"
-                        )
-                    if os.path.exists(tmp_audio):
-                        try:
-                            os.remove(tmp_audio)
-                        except OSError:
-                            pass
-                    for f in files:
-                        if f and os.path.exists(f):
-                            try:
-                                os.remove(f)
-                            except OSError:
-                                pass
-                    return None
-                log(f"Track {i+1} pre-encoded successfully with native aac fallback")
+                log(f"Audio pre-encode failed for track {i+1} — will stream-copy instead")
+                if conv_logger:
+                    conv_logger.mark_fail_at(
+                        f"audio track {i+1} pre-encode (aac rc={r.returncode})"
+                    )
+                # Fall back to stream-copying this track rather than aborting
+                # the whole attempt.  The DTS issue is in the subtitle tracks,
+                # not the audio, so stream-copying a failed audio track is safe.
+                files.append(None)
+                continue
             files.append(tmp_audio)
         return files
 

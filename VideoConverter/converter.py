@@ -1058,22 +1058,38 @@ def remux_to_mp4(
             return False, ""
         log(f"OCR bitmap subs ({len(pgs_sub_indices)} track(s))...")
         os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
-        try:
-            _worker = _get_ocr_worker()
-            _job = json.dumps({"input_path": input_path, "out_dir": config.LOCAL_TEMP_DIR, "lang": "en"})
-            _worker.stdin.write(_job + "\n")
-            _worker.stdin.flush()
-            _result_line = _worker.stdout.readline()
-            if not _result_line:
-                log("ERROR: OCR worker closed unexpectedly — aborting to preserve subtitles")
-                return False, ""
-            _result = json.loads(_result_line.strip())
-            if not _result.get("ok"):
-                log(f"ERROR: OCR worker reported failure: {_result.get('error')} — aborting to preserve subtitles")
-                return False, ""
-            srt_paths = _result["paths"]
-        except Exception as exc:
-            log(f"ERROR: OCR worker failed: {exc} — aborting to preserve subtitles")
+        _ocr_job = json.dumps({"input_path": input_path, "out_dir": config.LOCAL_TEMP_DIR, "lang": "en"})
+        _ocr_attempts = 2
+        _ocr_success = False
+        for _ocr_try in range(_ocr_attempts):
+            try:
+                _worker = _get_ocr_worker()
+                _worker.stdin.write(_ocr_job + "\n")
+                _worker.stdin.flush()
+                _result_line = _worker.stdout.readline()
+                if not _result_line:
+                    log(f"WARNING: OCR worker closed unexpectedly (attempt {_ocr_try+1}/{_ocr_attempts}) — restarting worker")
+                    # The worker is already dead (readline returned empty);
+                    # _get_ocr_worker() will spawn a fresh one on next call
+                    # because poll() will return non-None.
+                    continue
+                _result = json.loads(_result_line.strip())
+                if not _result.get("ok"):
+                    log(f"ERROR: OCR worker reported failure: {_result.get('error')} — aborting to preserve subtitles")
+                    return False, ""
+                srt_paths = _result["paths"]
+                _ocr_success = True
+                break
+            except Exception as exc:
+                log(f"WARNING: OCR worker failed: {exc} (attempt {_ocr_try+1}/{_ocr_attempts})")
+                # Kill the worker so _get_ocr_worker() spawns a fresh one
+                try:
+                    _worker.kill()
+                    _worker.wait()
+                except Exception:
+                    pass
+        if not _ocr_success:
+            log("ERROR: OCR worker crashed on all retry attempts — aborting to preserve subtitles")
             return False, ""
     if copy_bitmap_indices:
         log(f"Copying {len(copy_bitmap_indices)} dvd_subtitle/vobsub track(s) directly into MP4...")

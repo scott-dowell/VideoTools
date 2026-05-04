@@ -387,8 +387,10 @@ def ocr_bitmap_subs_to_srt(
 
     try:
         probe = subprocess.run(
-            ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', input_path],
-            capture_output=True, text=True, timeout=30, check=True
+            ['ffprobe', '-v', 'quiet',
+             '-probesize', '100M', '-analyzeduration', '100M',
+             '-print_format', 'json', '-show_streams', input_path],
+            capture_output=True, text=True, timeout=60, check=True
         )
         streams = json.loads(probe.stdout).get('streams', [])
     except Exception as e:
@@ -434,6 +436,7 @@ def ocr_bitmap_subs_to_srt(
             try:
                 subprocess.run(
                     ['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                     '-probesize', '100M', '-analyzeduration', '100M',
                      '-i', input_path, '-map', f'0:{stream_idx}', '-c:s', 'copy', sup_path],
                     check=True, timeout=300
                 )

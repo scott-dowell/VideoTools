@@ -921,11 +921,20 @@ def api_diagnose():
         )
     if log_dirs:
         log_dir = log_dirs[-1]
-        log_lines = [f"  Directory: {log_dir.name}"]
+        log_lines = [f"  Directory: {log_dir.name}", ""]
         for lf in sorted(os.scandir(log_dir.path), key=lambda f: f.name):
             if lf.is_file() and lf.name.endswith(".log"):
                 kb = lf.stat().st_size // 1024
-                log_lines.append(f"  {lf.name}  ({kb} KB)")
+                log_lines.append(f"  ┌── {lf.name}  ({kb} KB)")
+                try:
+                    with open(lf.path, "r", encoding="utf-8", errors="replace") as fh:
+                        content = fh.read()
+                    for ln in content.splitlines():
+                        log_lines.append("  │ " + ln)
+                except Exception as e:
+                    log_lines.append(f"  │ (could not read: {e})")
+                log_lines.append("  └──")
+                log_lines.append("")
         _section("Log files (most recent run)", log_lines)
     else:
         _section("Log files (most recent run)", ["  (none found)"])

@@ -129,6 +129,8 @@ def _qsv_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
         "ffmpeg", "-y",
         "-stats_period", "1",
         "-fflags", "+discardcorrupt",
+        "-probesize", "100M",
+        "-analyzeduration", "100M",
         "-i", input_path,
         "-c:v", "hevc_qsv",
         "-global_quality", str(quality),
@@ -146,6 +148,8 @@ def _sw_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
         "ffmpeg", "-y",
         "-stats_period", "1",
         "-fflags", "+discardcorrupt",
+        "-probesize", "100M",
+        "-analyzeduration", "100M",
         "-i", input_path,
         "-c:v", "libx265",
         "-crf", str(quality),
@@ -435,6 +439,8 @@ def compress_simple(
                 "-stats_period", "1",
                 "-fflags", "+discardcorrupt",
                 "-err_detect", "ignore_err",
+                "-probesize", "100M",
+                "-analyzeduration", "100M",
                 "-i", input_path,
                 "-c:v", "libx265",
                 "-crf", str(sw_quality),
@@ -1276,7 +1282,9 @@ def remux_to_mp4(
         used instead of inline ASS→mov_text conversion from english_text_subs.
         """
         _ext_srts = extracted_text_srts or []
-        cmd = ["ffmpeg", "-y", "-i", input_path]
+        cmd = ["ffmpeg", "-y",
+               "-probesize", "100M", "-analyzeduration", "100M",
+               "-i", input_path]
 
         # Append OCR SRT files as additional inputs (inputs 1..len(srt_paths))
         for srt in srt_paths:

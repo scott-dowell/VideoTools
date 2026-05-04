@@ -259,6 +259,12 @@ def _run_ffmpeg(
                     _reader_thread.join(timeout=5)
                     log("Stopped by user.")
                     return False
+                # ffmpeg has exited but grandchild processes inherited the pipe
+                # handle so the reader thread never sees EOF and never enqueues
+                # the sentinel None.  If the process is already dead and no new
+                # output has arrived for 2 seconds, we can safely break out.
+                if proc.poll() is not None and (time.monotonic() - _last_output_time) > 2:
+                    break
                 # Kill if the process is alive but has been silent too long
                 if proc.poll() is None and (time.monotonic() - _last_output_time) > _HUNG_TIMEOUT_SECS:
                     proc.kill()

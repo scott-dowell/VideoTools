@@ -1456,6 +1456,8 @@ def remux_to_mp4(
                 output_lines: list[str] = []
                 dts_error = False
                 _timed_out = False
+                _dts_warn_count = 0
+                _DTS_WARN_LIMIT = 50  # kill after 50 consecutive DTS warnings
 
                 for line in proc.stdout:
                     output_lines.append(line)
@@ -1464,6 +1466,25 @@ def remux_to_mp4(
                         proc.wait()
                         log("Stopped by user.")
                         return False, ""
+                    # Detect infinite DTS-correction loop early: if ffmpeg is
+                    # stuck, it will print "Non-monotonic DTS" thousands of
+                    # times per second.  Kill after _DTS_WARN_LIMIT consecutive
+                    # occurrences (a progress line resets the counter).
+                    ll = line.lower()
+                    if "non-monotonic dts" in ll or "non monotonous dts" in ll:
+                        _dts_warn_count += 1
+                        if _dts_warn_count >= _DTS_WARN_LIMIT:
+                            proc.kill()
+                            proc.wait()
+                            _timed_out = True
+                            log(
+                                f"WARNING: remux attempt {attempt+1} stuck in DTS "
+                                f"warning loop (>{_DTS_WARN_LIMIT} warnings) — "
+                                f"killing and retrying."
+                            )
+                            break
+                    elif "frame=" in line:
+                        _dts_warn_count = 0  # reset on progress line
                     if time.monotonic() > _remux_deadline:
                         proc.kill()
                         proc.wait()

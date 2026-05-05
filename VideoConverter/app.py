@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import string
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -133,6 +134,136 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
     """Runs in a daemon thread; processes the file queue sequentially."""
     total_saved = 0.0
 
+    # ------------------------------------------------------------------
+    # OCR batch pre-pass (anime mode only)
+    # Run ocr_subs.py ONCE with all pending files so PyTorch loads exactly
+    # once and is reused across every file.  Per-file subprocess restarts
+    # are the root cause of cold-start native crashes (0xC0000005/409).
+    # ------------------------------------------------------------------
+    ocr_failed_paths: set[str] = set()
+    if anime_mode:
+        import glob as _glob
+        _all_paths = [fi["full_path"].replace("\\", "/") for fi in files]
+        _db_statuses = db.get_latest_statuses_by_paths(_all_paths)
+        _ocr_paths = [
+            p for p in _all_paths
+            if _db_statuses.get(p, {}).get("status") not in ("done", "skipped", "no_saving")
+        ]
+        if _ocr_paths:
+            _path_to_idx = {fi["full_path"].replace("\\", "/"): i for i, fi in enumerate(files)}
+            with _job_lock:
+                for p in _ocr_paths:
+                    _job["files"][_path_to_idx[p]]["status"] = "ocr"
+            _ocr_script = os.path.join(os.path.dirname(__file__), "ocr_subs.py")
+            _ocr_env = os.environ.copy()
+            _ocr_env["PYTHONUTF8"] = "1"
+
+            # Build a per-file drop manifest so ocr_subs.py knows which
+            # PGS streams to skip (e.g. a track that previously crashed PyTorch).
+            _drop_manifest = {
+                p: db.get_dropped_streams(p)
+                for p in _ocr_paths
+            }
+            # Write to a temp file; ocr_subs.py reads it via --skip-manifest
+            import tempfile as _tmpfile
+            _manifest_fd, _manifest_path = _tmpfile.mkstemp(suffix=".json", prefix="ocr_drops_")
+            try:
+                with os.fdopen(_manifest_fd, "w", encoding="utf-8") as _mf:
+                    import json as _json_tmp
+                    _json_tmp.dump(_drop_manifest, _mf)
+            except Exception:
+                _manifest_path = None
+
+            # Retry loop: if the batch crashes, mark only the crashing file as
+            # failed and restart with the remaining files.  This ensures one
+            # bad file doesn't block all the others.
+            _remaining = list(_ocr_paths)
+            while _remaining and not _stop_event.is_set():
+                _ocr_bn_map: dict[str, str] = {os.path.basename(p): p for p in _remaining}
+                _current_ocr_path = _remaining[0]
+                crashed = False
+                try:
+                    _manifest_args = ["--skip-manifest", _manifest_path] if _manifest_path else []
+                    _ocr_proc = _sp.Popen(
+                        [sys.executable, _ocr_script] + _manifest_args + _remaining,
+                        stdout=_sp.PIPE,
+                        stderr=_sp.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        env=_ocr_env,
+                    )
+                    _prev_was_sep = False
+                    for _ocr_line in _ocr_proc.stdout:
+                        stripped = _ocr_line.rstrip()
+                        if _prev_was_sep and stripped.startswith("  ") and stripped.strip() in _ocr_bn_map:
+                            _current_ocr_path = _ocr_bn_map[stripped.strip()]
+                        _prev_was_sep = (stripped == "-" * 60)
+                        if stripped:
+                            _job_log(f"[ocr] {stripped}")
+                        if _stop_event.is_set():
+                            _ocr_proc.kill()
+                            break
+                    _ocr_proc.wait()
+                    if _ocr_proc.returncode != 0:
+                        crashed = True
+                except Exception as _ocr_exc:
+                    _job_log(f"[ocr] Batch OCR error: {_ocr_exc}")
+                    crashed = True
+
+                if crashed:
+                    # Check which files in this batch now have sidecars
+                    _no_sidecar = []
+                    for _fp in _remaining:
+                        _stem   = os.path.splitext(os.path.basename(_fp))[0]
+                        _parent = os.path.dirname(_fp)
+                        if not _glob.glob(os.path.join(_parent, f"{_stem}.pgs*.srt")):
+                            _no_sidecar.append(_fp)
+
+                    # The crashing file is the one being processed when the crash
+                    # occurred AND has no sidecar — mark it permanently failed.
+                    if _current_ocr_path in _no_sidecar:
+                        ocr_failed_paths.add(_current_ocr_path)
+                        _job_log(f"[ocr] Crash on {os.path.basename(_current_ocr_path)} (exit {_ocr_proc.returncode}) — marking as failed, retrying remaining files.")
+
+                    # Restart with files that still need OCR (excluding the crasher)
+                    _remaining = [p for p in _no_sidecar if p != _current_ocr_path]
+                    if _remaining:
+                        _job_log(f"[ocr] Restarting OCR batch for {len(_remaining)} remaining file(s).")
+                    else:
+                        break
+                else:
+                    # Clean exit — any file still missing a sidecar genuinely failed,
+                    # UNLESS all its PGS streams were dropped (nothing to OCR → OK).
+                    _PGS_CODECS = {"hdmv_pgs_subtitle", "pgssub"}
+                    for _fp in _remaining:
+                        _stem   = os.path.splitext(os.path.basename(_fp))[0]
+                        _parent = os.path.dirname(_fp)
+                        if _glob.glob(os.path.join(_parent, f"{_stem}.pgs*.srt")):
+                            continue  # has sidecar — success
+                        # No sidecar: check whether any non-dropped PGS streams exist
+                        _fi     = next((fi for fi in files if fi["full_path"].replace("\\", "/") == _fp), None)
+                        _fstreams = (_fi.get("streams") or {}).get("subs", []) if _fi else []
+                        _drops  = set(_drop_manifest.get(_fp, []))
+                        _has_active_pgs = any(
+                            s.get("codec", "").upper() in ("PGS", "HDMV_PGS_SUBTITLE", "PGSSUB")
+                            and s.get("index") not in _drops
+                            for s in _fstreams
+                        )
+                        if _has_active_pgs:
+                            ocr_failed_paths.add(_fp)
+                    break
+
+            if ocr_failed_paths:
+                _job_log(f"[ocr] {len(ocr_failed_paths)} file(s) have no OCR output — will mark as failed.")
+
+            # Clean up the drop manifest temp file
+            if _manifest_path and os.path.exists(_manifest_path):
+                try:
+                    os.remove(_manifest_path)
+                except OSError:
+                    pass
+
     for idx, file_info in enumerate(files):
         if _stop_event.is_set() or _soft_stop_event.is_set():
             break
@@ -178,10 +309,24 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             _job["fps"]           = 0.0
             _job["eta_secs"]      = 0
             _job["encoder"]       = ""
-            _job["files"][idx]["status"] = "converting"
+            # Status will be set to 'ocr' or 'converting' below once we know
+            # whether an OCR pre-flight is needed.
 
         db.mark_running(rec_id, _utcnow())
         _job_log(f"[{idx+1}/{len(files)}] {os.path.basename(full_path)}")
+
+        # Check OCR batch result (anime mode only)
+        if full_path in ocr_failed_paths:
+            _job_log("OCR pre-flight failed for this file — marking as failed.")
+            db.mark_failed(rec_id, "OCR batch pre-flight failed", _utcnow())
+            with _job_lock:
+                _job["files"][idx]["status"] = "failed"
+                _job["files"][idx]["error_tail"] = "OCR batch pre-flight failed"
+            continue
+
+        # Now set the badge to 'converting'.
+        with _job_lock:
+            _job["files"][idx]["status"] = "converting"
 
         # Output goes into the same directory as the source so the converted
         # file replaces (or sits beside) the original in-place.  When the
@@ -227,16 +372,17 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         _conv_start = time.time()
         try:
             result = converter.convert_video(
-                input_path  = full_path,
-                output_dir  = output_dir,
-                anime_mode  = anime_mode,
-                quality     = quality,
-                progress_cb = _progress,
-                stop_event  = _stop_event,
-                log         = _capture_log,
-                pid_holder  = _ffmpeg_pid,
-                tmp_holder  = _tmp_holder,
-                force_sw    = force_sw,
+                input_path      = full_path,
+                output_dir      = output_dir,
+                anime_mode      = anime_mode,
+                quality         = quality,
+                progress_cb     = _progress,
+                stop_event      = _stop_event,
+                log             = _capture_log,
+                pid_holder      = _ffmpeg_pid,
+                tmp_holder      = _tmp_holder,
+                force_sw        = force_sw,
+                dropped_streams = db.get_dropped_streams(full_path),
             )
         except Exception as exc:
             _job_log(f"UNHANDLED EXCEPTION during conversion: {exc}")
@@ -812,6 +958,70 @@ def api_update_status():
                 )
                 updated += cur.rowcount
     return jsonify({"ok": True, "updated": updated})
+
+
+@app.route("/api/drop_streams", methods=["POST"])
+def api_drop_streams():
+    """Set (or clear) the list of dropped ffprobe stream indices for a file.
+
+    Body: { "path": "<source_path>", "dropped": [5, 7] }
+    Pass an empty list to un-drop all streams.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    path = data.get("path", "").strip()
+    dropped = data.get("dropped", [])
+
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    if not isinstance(dropped, list):
+        return jsonify({"error": "dropped must be a list of integers"}), 400
+
+    norm = path.replace("\\", "/")
+    db.set_dropped_streams(norm, [int(i) for i in dropped])
+    return jsonify({"ok": True, "path": norm, "dropped": sorted(set(int(i) for i in dropped))})
+
+
+@app.route("/api/drop_pgs_bulk", methods=["POST"])
+def api_drop_pgs_bulk():
+    """Bulk-set dropped_streams for multiple files at once.
+
+    Body: { "updates": [{"path": "...", "dropped": [5, 7]}, ...] }
+    Merges provided indices with any already-dropped streams for each file.
+    Returns: { "ok": true, "updated": { path: [indices] } }
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    updates = data.get("updates", [])
+    if not updates or not isinstance(updates, list):
+        return jsonify({"error": "updates must be a non-empty list"}), 400
+
+    result = {}
+    for u in updates:
+        path = (u.get("path") or "").strip()
+        dropped = u.get("dropped", [])
+        if not path or not isinstance(dropped, list):
+            continue
+        norm = path.replace("\\", "/")
+        merged = sorted(set(int(i) for i in dropped))
+        db.set_dropped_streams(norm, merged)
+        result[norm] = merged
+
+    return jsonify({"ok": True, "updated": result})
+
+
+@app.route("/api/probe_streams")
+def api_probe_streams():
+    """Run ffprobe on a file and return stream info in the same shape as the scanner."""
+    path = request.args.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+    probe = scanner._ffprobe(path)
+    if not probe:
+        return jsonify({"error": "ffprobe failed"}), 500
+    parsed = scanner._parse_probe(probe)
+    return jsonify({"ok": True, "streams": parsed["streams"]})
 
 
 @app.route("/api/diagnose")

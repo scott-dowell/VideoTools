@@ -37,12 +37,21 @@ function _badgeHtml(status, force_sw) {
             : status === 'no_saving'  ? 'badge-no-saving'
             : status === 'skipped'    ? 'badge-skipped'
             : status === 'converting' ? 'badge-converting'
+            : status === 'ocr'        ? 'badge-ocr'
             : 'badge-pending';
   const lbl = status === 'no_saving' ? 'Skipped \u2013 Larger'
             : status === 'skipped'   ? 'Skipped \u2013 Manual'
+            : status === 'ocr'       ? 'OCR'
             : (status || 'pending');
   const sw  = force_sw ? ' <small style="font-size:.7em;opacity:.85" class="text-warning">SW</small>' : '';
   return '<span class="badge ' + cls + '">' + lbl + sw + '</span>';
+}
+
+// Returns a small badge when the file has dropped streams, otherwise ''
+function _droppedBadgeHtml(f) {
+  const n = f.dropped_streams ? f.dropped_streams.length : 0;
+  if (!n) return '';
+  return ' <span class="badge bg-warning text-dark ms-1" style="font-size:.65rem" title="' + n + ' stream(s) excluded from conversion"><i class="bi bi-slash-circle"></i>\u202f' + n + '</span>';
 }
 
 // Parse "H:MM:SS" or "MM:SS" → seconds
@@ -263,7 +272,7 @@ function buildRow(f, index) {
 
   // col 5 — Status badge
   const tdStatus = document.createElement('td');
-  tdStatus.innerHTML = _badgeHtml(f.status, f.force_sw);
+  tdStatus.innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f);
   tr.appendChild(tdStatus);
 
   // col 5b — Est. saving
@@ -1229,6 +1238,16 @@ function showRowMenu(index, btn) {
     () => diagnoseFile(index)));
 
   if (isPending || isFailed) {
+    const hasDropped = f.dropped_streams && f.dropped_streams.length > 0;
+    _rowMenu.appendChild(_menuDivider());
+    _rowMenu.appendChild(_menuItem('bi-slash-circle text-warning', 'Drop PGS tracks (this file)',
+      () => dropPgsFile(index)));
+    _rowMenu.appendChild(_menuItem('bi-slash-circle-fill text-warning', 'Drop PGS \u2014 all \u201c' + (f.folder || 'root') + '\u201d files',
+      () => dropPgsFolder(f.folder || '')));
+    if (hasDropped) {
+      _rowMenu.appendChild(_menuItem('bi-arrow-counterclockwise text-success', 'Restore all dropped tracks',
+        () => restoreStreams(index)));
+    }
     _rowMenu.appendChild(_menuDivider());
     _rowMenu.appendChild(_menuItem('bi-slash-circle text-warning', 'Skip this file',
       () => skipFile(index)));
@@ -1316,6 +1335,7 @@ function viewDetails(index) {
 
   const s = f.streams || null;
   const v = s ? s.video : null;
+  const dropped = new Set(f.dropped_streams || []);
 
   // ---- Video section ----
   const codecBadge = v ? `<span class="details-codec-badge details-codec-${(v.codec||'').toLowerCase()}">${v.codec.toUpperCase()}</span>` : '—';
@@ -1347,35 +1367,214 @@ function viewDetails(index) {
   // ---- Audio tracks ----
   const audioTracks = s ? s.audio : [];
   html += `<h6 class="details-section-head"><i class="bi bi-music-note-list me-2"></i>Audio Tracks <span class="badge bg-secondary ms-1">${audioTracks.length}</span></h6>`;
-  if (audioTracks.length) {
-    html += '<table class="table table-sm details-table mb-3"><thead><tr><th>#</th><th>Codec</th><th>Channels</th><th>Language</th><th>Bitrate</th><th>Title</th></tr></thead><tbody>';
+  if (!s) {
+    html += `<p class="text-secondary small mb-3">Stream data not loaded. <button class="btn btn-sm btn-outline-secondary py-0" onclick="probeStreams(${index})"><i class="bi bi-search me-1"></i>Probe</button></p>`;
+  } else if (audioTracks.length) {
+    html += '<table class="table table-sm details-table mb-3"><thead><tr><th>#</th><th>Codec</th><th>Channels</th><th>Language</th><th>Bitrate</th><th>Title</th><th></th></tr></thead><tbody>';
     audioTracks.forEach(a => {
-      html += `<tr><td class="text-secondary">${a.track}</td><td>${a.codec}</td><td>${a.channels}</td><td><span class="badge bg-secondary">${a.language}</span></td><td class="text-secondary">${a.bitrate}</td><td>${a.title || '—'}</td></tr>`;
+      const streamIdx = a.index != null ? a.index : null;
+      const isDrop = streamIdx != null && dropped.has(streamIdx);
+      const dropBtn = streamIdx != null
+        ? `<button class="btn btn-xs details-drop-btn ${isDrop ? 'dropped' : ''}" title="${isDrop ? 'Click to restore track' : 'Click to drop track'}" onclick="toggleDropStream(${index},${streamIdx},this)"><i class="bi bi-${isDrop ? 'plus-circle' : 'dash-circle'}"></i></button>`
+        : '';
+      const rowClass = isDrop ? ' class="details-track-dropped"' : '';
+      html += `<tr${rowClass}><td class="text-secondary">${a.track}</td><td>${a.codec}</td><td>${a.channels}</td><td><span class="badge bg-secondary">${a.language}</span></td><td class="text-secondary">${a.bitrate}</td><td>${a.title || '—'}</td><td>${dropBtn}</td></tr>`;
     });
     html += '</tbody></table>';
-  } else {
+  } else if (s) {
     html += '<p class="text-secondary small mb-3">No audio tracks found.</p>';
   }
 
   // ---- Subtitle tracks ----
   const subTracks = s ? s.subs : [];
   html += `<h6 class="details-section-head"><i class="bi bi-badge-cc me-2"></i>Subtitle Tracks <span class="badge bg-secondary ms-1">${subTracks.length}</span></h6>`;
-  if (subTracks.length) {
-    html += '<table class="table table-sm details-table mb-0"><thead><tr><th>#</th><th>Format</th><th>Language</th><th>Title</th></tr></thead><tbody>';
+  if (!s) {
+    html += '<p class="text-secondary small mb-0">Click Probe above to load track info.</p>';
+  } else if (subTracks.length) {
+    html += '<table class="table table-sm details-table mb-0"><thead><tr><th>#</th><th>Format</th><th>Language</th><th>Title</th><th></th></tr></thead><tbody>';
     subTracks.forEach(sub => {
+      const streamIdx = sub.index != null ? sub.index : null;
+      const isDrop = streamIdx != null && dropped.has(streamIdx);
       const isImage = ['PGS','VOBSUB','DVDSUB'].includes(sub.codec.toUpperCase());
       const fmtBadge = isImage
         ? `<span class="badge details-sub-image">${sub.codec}</span>`
         : `<span class="badge details-sub-text">${sub.codec}</span>`;
-      html += `<tr><td class="text-secondary">${sub.track}</td><td>${fmtBadge}</td><td><span class="badge bg-secondary">${sub.language}</span></td><td>${sub.title || '—'}</td></tr>`;
+      const dropBtn = streamIdx != null
+        ? `<button class="btn btn-xs details-drop-btn ${isDrop ? 'dropped' : ''}" title="${isDrop ? 'Click to restore track' : 'Click to drop track'}" onclick="toggleDropStream(${index},${streamIdx},this)"><i class="bi bi-${isDrop ? 'plus-circle' : 'dash-circle'}"></i></button>`
+        : '';
+      const rowClass = isDrop ? ' class="details-track-dropped"' : '';
+      html += `<tr${rowClass}><td class="text-secondary">${sub.track}</td><td>${fmtBadge}</td><td><span class="badge bg-secondary">${sub.language}</span></td><td>${sub.title || '—'}</td><td>${dropBtn}</td></tr>`;
     });
     html += '</tbody></table>';
-  } else {
+    if (dropped.size > 0) {
+      html += '<p class="text-warning small mt-2 mb-0"><i class="bi bi-exclamation-triangle me-1"></i>Dropped tracks will be excluded from conversion and OCR.</p>';
+    }
+  } else if (s) {
     html += '<p class="text-secondary small mb-0">No subtitle tracks found.</p>';
   }
 
   body.innerHTML = html;
-  new bootstrap.Modal(document.getElementById('detailsModal')).show();
+  const modalEl = document.getElementById('detailsModal');
+  let existing = bootstrap.Modal.getInstance(modalEl);
+  if (!existing) {
+    existing = new bootstrap.Modal(modalEl);
+  }
+  existing.show();
+}
+
+function toggleDropStream(fileIndex, streamIdx, btn) {
+  const f = _files[fileIndex];
+  if (!f) return;
+  const dropped = new Set(f.dropped_streams || []);
+  if (dropped.has(streamIdx)) {
+    dropped.delete(streamIdx);
+  } else {
+    dropped.add(streamIdx);
+  }
+  const newDropped = [...dropped];
+  fetch('/api/drop_streams', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path, dropped: newDropped}),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      f.dropped_streams = newDropped;
+      // Update table row badge
+      const row = document.getElementById('row-' + fileIndex);
+      if (row) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f);
+      // Re-render the modal body in place
+      viewDetails(fileIndex);
+    } else {
+      addLog('drop_streams error: ' + (data.error || 'unknown'), 'error');
+    }
+  }).catch(err => addLog('drop_streams fetch error: ' + err, 'error'));
+}
+
+// Returns the ffprobe stream indices of PGS subtitle tracks for a file object
+function _pgsIndices(f) {
+  const PGS = new Set(['PGS', 'HDMV_PGS_SUBTITLE', 'PGSSUB']);
+  const subs = (f.streams && f.streams.subs) || [];
+  return subs
+    .filter(s => PGS.has((s.codec || '').toUpperCase()))
+    .map(s => s.index)
+    .filter(i => i != null);
+}
+
+function dropPgsFile(index) {
+  const f = _files[index];
+  const pgsIdx = _pgsIndices(f);
+  if (!pgsIdx.length) {
+    addLog('No PGS streams found for ' + f.name + ' — load stream data via Video Details → Probe first.', 'warn');
+    return;
+  }
+  const existing = new Set(f.dropped_streams || []);
+  pgsIdx.forEach(i => existing.add(i));
+  const newDropped = [...existing];
+  fetch('/api/drop_streams', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path, dropped: newDropped}),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      f.dropped_streams = newDropped;
+      const row = document.getElementById('row-' + index);
+      if (row) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f);
+      addLog('Dropped ' + pgsIdx.length + ' PGS stream(s) for ' + f.name, 'info');
+    } else {
+      addLog('drop_streams error: ' + (d.error || 'unknown'), 'error');
+    }
+  }).catch(err => addLog('drop_streams fetch error: ' + err, 'error'));
+}
+
+function restoreStreams(index) {
+  const f = _files[index];
+  fetch('/api/drop_streams', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path, dropped: []}),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      f.dropped_streams = [];
+      const row = document.getElementById('row-' + index);
+      if (row) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw);
+      addLog('Restored all dropped tracks for ' + f.name, 'info');
+    } else {
+      addLog('restore error: ' + (d.error || 'unknown'), 'error');
+    }
+  }).catch(err => addLog('restore fetch error: ' + err, 'error'));
+}
+
+async function dropPgsFolder(folder) {
+  // Collect all files in this folder
+  const folderFiles = _files.map((f, i) => ({f, i})).filter(({f}) => (f.folder || '') === (folder || ''));
+  if (!folderFiles.length) {
+    addLog('No files found in folder \u201c' + (folder || 'root') + '\u201d', 'warn');
+    return;
+  }
+
+  // Probe any files that don't have stream data yet
+  const unprobed = folderFiles.filter(({f}) => !f.streams);
+  if (unprobed.length) {
+    addLog('Probing ' + unprobed.length + ' file(s) in \u201c' + (folder || 'root') + '\u201d\u2026', 'info');
+    for (const {f} of unprobed) {
+      try {
+        const r = await fetch('/api/probe_streams?' + new URLSearchParams({path: f.full_path}));
+        const data = await r.json();
+        if (data.ok) f.streams = data.streams;
+      } catch (_) { /* ignore probe failures for individual files */ }
+    }
+  }
+
+  // Now build drop list using stream data
+  const updates = [];
+  const targets = [];
+  folderFiles.forEach(({f, i}) => {
+    const pgsIdx = _pgsIndices(f);
+    if (!pgsIdx.length) return;
+    const existing = new Set(f.dropped_streams || []);
+    pgsIdx.forEach(x => existing.add(x));
+    const newDropped = [...existing];
+    updates.push({path: f.full_path, dropped: newDropped});
+    targets.push({f, i, newDropped});
+  });
+
+  if (!updates.length) {
+    addLog('No PGS streams found in any file in \u201c' + (folder || 'root') + '\u201d', 'info');
+    return;
+  }
+
+  fetch('/api/drop_pgs_bulk', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({updates}),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      targets.forEach(({f, i, newDropped}) => {
+        f.dropped_streams = newDropped;
+        const row = document.getElementById('row-' + i);
+        if (row) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f);
+      });
+      addLog('Dropped PGS tracks for ' + updates.length + ' file(s) in \u201c' + (folder || 'root') + '\u201d', 'info');
+    } else {
+      addLog('drop_pgs_bulk error: ' + (d.error || 'unknown'), 'error');
+    }
+  }).catch(err => addLog('drop_pgs_bulk fetch error: ' + err, 'error'));
+}
+
+function probeStreams(index) {
+  const f = _files[index];
+  if (!f) return;
+  fetch('/api/probe_streams?' + new URLSearchParams({path: f.full_path}))
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        f.streams = data.streams;
+        viewDetails(index);
+      } else {
+        addLog('probe_streams error: ' + (data.error || 'unknown'), 'error');
+      }
+    })
+    .catch(err => addLog('probe_streams fetch error: ' + err, 'error'));
 }
 
 function diagnoseFile(index) {

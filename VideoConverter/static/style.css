@@ -25,10 +25,13 @@ tbody tr.tr-no-saving:hover > td { opacity: 1; background-color: #21262d !import
 td, th { vertical-align: middle; border-color: #21262d; }
 .badge-pending    { background:#30363d; color:#c9d1d9; }
 .badge-converting { background:#b45309; color:#fef3c7; }
+.badge-ocr        { background:#6d28d9; color:#ede9fe; }
 .badge-done       { background:#14532d; color:#86efac; }
 .badge-failed     { background:#7f1d1d; color:#fca5a5; }
 .badge-no-saving  { background:#1c2d3d; color:#7ab8d9; }
 .badge-skipped    { background:#2d1f3d; color:#c084fc; }
+.badge-ocr-done   { background:#0d3d2d; color:#34d399; font-size:.65rem; }
+.badge-ocr-skip   { background:#1e2530; color:#6b7280; font-size:.65rem; }
 .progress { height: 6px; background:#21262d; border-radius:4px; }
 .progress-bar { background: #1d6de0; border-radius:4px; }
 .progress-bar.overall { background: #16a34a; }
@@ -158,6 +161,13 @@ tr.drag-over > td { background-color: rgba(29,109,224,.15) !important;
 .details-codec-hevc { background:rgba(63,185,80,.15);  color:#3fb950; }
 .details-sub-text  { background:rgba(88,166,255,.15); color:#58a6ff; font-weight:600; }
 .details-sub-image { background:rgba(210,153,34,.15); color:#d29922; font-weight:600; }
+.details-drop-btn { padding:0 .25rem; font-size:.8rem; line-height:1.4; color:#8b949e;
+  border:none; background:none; border-radius:.25rem; }
+.details-drop-btn:hover { color:#f85149; background:rgba(248,81,73,.1); }
+.details-drop-btn.dropped { color:#3fb950; }
+.details-drop-btn.dropped:hover { color:#f85149; background:rgba(248,81,73,.1); }
+.details-track-dropped td { opacity:.4; text-decoration:line-through; }
+.details-track-dropped td:last-child { opacity:1; text-decoration:none; }
 .codec-h264 { color: #58a6ff; }
 .folder-path { font-family: Consolas, monospace; font-size:0.78rem; color:#8b949e; }
 /* Row action menu */
@@ -203,6 +213,97 @@ tr.drag-over > td { background-color: rgba(29,109,224,.15) !important;
 [data-bs-theme="light"] .log-err  { color:#cf222e; }
 [data-bs-theme="light"] .progress { background:#d0d7de; }
 [data-bs-theme="light"] .badge-pending { background:#eaeef2; color:#57606a; }
+[data-bs-theme="light"] .badge-ocr-done { background:#dcfce7; color:#166534; }
+[data-bs-theme="light"] .badge-ocr-skip { background:#f3f4f6; color:#9ca3af; }
 [data-bs-theme="light"] .folder-path { color:#57606a; }
 [data-bs-theme="light"] ::-webkit-scrollbar-track { background:#f6f8fa; }
 [data-bs-theme="light"] ::-webkit-scrollbar-thumb { background:#d0d7de; }
+
+/* ---- Step checklist (Current Job card) ---- */
+.step-list {
+  list-style: none;
+  padding: 0;
+  margin: .5rem 0 0;
+}
+.step-list li {
+  display: flex;
+  align-items: baseline;
+  gap: .4rem;
+  padding: .18rem 0;
+  font-size: .78rem;
+  line-height: 1.3;
+}
+.step-icon  { width: 1rem; text-align: center; flex-shrink: 0; }
+.step-label { font-weight: 600; flex-shrink: 0; min-width: 5rem; }
+.step-detail { color: #8b949e; font-size: .72rem; }
+
+.step-done    .step-icon  { color: #3fb950; }
+.step-running .step-icon  { color: #d29922; }
+.step-retry   .step-icon  { color: #f0883e; }
+.step-failed  .step-icon  { color: #f85149; }
+.step-waiting .step-icon  { color: #484f58; }
+.step-skipped .step-icon  { color: #484f58; opacity: .45; }
+
+.step-running .step-label { color: #d29922; }
+.step-retry   .step-label { color: #f0883e; }
+.step-failed  .step-label { color: #f85149; }
+.step-done    .step-label { color: #8b949e; }
+.step-waiting .step-label { color: #6e7681; }
+.step-skipped .step-label { color: #484f58; opacity: .45; }
+
+@keyframes step-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .3; }
+}
+.step-running .step-icon,
+.step-retry   .step-icon { animation: step-pulse 1.2s ease-in-out infinite; }
+
+/* OCR batch file list */
+.ocr-batch-file {
+  display: flex;
+  gap: .4rem;
+  align-items: center;
+  padding: .1rem 0;
+  font-size: .73rem;
+}
+.ocr-file-done    { color: #3fb950; }
+.ocr-file-running { color: #d29922; }
+.ocr-file-failed  { color: #f85149; }
+.ocr-file-waiting { color: #484f58; }
+
+/* Light mode overrides */
+[data-bs-theme="light"] .step-detail        { color: #57606a; }
+[data-bs-theme="light"] .step-done .step-label  { color: #57606a; }
+[data-bs-theme="light"] .step-waiting .step-icon { color: #adb5bd; }
+[data-bs-theme="light"] .step-waiting .step-label { color: #adb5bd; }
+[data-bs-theme="light"] .step-skipped .step-icon  { color: #adb5bd; opacity: .6; }
+[data-bs-theme="light"] .step-skipped .step-label { color: #adb5bd; opacity: .6; }
+[data-bs-theme="light"] .ocr-file-waiting { color: #adb5bd; }
+
+/* ---- Right-panel vertical splitter ---- */
+.right-splitter {
+  height: 6px;
+  flex-shrink: 0;
+  cursor: ns-resize;
+  background: transparent;
+  position: relative;
+  transition: background .15s;
+}
+.right-splitter::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 2px;
+  border-radius: 1px;
+  background: #30363d;
+  transition: background .15s;
+}
+.right-splitter:hover::after,
+.right-splitter.dragging::after { background: #1d6de0; }
+.right-splitter.dragging { background: rgba(29,109,224,.08); }
+[data-bs-theme="light"] .right-splitter::after { background: #d0d7de; }
+[data-bs-theme="light"] .right-splitter:hover::after,
+[data-bs-theme="light"] .right-splitter.dragging::after { background: #1d6de0; }

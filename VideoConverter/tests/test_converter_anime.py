@@ -286,10 +286,10 @@ def test_bitmap_sub_fixture_streams():
 
 @bitmap_required
 def test_bitmap_sub_ocr_deps_ok():
-    """bitmap_subs.DEPS_OK must be True — easyocr/Pillow/pysubs2 required."""
+    """bitmap_subs.DEPS_OK must be True — pytesseract/Pillow/pysubs2 required."""
     import bitmap_subs
     assert bitmap_subs.DEPS_OK, (
-        "OCR deps not installed. Run: pip install easyocr Pillow pysubs2"
+        "OCR deps not installed. Run: pip install pytesseract Pillow pysubs2 + winget install UB-Mannheim.TesseractOCR"
     )
 
 

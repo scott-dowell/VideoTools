@@ -30,6 +30,7 @@ Table: conversions
   started_at        TEXT               -- ISO-8601 UTC
   completed_at      TEXT
   error_tail        TEXT               -- last ~2 KB of ffmpeg stderr on failure
+  dropped_streams   TEXT               -- JSON array of ffprobe stream indices to skip, e.g. [5,7]
 
 Unique index on (source_path, source_mtime) — same path with a NEW mtime gets a
 fresh pending row, allowing re-processing when a file is replaced in-place.
@@ -44,8 +45,19 @@ reset mtime. Hashes only the first 2 MB so the cost is negligible (~4 ms/SSD).
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import sqlite3
 from contextlib import contextmanager
+
+
+def _json_loads_safe(value: str | None) -> list:
+    """Parse a JSON string to a list, returning [] on any error or None input."""
+    if not value:
+        return []
+    try:
+        return _json.loads(value)
+    except Exception:
+        return []
 
 
 def _norm(path: str | None) -> str | None:
@@ -107,6 +119,7 @@ def init_db(db_path: str) -> None:
             ("source_duration_secs", "REAL"),
             ("output_bitrate_kbps",  "INTEGER"),
             ("force_sw",             "INTEGER DEFAULT 0"),
+            ("dropped_streams",       "TEXT"),
         ]:
             if col not in existing:
                 conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} {typedef}")
@@ -220,7 +233,7 @@ def update_source_hash(record_id: int, source_hash: str) -> None:
 
 def get_latest_statuses_by_paths(paths: list) -> dict:
     """
-    Return {source_path: {"id", "status", "bitrate_kbps", "codec", "duration_secs"}} for
+    Return {source_path: {"id", "status", "bitrate_kbps", "codec", "duration_secs", "dropped_streams"}} for
     the most recent DB record per path.  Only paths with an existing record are included.
 
     For done records, bitrate_kbps is the output (post-conversion) bitrate:
@@ -239,7 +252,7 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             SELECT c.id, c.source_path, c.status,
                    c.source_bitrate_kbps, c.source_codec, c.source_duration_secs,
                    c.output_bitrate_kbps, c.output_size_mb, c.saved_mb, c.saved_pct,
-                   c.force_sw
+                   c.force_sw, c.dropped_streams
               FROM conversions c
              INNER JOIN (
                  SELECT source_path, MAX(id) AS max_id
@@ -265,15 +278,16 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
         else:
             bitrate = row["source_bitrate_kbps"]
         result[row["source_path"]] = {
-            "id":            row["id"],
-            "status":        status,
-            "bitrate_kbps":  bitrate,
-            "codec":         row["source_codec"],
-            "duration_secs": row["source_duration_secs"],
+            "id":             row["id"],
+            "status":         status,
+            "bitrate_kbps":   bitrate,
+            "codec":          row["source_codec"],
+            "duration_secs":  row["source_duration_secs"],
             "output_size_mb": row["output_size_mb"],
-            "saved_mb":      row["saved_mb"],
-            "saved_pct":     row["saved_pct"],
-            "force_sw":      bool(row["force_sw"]),
+            "saved_mb":       row["saved_mb"],
+            "saved_pct":      row["saved_pct"],
+            "force_sw":       bool(row["force_sw"]),
+            "dropped_streams": _json_loads_safe(row["dropped_streams"]),
         }
     return result
 
@@ -437,6 +451,30 @@ def delete_records_by_path(source_path: str) -> int:
             (_norm(source_path),),
         )
         return cur.rowcount
+
+
+def get_dropped_streams(source_path: str) -> list[int]:
+    """Return the list of ffprobe stream indices marked as dropped for this path."""
+    source_path = _norm(source_path)
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT dropped_streams FROM conversions WHERE source_path = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (source_path,),
+        ).fetchone()
+    if not row:
+        return []
+    return _json_loads_safe(row["dropped_streams"])
+
+
+def set_dropped_streams(source_path: str, indices: list[int]) -> None:
+    """Persist the list of dropped ffprobe stream indices for all records of this path."""
+    source_path = _norm(source_path)
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE conversions SET dropped_streams = ? WHERE source_path = ?",
+            (_json.dumps(sorted(set(indices))), source_path),
+        )
 
 
 def save_probe_result(

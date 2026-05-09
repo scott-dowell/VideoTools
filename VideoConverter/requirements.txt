@@ -6,6 +6,7 @@ MarkupSafe==3.0.3
 Werkzeug==3.1.8
 
 # Bitmap subtitle OCR (PGS/VOBSUB → SRT)
-easyocr
+# Tesseract binary required: winget install UB-Mannheim.TesseractOCR
+pytesseract
 Pillow
 pysubs2

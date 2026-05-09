@@ -32,27 +32,45 @@ import config
 import conv_log as _conv_log
 
 # ---------------------------------------------------------------------------
-# Persistent OCR worker — loads EasyOCR model once, handles all queue jobs
+# Persistent OCR worker — Tesseract, handles all queue jobs via bitmap_subs.py --server
 # ---------------------------------------------------------------------------
 
 _ocr_worker: 'subprocess.Popen | None' = None
 _ocr_worker_lock = threading.Lock()
+# Rolling stderr buffer for the OCR worker — drained by a background thread so
+# the pipe never fills up and blocks.  Read with _ocr_stderr_buf.getvalue().
+_ocr_stderr_buf: 'queue.SimpleQueue[str] | None' = None  # lines are enqueued
+_ocr_stderr_lines: list[str] = []   # bounded ring buffer, max 50 lines
+
+
+def _ocr_stderr_drain(proc: 'subprocess.Popen') -> None:
+    """Background thread: drain OCR worker stderr into _ocr_stderr_lines."""
+    global _ocr_stderr_lines
+    try:
+        for line in proc.stderr:
+            _ocr_stderr_lines = (_ocr_stderr_lines + [line.rstrip()])[-50:]
+    except Exception:
+        pass
 
 
 def _get_ocr_worker() -> 'subprocess.Popen':
     """Return the persistent OCR worker process, starting it if needed."""
-    global _ocr_worker
+    global _ocr_worker, _ocr_stderr_lines
     with _ocr_worker_lock:
         if _ocr_worker is None or _ocr_worker.poll() is not None:
             _bsubs_script = os.path.join(os.path.dirname(__file__), "bitmap_subs.py")
+            _ocr_stderr_lines = []
             _ocr_worker = subprocess.Popen(
                 [sys.executable, _bsubs_script, "--server"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=None,   # inherit parent stderr so log messages appear in the console
+                stderr=subprocess.PIPE,  # drained by background thread
                 text=True,
                 bufsize=1,
             )
+            t = threading.Thread(target=_ocr_stderr_drain, args=(_ocr_worker,),
+                                 daemon=True, name="ocr-stderr-drain")
+            t.start()
         return _ocr_worker
 
 
@@ -124,8 +142,8 @@ ProgressCb = Callable[[float, float, int], None]   # pct, fps, eta_secs
 # FFmpeg command builders
 # ---------------------------------------------------------------------------
 
-def _qsv_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
-    return [
+def _qsv_cmd(input_path: str, output_path: str, quality: int, dropped_streams: list[int] | None = None) -> list[str]:
+    cmd = [
         "ffmpeg", "-y",
         "-stats_period", "1",
         "-fflags", "+discardcorrupt",
@@ -139,12 +157,15 @@ def _qsv_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
         "-map", "0:v:0",
         "-map", "0:a?",
         "-map", "0:s?",
-        output_path,
     ]
+    for idx in (dropped_streams or []):
+        cmd += ["-map", f"-0:{idx}"]
+    cmd.append(output_path)
+    return cmd
 
 
-def _sw_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
-    return [
+def _sw_cmd(input_path: str, output_path: str, quality: int, dropped_streams: list[int] | None = None) -> list[str]:
+    cmd = [
         "ffmpeg", "-y",
         "-stats_period", "1",
         "-fflags", "+discardcorrupt",
@@ -159,8 +180,11 @@ def _sw_cmd(input_path: str, output_path: str, quality: int) -> list[str]:
         "-map", "0:v:0",
         "-map", "0:a?",
         "-map", "0:s?",
-        output_path,
     ]
+    for idx in (dropped_streams or []):
+        cmd += ["-map", f"-0:{idx}"]
+    cmd.append(output_path)
+    return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +335,19 @@ def _run_ffmpeg(
             pid_holder[0] = 0
         if proc.returncode == 0:
             return True
+        # Windows exception codes (e.g. 0xC0000005 ACCESS_VIOLATION) indicate a
+        # hard process crash.  The output file is unreliable — never treat as success.
+        # These show up as large positive ints (>= 0x80000000) or negative ints on Windows.
+        _is_windows_crash = (
+            proc.returncode < 0
+            or proc.returncode >= 0x80000000
+        )
+        if _is_windows_crash:
+            log(
+                f"ERROR: ffmpeg crashed with code {proc.returncode} "
+                f"(0x{proc.returncode & 0xFFFFFFFF:08X}) — output is unreliable."
+            )
+            return False
         # Non-zero exit — if an output path was provided, check whether the
         # output is actually valid (some streams such as dvd_subtitle cause
         # ffmpeg to exit non-zero even after a complete, valid encode).
@@ -327,11 +364,22 @@ def _run_ffmpeg(
                         .split("=")[1]
                     )
                     if dur > 0:
-                        log(
-                            f"NOTE: ffmpeg exited {proc.returncode} but output is "
-                            "valid — treating as success (non-fatal codec warning)"
-                        )
-                        return True
+                        # If we know the source duration, verify the output covers
+                        # at least 95% of it.  A truncated output (e.g. from a
+                        # corrupt source that caused mid-encode errors) must not be
+                        # silently accepted.
+                        if duration_secs > 0 and dur < duration_secs * 0.95:
+                            log(
+                                f"NOTE: ffmpeg exited {proc.returncode} and output "
+                                f"duration ({dur:.1f}s) is significantly shorter than "
+                                f"source ({duration_secs:.1f}s) — treating as failure."
+                            )
+                        else:
+                            log(
+                                f"NOTE: ffmpeg exited {proc.returncode} but output is "
+                                "valid — treating as success (non-fatal codec warning)"
+                            )
+                            return True
                 except (ValueError, StopIteration):
                     pass
         return False
@@ -373,12 +421,13 @@ def compress_simple(
     conv_logger: "_conv_log.ConversionLogger | None" = None,
     tmp_holder: list[str] | None = None,
     force_sw: bool = False,
+    dropped_streams: list[int] | None = None,
 ) -> tuple[bool, str]:
     """
     Normal-mode compression.
 
     - Keeps source container (MP4→MP4, MKV→MKV, anything else→MKV)
-    - Copies all audio and subtitle tracks unchanged
+    - Copies all audio and subtitle tracks unchanged (minus any dropped)
     - Tries hevc_qsv first (unless force_sw=True), falls back to libx265
     - Discards output and returns (False, "") if result is not smaller than source
 
@@ -412,7 +461,7 @@ def compress_simple(
             log("Compressing with hevc_qsv...")
             qsv_log = conv_logger.tee(log, "compress_qsv") if conv_logger else log
             success = _run_ffmpeg(
-                _qsv_cmd(input_path, tmp_path, quality), qsv_log, stop_event,
+                _qsv_cmd(input_path, tmp_path, quality, dropped_streams), qsv_log, stop_event,
                 duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
                 output_path=tmp_path,
             )
@@ -426,7 +475,7 @@ def compress_simple(
             sw_quality = quality if quality <= 51 else config.SW_HEVC_CRF
             sw_log = conv_logger.tee(log, "compress_sw") if conv_logger else log
             success = _run_ffmpeg(
-                _sw_cmd(input_path, tmp_path, sw_quality), sw_log, stop_event,
+                _sw_cmd(input_path, tmp_path, sw_quality, dropped_streams), sw_log, stop_event,
                 duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
                 output_path=tmp_path,
             )
@@ -456,8 +505,10 @@ def compress_simple(
                 "-map", "0:v:0",
                 "-map", "0:a?",
                 "-map", "0:s?",
-                tmp_path,
             ]
+            for _di in (dropped_streams or []):
+                corrupt_cmd += ["-map", f"-0:{_di}"]
+            corrupt_cmd.append(tmp_path)
             success = _run_ffmpeg(
                 corrupt_cmd, sw_log2, stop_event,
                 duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
@@ -481,7 +532,7 @@ def compress_simple(
             return False, "no_savings"
 
         # Verify audio/subtitle tracks survived before atomically replacing source
-        ok_tracks, track_reason = _verify_tracks_preserved(input_path, tmp_path)
+        ok_tracks, track_reason = _verify_tracks_preserved(input_path, tmp_path, dropped_streams=dropped_streams)
         if not ok_tracks:
             log(f"ERROR: track verification failed — aborting to preserve source: {track_reason}")
             os.remove(tmp_path)
@@ -530,19 +581,65 @@ def compress_simple(
 # ---------------------------------------------------------------------------
 
 def _ffprobe_duration(input_path: str) -> float:
-    """Return duration in seconds via ffprobe, or 0.0 on failure."""
+    """Return duration in seconds via ffprobe, or 0.0 on failure.
+
+    Prefers the video stream's actual duration over the container-level
+    format duration.  Older MKV files (mkvmerge v7, 2015-era) set
+    format.duration to the last chapter end time, which can be several
+    minutes longer than the actual video track.  When the video stream
+    has a DURATION statistics tag (Matroska) or a direct duration field
+    (MP4/TS) that is meaningfully shorter than format.duration, that
+    value is used so that _verify_output compares like-for-like.
+    """
     try:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "quiet",
                 "-print_format", "json",
-                "-show_entries", "format=duration",
+                "-show_format",
+                "-show_streams",
+                "-select_streams", "v:0",
                 input_path,
             ],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
         )
         data = json.loads(result.stdout)
-        return float(data["format"]["duration"])
+        fmt_dur = float(data["format"]["duration"])
+
+        # Try to get the video stream duration, which is more reliable than
+        # the container-level duration for old/malformed MKV files.
+        streams = data.get("streams", [])
+        if streams:
+            v = streams[0]
+            v_dur: float | None = None
+
+            # MP4/TS: stream has an explicit duration field
+            raw = v.get("duration")
+            if raw is not None:
+                try:
+                    v_dur = float(raw)
+                except (TypeError, ValueError):
+                    pass
+
+            # MKV: Matroska statistics tag "DURATION" → "HH:MM:SS.mmm..."
+            if v_dur is None:
+                dur_tag = v.get("tags", {}).get("DURATION", "")
+                if dur_tag:
+                    try:
+                        h, m, s = dur_tag.split(":")
+                        v_dur = int(h) * 3600 + int(m) * 60 + float(s)
+                    except Exception:
+                        pass
+
+            if v_dur is not None and v_dur > 0:
+                # If the format duration is more than 2% longer than the
+                # video stream duration the container metadata is inflated
+                # (e.g. chapter end time past the last frame).  Use the
+                # video stream duration as the reference instead.
+                if fmt_dur > 0 and (fmt_dur - v_dur) / fmt_dur > 0.02:
+                    return v_dur
+
+        return fmt_dur
     except Exception:
         return 0.0
 
@@ -638,13 +735,19 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
 # Output integrity check
 # ---------------------------------------------------------------------------
 
-def _verify_tracks_preserved(src_path: str, out_path: str, check_subs: bool = True) -> tuple[bool, str]:
+def _verify_tracks_preserved(
+    src_path: str,
+    out_path: str,
+    check_subs: bool = True,
+    dropped_streams: list[int] | None = None,
+) -> tuple[bool, str]:
     """
     Probe source and output with ffprobe and verify that no audio or subtitle
     tracks were silently dropped.
 
     Rules:
-      - Output must have at least as many audio streams as the source.
+      - Output must have at least as many audio streams as the source, minus
+        any intentionally dropped audio stream indices.
       - If check_subs is True and the source has any subtitle streams, the
         output must have at least one.
 
@@ -672,7 +775,11 @@ def _verify_tracks_preserved(src_path: str, out_path: str, check_subs: bool = Tr
     except Exception as exc:
         return False, f"ffprobe error during track verification: {exc}"
 
-    src_audio = sum(1 for s in src_streams if s.get("codec_type") == "audio")
+    _dropped = set(dropped_streams or [])
+    src_audio_streams = [s for s in src_streams if s.get("codec_type") == "audio"]
+    # Subtract intentionally-dropped audio tracks from the expected count
+    dropped_audio = sum(1 for s in src_audio_streams if s.get("index") in _dropped)
+    src_audio = len(src_audio_streams) - dropped_audio
     out_audio = sum(1 for s in out_streams if s.get("codec_type") == "audio")
     src_subs  = sum(1 for s in src_streams if s.get("codec_type") == "subtitle")
     out_subs  = sum(1 for s in out_streams if s.get("codec_type") == "subtitle")
@@ -750,6 +857,53 @@ def _verify_output(output_path: str, src_duration: float) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# OCR one-shot helper
+# ---------------------------------------------------------------------------
+
+def _ocr_oneshot(input_path: str, out_dir: str, log: LogFn) -> 'list[str] | None':
+    """
+    Run OCR as an isolated one-shot subprocess.  Slower than the persistent
+    worker (Tesseract subprocess per frame) but completely immune to
+    any state corruption left by a previous native crash.
+
+    Returns list of generated SRT paths, or None on any failure.
+    """
+    result_json = os.path.join(out_dir, f"_ocr_result_{os.getpid()}.json")
+    bsubs_script = os.path.join(os.path.dirname(__file__), "bitmap_subs.py")
+    cmd = [sys.executable, bsubs_script, input_path, out_dir, "en", result_json]
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=900,   # 15-min ceiling — generously covers 600+ frames
+        )
+        if r.returncode != 0:
+            log(f"WARNING: OCR one-shot exited {r.returncode}")
+            for _line in (r.stderr or "").splitlines()[-8:]:
+                if _line.strip():
+                    log(f"  [ocr] {_line.rstrip()}")
+            return None
+        if os.path.exists(result_json):
+            with open(result_json, encoding="utf-8") as _f:
+                return json.load(_f)
+        return []
+    except subprocess.TimeoutExpired:
+        log("WARNING: OCR one-shot timed out after 15 minutes")
+        return None
+    except Exception as _exc:
+        log(f"WARNING: OCR one-shot error: {_exc}")
+        return None
+    finally:
+        try:
+            os.remove(result_json)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Anime mode helpers
 # ---------------------------------------------------------------------------
 
@@ -802,6 +956,32 @@ def is_hi10(input_path: str) -> bool:
         return False
 
 
+def _is_av1(input_path: str) -> bool:
+    """Return True when the first video stream is AV1.
+
+    AV1 files are not re-encoded; the video is stream-copied into the
+    MP4 container while audio and subtitles go through the normal path.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-select_streams", "v:0",
+                "-print_format", "json",
+                "-show_streams",
+                input_path,
+            ],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+        )
+        data = json.loads(result.stdout)
+        streams = data.get("streams", [])
+        if not streams:
+            return False
+        return streams[0].get("codec_name", "").lower() in ("av1", "av1_cuvid")
+    except Exception:
+        return False
+
+
 def _is_potentially_english(lang: str, title: str) -> bool:
     """Return True if a subtitle stream should be treated as English.
 
@@ -828,6 +1008,7 @@ def remux_to_mp4(
     hi10: bool | None = None,
     conv_logger: "_conv_log.ConversionLogger | None" = None,
     tmp_holder: list[str] | None = None,
+    dropped_streams: list[int] | None = None,
 ) -> tuple[bool, str]:
     """
     Anime-mode remux into MP4.
@@ -880,14 +1061,25 @@ def remux_to_mp4(
     sub_streams   = [s for s in streams if s.get("codec_type") == "subtitle"]
 
     # ------------------------------------------------------------------
-    # Detect external subtitle files alongside the source
-    # Matches files with the same stem (.srt, .ass, .ssa)
+    # Detect external subtitle files alongside the source.
+    #
+    # Two matching rules (case-insensitive, sorted alphabetically so
+    # track order is deterministic):
+    #   Exact  — stem == video_stem          e.g. Title.srt / Title.ass
+    #   Prefix — stem == video_stem.<suffix> e.g. Title.en.srt
+    #                                             Title.pgs1.srt (ocr_subs.py output)
+    #                                             Title.signs.ass
+    # The dot separator prevents false positives from unrelated files
+    # whose names merely start with the same word.
     # ------------------------------------------------------------------
     _EXT_SUB_EXTS = {".srt", ".ass", ".ssa"}
     ext_sub_paths: list[str] = []
     _src_stem_lower = Path(input_path).stem.lower()
     for _p in sorted(Path(input_path).parent.iterdir()):
-        if _p.suffix.lower() in _EXT_SUB_EXTS and _p.stem.lower() == _src_stem_lower:
+        if _p.suffix.lower() not in _EXT_SUB_EXTS:
+            continue
+        _ps = _p.stem.lower()
+        if _ps == _src_stem_lower or _ps.startswith(_src_stem_lower + "."):
             ext_sub_paths.append(str(_p))
             log(f"Found external subtitle: {_p.name}")
 
@@ -1024,12 +1216,18 @@ def remux_to_mp4(
     pgs_sub_indices     = []   # stream indices for PGS subs (-> OCR -> SRT)
     copy_bitmap_indices = []   # stream indices for dvd_subtitle/vobsub (-> copy)
 
+    _dropped = set(dropped_streams or [])
+
     for s in sub_streams:
         codec = s.get("codec_name", "").lower()
         tags  = s.get("tags", {})
         lang  = tags.get("language", "")
         title = tags.get("title", "")
         eng   = _is_potentially_english(lang, title)
+        sidx  = s.get("index", -1)
+        if sidx in _dropped:
+            log(f"Skipping dropped subtitle stream #{sidx} ({codec}, {lang})")
+            continue
         if codec in TEXT_SUB_CODECS:
             # Keep all text subtitle tracks regardless of language — they are
             # tiny and mislabeled language tags (common in anime rips) should
@@ -1043,29 +1241,44 @@ def remux_to_mp4(
                 copy_bitmap_indices.append(s["index"])
 
     # If no English subs kept at all but there's exactly one sub track, keep it
-    # (sole-sub rule: likely English even if not tagged)
+    # (sole-sub rule: likely English even if not tagged) — unless it's dropped.
     if not english_text_subs and not pgs_sub_indices and not copy_bitmap_indices and len(sub_streams) == 1:
         s = sub_streams[0]
         codec = s.get("codec_name", "").lower()
-        if codec in TEXT_SUB_CODECS:
-            english_text_subs.append(s["index"])
-        elif codec in PGS_SUB_CODECS:
-            pgs_sub_indices.append(s["index"])
+        if s.get("index", -1) not in _dropped:
+            if codec in TEXT_SUB_CODECS:
+                english_text_subs.append(s["index"])
+            elif codec in PGS_SUB_CODECS:
+                pgs_sub_indices.append(s["index"])
         elif codec in COPY_BITMAP_CODECS:
             copy_bitmap_indices.append(s["index"])
 
     # ------------------------------------------------------------------
     # OCR bitmap subs
-    # Run in a subprocess so a native crash inside PyTorch/EasyOCR cannot
+    # Skip if pre-OCR'd PGS sidecar files (.pgsN.srt) already exist —
+    # produced by the standalone ocr_subs.py tool and already included
+    # in ext_sub_paths above.
+    # Run in a subprocess so any native crash in Tesseract cannot
     # take down the Flask server process.
     # ------------------------------------------------------------------
+    _pgs_sidecars = [
+        p for p in ext_sub_paths
+        if re.search(r"\.pgs\d+\.srt$", p, re.IGNORECASE)
+    ]
+    if _pgs_sidecars and pgs_sub_indices:
+        log(
+            f"Found {len(_pgs_sidecars)} pre-OCR\'d PGS sidecar(s) "
+            f"({', '.join(Path(p).name for p in _pgs_sidecars)}) "
+            f"\u2014 skipping OCR step."
+        )
+        pgs_sub_indices = []
     srt_paths: list[str] = []
     if pgs_sub_indices:
         import bitmap_subs as _bsubs
         if not _bsubs.DEPS_OK:
             log(
                 "ERROR: bitmap subtitle track(s) found but OCR dependencies are not installed. "
-                "Run: pip install easyocr Pillow pysubs2"
+                "Run: pip install pytesseract Pillow pysubs2 + winget install UB-Mannheim.TesseractOCR"
             )
             return False, ""
         log(f"OCR bitmap subs ({len(pgs_sub_indices)} track(s))...")
@@ -1081,19 +1294,22 @@ def remux_to_mp4(
                 _result_line = _worker.stdout.readline()
                 if not _result_line:
                     log(f"WARNING: OCR worker closed unexpectedly (attempt {_ocr_try+1}/{_ocr_attempts}) — restarting worker")
-                    # The worker is already dead (readline returned empty);
-                    # _get_ocr_worker() will spawn a fresh one on next call
-                    # because poll() will return non-None.
+                    for _el in _ocr_stderr_lines[-10:]:
+                        if _el.strip():
+                            log(f"  [ocr stderr] {_el}")
                     continue
                 _result = json.loads(_result_line.strip())
                 if not _result.get("ok"):
-                    log(f"ERROR: OCR worker reported failure: {_result.get('error')} — aborting to preserve subtitles")
-                    return False, ""
+                    log(f"WARNING: OCR worker reported failure: {_result.get('error')} (attempt {_ocr_try+1}/{_ocr_attempts})")
+                    continue
                 srt_paths = _result["paths"]
                 _ocr_success = True
                 break
             except Exception as exc:
                 log(f"WARNING: OCR worker failed: {exc} (attempt {_ocr_try+1}/{_ocr_attempts})")
+                for _el in _ocr_stderr_lines[-10:]:
+                    if _el.strip():
+                        log(f"  [ocr stderr] {_el}")
                 # Kill the worker so _get_ocr_worker() spawns a fresh one
                 try:
                     _worker.kill()
@@ -1101,8 +1317,16 @@ def remux_to_mp4(
                 except Exception:
                     pass
         if not _ocr_success:
-            log("ERROR: OCR worker crashed on all retry attempts — aborting to preserve subtitles")
-            return False, ""
+            # Persistent worker crashed (likely a native PyTorch fault).
+            # Retry once with a completely fresh subprocess — no shared state.
+            log("Persistent OCR worker failed — retrying with isolated one-shot subprocess...")
+            _oneshot_result = _ocr_oneshot(input_path, config.LOCAL_TEMP_DIR, log)
+            if _oneshot_result is not None:
+                srt_paths = _oneshot_result
+                _ocr_success = True
+            else:
+                log("WARNING: OCR failed on all attempts — continuing without PGS subtitles (text subs preserved)")
+                srt_paths = []
     if copy_bitmap_indices:
         log(f"Copying {len(copy_bitmap_indices)} dvd_subtitle/vobsub track(s) directly into MP4...")
 
@@ -1395,6 +1619,7 @@ def remux_to_mp4(
         encoder_used = ""
         _pre_audio: list[str | None] | None = None       # populated on pre-encode attempts
         _extracted_text_srts: list[str] | None = None   # populated on sub-extraction attempt
+        _skip_to_srt_extract = False  # set True when DTS loop kills attempt → jump to SRT path
 
         for attempt, (inc_subs, extra, use_preenc, use_extracted_subs) in enumerate([
             (True,  None,                                                               False, False),  # 0: normal
@@ -1406,6 +1631,12 @@ def remux_to_mp4(
         ]):
             if stop_event.is_set():
                 return False, ""
+
+            # If a previous attempt was killed by the DTS warn loop and we have
+            # text subs to extract, skip the intermediate DTS-flag attempts and
+            # go straight to the SRT pre-extraction path.
+            if _skip_to_srt_extract and not use_extracted_subs and inc_subs:
+                continue
 
             # On the first pre-encode attempt, run the pre-encode step
             if use_preenc and _pre_audio is None:
@@ -1477,6 +1708,7 @@ def remux_to_mp4(
                 output_lines: list[str] = []
                 dts_error = False
                 _timed_out = False
+                _dts_loop_killed = False
                 _dts_warn_count = 0
                 _DTS_WARN_LIMIT = 50  # kill after 50 consecutive DTS warnings
 
@@ -1498,6 +1730,7 @@ def remux_to_mp4(
                             proc.kill()
                             proc.wait()
                             _timed_out = True
+                            _dts_loop_killed = True
                             log(
                                 f"WARNING: remux attempt {attempt+1} stuck in DTS "
                                 f"warning loop (>{_DTS_WARN_LIMIT} warnings) — "
@@ -1524,9 +1757,9 @@ def remux_to_mp4(
                         if m:
                             elapsed  = _parse_time(m.group("time"))
                             fps      = float(m.group("fps") or 0)
+                            speed    = float(m.group("speed") or 0)
                             pct      = min(100.0, elapsed / duration * 100)
-                            remaining = (duration - elapsed) / fps if fps > 0 else 0
-                            eta_secs  = max(0, int(remaining))
+                            eta_secs = max(0, int((duration - elapsed) / speed)) if speed > 0 else 0
                             try:
                                 progress_cb(pct, fps, eta_secs)
                             except Exception:
@@ -1584,6 +1817,11 @@ def remux_to_mp4(
                     if conv_logger:
                         conv_logger.mark_fail_at("remux attempt 1 (non-recoverable error)")
                     return False, ""
+            # If killed by the DTS warn loop and we have text subs, skip straight
+            # to the SRT extraction attempt — intermediate DTS-flag variants won't help.
+            if _dts_loop_killed and english_text_subs and not use_extracted_subs:
+                log("DTS warn loop detected — skipping to SRT pre-extraction attempt")
+                _skip_to_srt_extract = True
             # Timestamp error, silent crash, or aac_mf failure — continue to next attempt
 
         else:
@@ -1659,6 +1897,7 @@ def compress_and_remux(
     pid_holder: list[int] | None = None,
     conv_logger: "_conv_log.ConversionLogger | None" = None,
     tmp_holder: list[str] | None = None,
+    dropped_streams: list[int] | None = None,
 ) -> tuple[bool, str]:
     """
     Anime normal-H.264 path: compress with QSV/SW first, then remux the
@@ -1692,7 +1931,29 @@ def compress_and_remux(
                 pid_holder=pid_holder,
                 conv_logger=conv_logger,
                 tmp_holder=tmp_holder,
+                dropped_streams=dropped_streams,
             )
+
+    # Fast-exit: if source video is AV1, skip compression entirely —
+    # stream-copy the video directly into MP4 with AAC audio and subs.
+    # hi10=True reuses the same "copy video" branch in remux_to_mp4 and
+    # disables the output-size-vs-source check (there are no savings to
+    # measure when the video isn't being re-encoded).
+    if _is_av1(input_path):
+        log("AV1 source — stream-copying video into MP4 (no re-encode).")
+        return remux_to_mp4(
+            input_path=input_path,
+            output_dir=output_dir,
+            log=log,
+            stop_event=stop_event,
+            quality=quality,
+            progress_cb=progress_cb,
+            pid_holder=pid_holder,
+            hi10=True,
+            conv_logger=conv_logger,
+            tmp_holder=tmp_holder,
+            dropped_streams=dropped_streams,
+        )
 
     # Step 1: compress to a unique temp subdir so the path never collides
     # with compress_simple's own internal tmp_path (which also lives in
@@ -1725,6 +1986,7 @@ def compress_and_remux(
         pid_holder=pid_holder,
         conv_logger=conv_logger,
         tmp_holder=tmp_holder,
+        dropped_streams=dropped_streams,
     )
 
     if not ok:
@@ -1760,6 +2022,7 @@ def compress_and_remux(
         hi10=True,
         conv_logger=conv_logger,
         tmp_holder=tmp_holder,
+        dropped_streams=dropped_streams,
     )
 
     # Clean up intermediate and its temp dir
@@ -1790,6 +2053,7 @@ def convert_video(
     pid_holder: list[int] | None = None,
     tmp_holder: list[str] | None = None,
     force_sw: bool = False,
+    dropped_streams: list[int] | None = None,
 ) -> dict:
     """
     Convert a single video file.  Returns a result dict:
@@ -1827,6 +2091,7 @@ def convert_video(
             pid_holder=pid_holder,
             conv_logger=clog,
             tmp_holder=tmp_holder,
+            dropped_streams=dropped_streams,
         )
 
         if not ok:
@@ -1859,6 +2124,7 @@ def convert_video(
                 "error":          f"integrity: {reason}",
                 "conv_logger":    clog,
             }
+        log("Integrity check passed.")
 
         out_size  = os.path.getsize(output_path)
         out_mb    = out_size / (1024 * 1024)
@@ -1889,6 +2155,7 @@ def convert_video(
         conv_logger = clog,
         tmp_holder  = tmp_holder,
         force_sw    = force_sw,
+        dropped_streams = dropped_streams,
     )
 
     if not ok:
@@ -1926,6 +2193,7 @@ def convert_video(
             "error":        f"integrity: {reason}",
             "conv_logger":  clog,
         }
+    log("Integrity check passed.")
 
     out_size   = os.path.getsize(output_path)
     out_mb     = out_size / (1024 * 1024)

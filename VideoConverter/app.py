@@ -58,6 +58,9 @@ _job: dict = {
     "files":           [],
     "log":             [],
     "paused":          False,
+    "phase":           "",          # "" | "ocr_batch" | "converting"
+    "ocr_batch":       {"total": 0, "done": 0, "current_file": "", "files": []},
+    "steps":           [],          # per-file step checklist
 }
 
 _PROCESS_ALL_ACCESS = 0x1F0FFF
@@ -97,6 +100,117 @@ def _job_log(msg: str) -> None:
         _job["log"].append(msg)
         if len(_job["log"]) > 500:
             _job["log"] = _job["log"][-400:]
+
+
+def _write_crash_log(msg: str) -> None:
+    """Append a crash/traceback to a persistent file so it survives restarts."""
+    try:
+        _crash_path = os.path.join(os.path.dirname(__file__), "logs", "worker_crashes.log")
+        os.makedirs(os.path.dirname(_crash_path), exist_ok=True)
+        with open(_crash_path, "a", encoding="utf-8") as _cf:
+            from datetime import datetime as _dt
+            _cf.write(f"\n{'='*60}\n{_dt.now().isoformat(timespec='seconds')}\n{msg}\n")
+    except Exception:
+        pass
+
+
+def _step(step_id: str, state: str, detail: str = "", attempt: int = 1) -> None:
+    """Update a single step's state in the current job under the lock."""
+    with _job_lock:
+        for s in _job["steps"]:
+            if s["id"] == step_id:
+                s["state"]   = state
+                s["detail"]  = detail
+                s["attempt"] = attempt
+                return
+
+
+def _set_phase(phase: str) -> None:
+    with _job_lock:
+        _job["phase"] = phase
+
+
+def _build_steps(file_info: dict, anime_mode: bool) -> list:
+    """Build the per-file step list based on codec and stream types."""
+    streams  = file_info.get("streams") or {}
+    vid      = streams.get("video") or {}
+    v_codec  = (vid.get("codec") or "").lower() if isinstance(vid, dict) else ""
+    subs     = streams.get("subs") or []
+    has_pgs  = any(
+        (s.get("codec") or "").upper() in ("PGS", "HDMV_PGS_SUBTITLE", "PGSSUB")
+        for s in subs
+    )
+    steps: list = []
+    if anime_mode:
+        ocr_state  = "waiting" if has_pgs else "skipped"
+        ocr_detail = "" if has_pgs else "No PGS tracks"
+        steps.append({"id": "ocr",   "label": "OCR",   "state": ocr_state,  "detail": ocr_detail, "attempt": 1})
+        if v_codec in ("av1", "av1_cuvid"):
+            steps.append({"id": "remux", "label": "Remux", "state": "waiting", "detail": "AV1 stream-copy \u2192 MP4", "attempt": 1})
+        elif v_codec in ("hevc", "hevc_cuvid", "hevc_qsv"):
+            steps.append({"id": "remux", "label": "Remux", "state": "waiting", "detail": "HEVC stream-copy \u2192 MP4", "attempt": 1})
+        else:
+            steps.append({"id": "compress", "label": "Compress", "state": "waiting", "detail": "",           "attempt": 1})
+            steps.append({"id": "audio",    "label": "Audio",    "state": "waiting", "detail": "",           "attempt": 1})
+            steps.append({"id": "remux",    "label": "Remux",    "state": "waiting", "detail": "MKV \u2192 MP4", "attempt": 1})
+        steps.append({"id": "verify", "label": "Verify", "state": "waiting", "detail": "", "attempt": 1})
+    else:
+        steps.append({"id": "compress", "label": "Compress", "state": "waiting", "detail": "", "attempt": 1})
+        steps.append({"id": "verify",   "label": "Verify",   "state": "waiting", "detail": "", "attempt": 1})
+    return steps
+
+
+def _process_step_log(msg: str, attempt_counter: list) -> None:
+    """Match a converter log line and advance step states accordingly."""
+    m = msg.strip()
+    if m == "Anime mode: compressing then remuxing to MP4.":
+        _step("compress", "running", "hevc_qsv")
+    elif m.startswith("Compressing with "):
+        enc = m.split("Compressing with ", 1)[1].rstrip(".")
+        _step("compress", "running", enc)
+    elif m == "Remuxing compressed output to MP4...":
+        _step("compress", "done")
+        attempt_counter[0] = 1
+        _step("remux", "running", "attempt 1/6")
+    elif m == "Remuxing to MP4...":
+        if not attempt_counter[0]:
+            attempt_counter[0] = 1
+        _step("remux", "running", f"attempt {attempt_counter[0]}/6")
+    elif m.startswith("DTS overflow detected"):
+        attempt_counter[0] += 1
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 DTS fix")
+    elif m.startswith("DTS fix retry"):
+        attempt_counter[0] += 1
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 genpts fix")
+    elif m.startswith("AAC mux failed"):
+        attempt_counter[0] += 1
+        _step("audio", "running", "pre-encoding individually")
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 audio pre-enc")
+    elif m.startswith("Subtitle DTS fix"):
+        attempt_counter[0] += 1
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 SRT pre-extract")
+    elif m.startswith("Retrying with pre-extracted SRT"):
+        _step("remux", "running", f"attempt {attempt_counter[0]}/6 \u00b7 SRT subs")
+    elif m.startswith("Retrying without subtitle"):
+        attempt_counter[0] += 1
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 no subs")
+    elif "Pre-encoding audio track" in m:
+        detail = m.split("Pre-encoding audio track", 1)[1].strip().rstrip(".")
+        _step("audio", "running", detail)
+    elif m.startswith("AV1 source"):
+        if not attempt_counter[0]:
+            attempt_counter[0] = 1
+        _step("remux", "running", f"AV1 stream-copy \u00b7 attempt {attempt_counter[0]}/6")
+    elif m.startswith("Integrity check failed"):
+        _step("verify", "failed", m.split("Integrity check failed:", 1)[-1].strip())
+    elif m.startswith("Done. Saved"):
+        _step("audio", "done")
+        _step("remux", "done")
+        _step("verify", "running")
+    elif m == "Integrity check passed.":
+        _step("verify", "done")
+    elif m.startswith("Skipped \u2013 output was not smaller"):
+        _step("compress", "failed", "no savings")
 
 
 def _utcnow() -> str:
@@ -178,14 +292,49 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             # failed and restart with the remaining files.  This ensures one
             # bad file doesn't block all the others.
             _remaining = list(_ocr_paths)
+
+            # Initialise OCR batch state for the UI.
+            with _job_lock:
+                _job["phase"] = "ocr_batch"
+                _job["ocr_batch"] = {
+                    "total":        len(_ocr_paths),
+                    "done":         0,
+                    "current_file": os.path.basename(_ocr_paths[0]) if _ocr_paths else "",
+                    "files": [
+                        {"name": os.path.basename(p), "state": "waiting"}
+                        for p in _ocr_paths
+                    ],
+                }
+                # Mark the first file as running immediately.
+                if _job["ocr_batch"]["files"]:
+                    _job["ocr_batch"]["files"][0]["state"] = "running"
+
             while _remaining and not _stop_event.is_set():
                 _ocr_bn_map: dict[str, str] = {os.path.basename(p): p for p in _remaining}
                 _current_ocr_path = _remaining[0]
                 crashed = False
+                _ocr_proc = None
+                _ocr_rsp_file = None
                 try:
                     _manifest_args = ["--skip-manifest", _manifest_path] if _manifest_path else []
+                    # Build base args; use a response file if the command line would
+                    # exceed Windows' ~32 KB limit to avoid [WinError 206].
+                    _base_cmd = [sys.executable, _ocr_script] + _manifest_args
+                    _cmdline_len = sum(len(p) + 3 for p in _base_cmd + _remaining)
+                    if _cmdline_len > 28000:
+                        import tempfile as _tempfile
+                        _rsp = _tempfile.NamedTemporaryFile(
+                            mode="w", suffix=".txt", delete=False,
+                            encoding="utf-8", prefix="ocr_rsp_",
+                        )
+                        _rsp.write("\n".join(_remaining))
+                        _rsp.close()
+                        _ocr_rsp_file = _rsp.name
+                        _file_args = [f"@{_ocr_rsp_file}"]
+                    else:
+                        _file_args = _remaining
                     _ocr_proc = _sp.Popen(
-                        [sys.executable, _ocr_script] + _manifest_args + _remaining,
+                        _base_cmd + _file_args,
                         stdout=_sp.PIPE,
                         stderr=_sp.STDOUT,
                         text=True,
@@ -194,10 +343,25 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                         env=_ocr_env,
                     )
                     _prev_was_sep = False
+                    _ocr_prev_path = _current_ocr_path
                     for _ocr_line in _ocr_proc.stdout:
                         stripped = _ocr_line.rstrip()
                         if _prev_was_sep and stripped.startswith("  ") and stripped.strip() in _ocr_bn_map:
-                            _current_ocr_path = _ocr_bn_map[stripped.strip()]
+                            _new_path = _ocr_bn_map[stripped.strip()]
+                            if _new_path != _current_ocr_path:
+                                # Mark previous as done, new one as running
+                                _prev_bn = os.path.basename(_current_ocr_path)
+                                _new_bn  = os.path.basename(_new_path)
+                                with _job_lock:
+                                    b = _job["ocr_batch"]
+                                    for _fi in b["files"]:
+                                        if _fi["name"] == _prev_bn:
+                                            _fi["state"] = "done"
+                                            b["done"] = b.get("done", 0) + 1
+                                        if _fi["name"] == _new_bn:
+                                            _fi["state"] = "running"
+                                    b["current_file"] = _new_bn
+                                _current_ocr_path = _new_path
                         _prev_was_sep = (stripped == "-" * 60)
                         if stripped:
                             _job_log(f"[ocr] {stripped}")
@@ -210,6 +374,12 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                 except Exception as _ocr_exc:
                     _job_log(f"[ocr] Batch OCR error: {_ocr_exc}")
                     crashed = True
+                finally:
+                    if _ocr_rsp_file and os.path.exists(_ocr_rsp_file):
+                        try:
+                            os.remove(_ocr_rsp_file)
+                        except OSError:
+                            pass
 
                 if crashed:
                     # Check which files in this batch now have sidecars
@@ -224,7 +394,8 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                     # occurred AND has no sidecar — mark it permanently failed.
                     if _current_ocr_path in _no_sidecar:
                         ocr_failed_paths.add(_current_ocr_path)
-                        _job_log(f"[ocr] Crash on {os.path.basename(_current_ocr_path)} (exit {_ocr_proc.returncode}) — marking as failed, retrying remaining files.")
+                        _exit = _ocr_proc.returncode if _ocr_proc is not None else "N/A"
+                        _job_log(f"[ocr] Crash on {os.path.basename(_current_ocr_path)} (exit {_exit}) — marking as failed, retrying remaining files.")
 
                     # Restart with files that still need OCR (excluding the crasher)
                     _remaining = [p for p in _no_sidecar if p != _current_ocr_path]
@@ -257,12 +428,39 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             if ocr_failed_paths:
                 _job_log(f"[ocr] {len(ocr_failed_paths)} file(s) have no OCR output — will mark as failed.")
 
+            # Stamp each file with its OCR outcome so the UI can show a sub-badge.
+            # "done"    → OCR ran and produced a .pgs*.srt sidecar
+            # "skipped" → no active PGS bitmap tracks; OCR was a no-op
+            for _fp in _ocr_paths:
+                if _fp in ocr_failed_paths:
+                    continue  # will be marked failed overall; no sub-badge needed
+                _stem    = os.path.splitext(os.path.basename(_fp))[0]
+                _parent  = os.path.dirname(_fp)
+                _has_srt = bool(_glob.glob(os.path.join(_parent, f"{_stem}.pgs*.srt")))
+                _ocr_idx = _path_to_idx.get(_fp)
+                if _ocr_idx is not None:
+                    with _job_lock:
+                        _job["files"][_ocr_idx]["ocr_status"] = "done" if _has_srt else "skipped"
+
             # Clean up the drop manifest temp file
             if _manifest_path and os.path.exists(_manifest_path):
                 try:
                     os.remove(_manifest_path)
                 except OSError:
                     pass
+
+            # OCR batch is done — mark final states and clear the batch UI.
+            with _job_lock:
+                b = _job["ocr_batch"]
+                for _fi in b["files"]:
+                    _fp_full = next((p for p in _ocr_paths if os.path.basename(p) == _fi["name"]), None)
+                    if _fp_full in ocr_failed_paths:
+                        _fi["state"] = "failed"
+                    elif _fi["state"] not in ("done", "failed"):
+                        _fi["state"] = "done"
+                b["done"]         = sum(1 for _fi in b["files"] if _fi["state"] == "done")
+                b["current_file"] = ""
+                _job["phase"] = ""
 
     for idx, file_info in enumerate(files):
         if _stop_event.is_set() or _soft_stop_event.is_set():
@@ -328,6 +526,32 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         with _job_lock:
             _job["files"][idx]["status"] = "converting"
 
+        # Build the step checklist for this file and set phase.
+        _new_steps = _build_steps(file_info, anime_mode)
+        # Backfill OCR step state from the batch result.
+        for _s in _new_steps:
+            if _s["id"] == "ocr":
+                ocr_st = (file_info.get("ocr_status") or
+                          ("done" if full_path not in ocr_failed_paths and
+                           any(fi.get("ocr_status") for fi in [file_info]) else ""))
+                # Read from the job files dict which was stamped during batch
+                with _job_lock:
+                    _stamped = _job["files"][idx].get("ocr_status", "")
+                if _stamped == "done":
+                    _s["state"]  = "done"
+                    _s["detail"] = "SRT extracted"
+                elif _stamped == "skipped" or _s["state"] == "skipped":
+                    _s["state"]  = "skipped"
+                    _s["detail"] = "No PGS tracks"
+                elif _s["state"] == "waiting":
+                    # Batch ran but no explicit stamp — mark done
+                    _s["state"]  = "done"
+                    _s["detail"] = "SRT extracted"
+                break
+        with _job_lock:
+            _job["steps"] = _new_steps
+            _job["phase"] = "converting"
+
         # Output goes into the same directory as the source so the converted
         # file replaces (or sits beside) the original in-place.  When the
         # extension is unchanged compress_simple uses os.replace() to swap
@@ -358,10 +582,12 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
 
         # Per-file log capture so error details can be surfaced in the UI
         _file_log: list[str] = []
+        _REMUX_ATTEMPT = [0]   # tracks current remux attempt number for this file
 
         def _capture_log(msg: str) -> None:
             _file_log.append(msg)
             _job_log(msg)
+            _process_step_log(msg, _REMUX_ATTEMPT)
 
         # Hash the source before encoding so we can recognise it later even
         # if it's moved to a different drive (resetting mtime).
@@ -388,6 +614,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
             _job_log(f"UNHANDLED EXCEPTION during conversion: {exc}")
             import traceback
             error_tail = traceback.format_exc()
+            _write_crash_log(f"UNHANDLED EXCEPTION converting {full_path}:\n{error_tail}")
             db.mark_failed(rec_id, error_tail, _utcnow())
             with _job_lock:
                 _job["files"][idx]["status"]     = "failed"
@@ -413,7 +640,9 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
                 # fewer subtitle tracks than the source.  Audio is still checked.
                 out_is_mp4 = result["output_path"].lower().endswith(".mp4")
                 track_ok, track_reason = converter._verify_tracks_preserved(
-                    full_path, result["output_path"], check_subs=not out_is_mp4
+                    full_path, result["output_path"],
+                    check_subs=not out_is_mp4,
+                    dropped_streams=db.get_dropped_streams(full_path),
                 )
 
             if not track_ok:
@@ -512,6 +741,9 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         _job["current_file"] = ""
         _job["progress_pct"] = _job["progress_pct"] if _stopped else 100.0
         _ffmpeg_pid[0]       = 0
+        _job["phase"]     = ""
+        _job["steps"]     = []
+        _job["ocr_batch"] = {"total": 0, "done": 0, "current_file": "", "files": []}
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
 
@@ -786,6 +1018,9 @@ def api_start():
             "files":         [dict(f) for f in files],
             "log":           [],
             "paused":        False,
+            "phase":         "",
+            "ocr_batch":     {"total": 0, "done": 0, "current_file": "", "files": []},
+            "steps":         [],
         })
 
     def _worker_safe():
@@ -793,7 +1028,9 @@ def api_start():
             _queue_worker(list(files), anime, quality)
         except Exception as exc:
             import traceback
-            _job_log(f"Worker crashed unexpectedly: {exc}\n{traceback.format_exc()}")
+            tb = traceback.format_exc()
+            _job_log(f"Worker crashed unexpectedly: {exc}\n{tb}")
+            _write_crash_log(f"Worker crashed unexpectedly: {exc}\n{tb}")
             with _job_lock:
                 _job["state"]        = "done"
                 _job["current_file"] = ""
@@ -1163,7 +1400,7 @@ def api_diagnose():
     if is_hi10:
         recs.append("Hi10 video — QSV unsupported, will use libx265 software encoder")
     if has_pgs:
-        recs.append("PGS bitmap subs — OCR required (EasyOCR worker)")
+        recs.append("PGS bitmap subs — OCR required (Tesseract)")
     if any(s.get("codec_name", "").lower() in text_codecs for s in s_streams) and not is_mp4:
         recs.append("Text subs (ASS/SRT) — if typesetter track, attempt 4 (SRT timestamp spread) may be needed")
     if is_mp4 and all_aac and not has_pgs:
@@ -1185,6 +1422,15 @@ def api_diagnose():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import logging as _logging
+
+    # Route Werkzeug access logs to stdout so they're visible in the console
+    # window, while stderr (real Python tracebacks) goes to flask_crash.log.
+    _wz_log = _logging.getLogger("werkzeug")
+    _wz_log.handlers.clear()
+    _wz_log.addHandler(_logging.StreamHandler(sys.stdout))
+    _wz_log.propagate = False
+
     os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
     recovered = db.reset_stale_running()
     if recovered:

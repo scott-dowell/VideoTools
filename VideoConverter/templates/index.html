@@ -251,52 +251,91 @@
         </div>
       </div>
 
-      <!-- Progress -->
-      <div class="card">
-        <div class="card-header"><i class="bi bi-activity me-2"></i>Progress</div>
-        <div class="card-body">
-          <div class="mb-3">
+      <!-- Current Job + Log (vertically splittable) -->
+      <div id="rightSplitPane" style="flex:1;display:flex;flex-direction:column;min-height:0">
+
+      <!-- Current Job -->
+      <div class="card" id="currentJobCard" style="height:260px;flex-shrink:0;display:flex;flex-direction:column;overflow:hidden">
+        <div class="card-header d-flex align-items-center justify-content-between">
+          <span><i class="bi bi-activity me-2"></i>Current Job</span>
+          <span class="text-secondary" style="font-size:.75rem" id="jobFileCounter"></span>
+        </div>
+        <div class="card-body pb-2" id="jobCardBody" style="overflow-y:auto;flex:1;min-height:0">
+
+          <!-- Idle state -->
+          <div id="jobIdle" class="text-secondary text-center py-3" style="font-size:.85rem">—</div>
+
+          <!-- OCR batch mode -->
+          <div id="jobOcrBatch" class="d-none">
+            <div class="fw-semibold mb-1" style="font-size:.85rem">
+              <i class="bi bi-cpu me-1" style="color:#7c3aed"></i>OCR pre-pass
+            </div>
+            <div class="progress mb-2" style="height:5px">
+              <div class="progress-bar" id="ocrBatchBar" style="width:0%;background:#7c3aed"></div>
+            </div>
+            <div id="ocrBatchFileList" style="font-size:.75rem;max-height:120px;overflow-y:auto"></div>
+          </div>
+
+          <!-- Per-file converting mode -->
+          <div id="jobConverting" class="d-none">
+            <div class="text-truncate fw-semibold mb-1" id="jobFilename"
+                 style="font-size:.82rem" title=""></div>
+
+            <!-- File progress bar -->
             <div class="d-flex justify-content-between mb-1">
-              <small class="text-secondary">Current file</small>
+              <small class="text-secondary">File progress</small>
               <small id="filePct">0%</small>
             </div>
-            <div class="progress">
+            <div class="progress mb-1">
               <div class="progress-bar" id="fileBar" style="width:0%"></div>
             </div>
-            <small class="text-secondary mt-1 d-block" id="currentFilename">—</small>
+
+            <!-- Step checklist -->
+            <ul class="step-list" id="stepList"></ul>
+
+            <!-- Stats row: fps / ETA / saved / elapsed -->
+            <div class="d-flex justify-content-between align-items-center mt-2 pt-1 border-top"
+                 style="font-size:.75rem">
+              <span>
+                <span class="fw-bold text-primary" id="fpsVal">—</span>
+                <span class="text-secondary ms-1">fps</span>
+              </span>
+              <span>
+                <span class="fw-bold text-warning" id="etaVal">—</span>
+                <span class="text-secondary ms-1">ETA</span>
+              </span>
+              <span>
+                <span class="fw-bold text-success" id="savedVal">—</span>
+                <span class="text-secondary ms-1">saved</span>
+              </span>
+              <span>
+                <span class="fw-bold text-info" id="elapsedVal">—</span>
+                <span class="text-secondary ms-1">elapsed</span>
+              </span>
+            </div>
           </div>
-          <div class="mb-3">
+
+          <!-- Overall progress (shown whenever running) -->
+          <div id="jobOverall" class="mt-2 d-none">
             <div class="d-flex justify-content-between mb-1">
               <small class="text-secondary">Overall</small>
               <small id="overallPct">0%</small>
             </div>
-            <div class="progress">
+            <div class="progress" style="height:4px">
               <div class="progress-bar overall" id="overallBar" style="width:0%"></div>
             </div>
           </div>
-          <div class="row text-center">
-            <div class="col-4">
-              <div class="fw-bold text-primary" id="fpsVal">—</div>
-              <div class="text-secondary" style="font-size:.72rem">fps</div>
-            </div>
-            <div class="col-4">
-              <div class="fw-bold text-warning" id="etaVal">—</div>
-              <div class="text-secondary" style="font-size:.72rem">ETA</div>
-            </div>
-            <div class="col-4">
-              <div class="fw-bold text-success" id="savedVal">—</div>
-              <div class="text-secondary" style="font-size:.72rem">saved</div>
-            </div>
-          </div>
-          <div class="mt-2 pt-2 border-top d-flex justify-content-between align-items-center">
-            <small class="text-secondary"><i class="bi bi-stopwatch me-1"></i>File elapsed</small>
-            <span class="fw-semibold text-info" id="elapsedVal" style="font-size:.9rem">—</span>
-          </div>
+
         </div>
       </div>
 
+      </div><!-- /currentJobCard -->
+
+      <!-- Drag splitter -->
+      <div id="rightSplitter" class="right-splitter" title="Drag to resize"></div>
+
       <!-- Log -->
-      <div class="card flex-grow-1 d-flex flex-column" style="min-height:0">
+      <div class="card d-flex flex-column" style="flex:1;min-height:0">
         <div class="card-header"><i class="bi bi-terminal me-2"></i>Log</div>
         <div class="card-body p-2 d-flex flex-column flex-grow-1" style="min-height:0">
           <div id="ffmpegStatus" class="ffmpeg-status d-none"></div>
@@ -304,7 +343,9 @@
             <div class="log-ok">▸ Application started.</div>
           </div>
         </div>
-      </div>
+      </div><!-- /log card -->
+
+      </div><!-- /rightSplitPane -->
 
     </div>
   </div>

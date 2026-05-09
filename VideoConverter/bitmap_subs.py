@@ -2,7 +2,7 @@
 bitmap_subs.py
 ==============
 Extract bitmap subtitle streams (PGS/VOBSUB) from an MKV, OCR each subtitle
-image with EasyOCR, and return an SRT-compatible pysubs2 file.
+image with Tesseract, and return an SRT-compatible pysubs2 file.
 
 Public API
 ----------
@@ -11,7 +11,8 @@ Public API
 
 Requirements
 ------------
-    pip install easyocr Pillow pysubs2
+    pip install pytesseract Pillow pysubs2
+    Tesseract binary: winget install UB-Mannheim.TesseractOCR
 
 Ported from convert_bitmap_subs.py (VideoConversion project).
 CLI entry-point removed; call ocr_bitmap_subs_to_srt() directly.
@@ -25,29 +26,18 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# Tesseract binary location (UB-Mannheim installer default)
+_TESSERACT_EXE = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
 try:
-    from PIL import Image
-    import easyocr as _easyocr
-    import numpy as _np
+    from PIL import Image, ImageOps
+    import pytesseract as _pytesseract
+    _pytesseract.pytesseract.tesseract_cmd = _TESSERACT_EXE
     import pysubs2
     DEPS_OK = True
 except ImportError as _e:
     DEPS_OK = False
     _MISSING = str(_e)
-
-_easyocr_reader = None  # lazy singleton — loading the model is expensive
-
-
-def _get_easyocr_reader(lang: str = 'en', log_fn=print):
-    global _easyocr_reader
-    if _easyocr_reader is None:
-        log_fn("  Loading EasyOCR model (first run downloads ~500 MB)...")
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message=".*pin_memory.*no accelerator.*",
-                                    category=UserWarning)
-            _easyocr_reader = _easyocr.Reader([lang], gpu=False, verbose=False)
-    return _easyocr_reader
 
 
 # ---------------------------------------------------------------------------
@@ -237,66 +227,30 @@ def _put(buf: bytearray, x: int, y: int, width: int, rgba: tuple):
 
 
 # ---------------------------------------------------------------------------
-# Reading-order reconstruction
-# ---------------------------------------------------------------------------
-
-def _reading_order(results: list, line_merge_threshold: float = 0.5) -> str:
-    """
-    Convert EasyOCR results (list of (bbox, text, conf)) to a properly ordered
-    string, sorted top-to-bottom then left-to-right within each line.
-    """
-    if not results:
-        return ''
-
-    items = []
-    for (bbox, text, _conf) in results:
-        top_y  = min(pt[1] for pt in bbox)
-        bot_y  = max(pt[1] for pt in bbox)
-        left_x = min(pt[0] for pt in bbox)
-        items.append((top_y, bot_y, left_x, text))
-
-    items.sort(key=lambda t: (t[0], t[2]))
-
-    lines: list[list[tuple]] = []
-    for item in items:
-        top_y, bot_y, left_x, text = item
-        placed = False
-        for line in lines:
-            l_top, l_bot = line[0][0], line[0][1]
-            overlap = min(bot_y, l_bot) - max(top_y, l_top)
-            shorter = min(bot_y - top_y, l_bot - l_top)
-            if shorter > 0 and overlap / shorter >= line_merge_threshold:
-                line.append(item)
-                placed = True
-                break
-        if not placed:
-            lines.append([item])
-
-    text_lines = []
-    for line in lines:
-        line.sort(key=lambda t: t[2])
-        text_lines.append(' '.join(t[3] for t in line))
-
-    return '\n'.join(text_lines)
-
-
-# ---------------------------------------------------------------------------
 # Image pre-processing
 # ---------------------------------------------------------------------------
 
-def _preprocess(img: 'Image.Image') -> '_np.ndarray':
+def _preprocess(img: 'Image.Image') -> 'Image.Image':
     """
-    Composite RGBA subtitle bitmap onto a black background and return as RGB
-    numpy array for EasyOCR.  Upscales if the image height is very small.
+    Prepare a PGS RGBA frame for Tesseract:
+    1. Composite onto black  — white/yellow subtitle text stays visible
+    2. Convert to greyscale
+    3. Invert               — gives black text on white (Tesseract's sweet spot)
+    4. Upscale if too small  — Tesseract accuracy degrades below ~60px tall
     """
     bg = Image.new('RGBA', img.size, (0, 0, 0, 255))
     bg.paste(img, mask=img.split()[3])
-    rgb = bg.convert('RGB')
-    w, h = rgb.size
-    if h < 64:
-        scale = max(2, 64 // h)
-        rgb = rgb.resize((w * scale, h * scale), Image.LANCZOS)
-    return _np.array(rgb)
+    grey = ImageOps.invert(bg.convert('L'))
+    w, h = grey.size
+    # Upscale small frames (e.g. title cards ~48px tall)
+    if h < 60:
+        scale = max(2, 60 // h)
+        grey = grey.resize((w * scale, h * scale), Image.LANCZOS)
+        w, h = grey.size
+    # Cap width to avoid huge allocations on 1080p-wide frames
+    if w > 1920:
+        grey = grey.resize((1920, max(1, round(h * 1920 / w))), Image.LANCZOS)
+    return grey
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +265,9 @@ def ocr_sup_file(
     log_fn=print,
 ) -> 'pysubs2.SSAFile':
     """
-    Parse a .sup PGS file and OCR every subtitle frame with EasyOCR.
+    Parse a .sup PGS file and OCR every subtitle frame with Tesseract.
     Returns a pysubs2.SSAFile ready to save as .srt.
     """
-    reader = _get_easyocr_reader(lang, log_fn=log_fn)
-
     with open(sup_path, 'rb') as f:
         data = f.read()
 
@@ -330,12 +282,18 @@ def ocr_sup_file(
                 text = _ocr_cache[img_hash]
                 deduped += 1
             else:
-                img  = Image.frombytes('RGBA', (w, h), rgba)
-                arr  = _preprocess(img)
-                raw  = reader.readtext(arr, detail=1, paragraph=False)
-                hits = [(bbox, txt, conf) for (bbox, txt, conf) in raw
-                        if conf >= confidence and txt.strip()]
-                text = _reading_order(hits)
+                img     = Image.frombytes('RGBA', (w, h), rgba)
+                prepped = _preprocess(img)
+                # PSM 6 = uniform block (1-3 line subtitle bar)
+                # PSM 3 = auto layout (multi-line lyric/title cards)
+                psm = 3 if h > 300 else 6
+                raw = _pytesseract.image_to_string(
+                    prepped, config=f'--psm {psm} --oem 1', lang='eng'
+                )
+                # Fix common Tesseract confusion: standalone '|' → 'I'
+                import re as _re
+                raw = _re.sub(r'(?<![A-Za-z])\|(?![A-Za-z])', 'I', raw)
+                text = raw.strip()
                 _ocr_cache[img_hash] = text
             if text:
                 subs.append(pysubs2.SSAEvent(start=start_ms, end=end_ms, text=text))
@@ -376,7 +334,7 @@ def ocr_bitmap_subs_to_srt(
     log_fn=print,
 ) -> list[str]:
     """
-    Extract and OCR all PGS subtitle streams from input_path using EasyOCR.
+    Extract and OCR all PGS subtitle streams from input_path using Tesseract.
 
     Returns list of paths to generated .srt files (one per stream).
     Empty list means no bitmap subtitle streams found or all failed.
@@ -450,7 +408,7 @@ def ocr_bitmap_subs_to_srt(
 
             if verbose:
                 size_kb = os.path.getsize(sup_path) / 1024
-                log_fn(f"  Extracted {size_kb:.0f} KB. Running EasyOCR (lang={lang}) ...")
+                log_fn(f"  Extracted {size_kb:.0f} KB. Running Tesseract (lang={lang}) ...")
 
             try:
                 subs = ocr_sup_file(sup_path, lang=lang, verbose=verbose, log_fn=log_fn)

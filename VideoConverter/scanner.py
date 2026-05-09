@@ -50,7 +50,7 @@ import db
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".m2ts"}
 
-_SKIP_CODECS = {"av1", "av1_cuvid"}  # AV1 only — HEVC files may still be inefficiently encoded
+_SKIP_CODECS: set[str] = set()  # AV1 is handled by stream-copy in the converter; nothing is skipped
 
 _CODEC_DISPLAY: dict[str, str] = {
     "h264":        "H264",
@@ -154,6 +154,7 @@ def _parse_probe(probe: dict) -> dict:
             tags = stream.get("tags", {})
             audio_streams.append({
                 "track":    audio_idx,
+                "index":    stream.get("index", 0),
                 "codec":    _normalise_codec(stream.get("codec_name", "unknown")),
                 "channels": stream.get("channels", 0),
                 "language": tags.get("language", "und"),
@@ -165,6 +166,7 @@ def _parse_probe(probe: dict) -> dict:
             tags = stream.get("tags", {})
             sub_streams.append({
                 "track":    sub_idx,
+                "index":    stream.get("index", 0),
                 "codec":    _normalise_codec(stream.get("codec_name", "unknown")),
                 "language": tags.get("language", "und"),
                 "title":    tags.get("title", ""),
@@ -423,17 +425,18 @@ def walk(root: str) -> Generator[dict, None, None]:
             cached_dur     = db_info.get("duration_secs")
 
             file_dict: dict = {
-                "full_path":    fp,
-                "name":         filename,
-                "folder":       rel_folder.replace("\\", "/"),
-                "size":         f"{size_mb:,.1f}",
-                "codec":        cached_codec,
-                "duration":     _format_duration(cached_dur) if cached_dur else "",
-                "bitrate_kbps": cached_bitrate,
-                "is_hi10":      False,
-                "streams":      None,
-                "status":       db_status if (db_status and db_status not in ("pending", "queued")) else "pending",
-                "force_sw":     bool(db_info.get("force_sw", False)),
+                "full_path":       fp,
+                "name":            filename,
+                "folder":          rel_folder.replace("\\", "/"),
+                "size":            f"{size_mb:,.1f}",
+                "codec":           cached_codec,
+                "duration":        _format_duration(cached_dur) if cached_dur else "",
+                "bitrate_kbps":    cached_bitrate,
+                "is_hi10":         False,
+                "streams":         None,
+                "status":          db_status if (db_status and db_status not in ("pending", "queued")) else "pending",
+                "force_sw":        bool(db_info.get("force_sw", False)),
+                "dropped_streams": db_info.get("dropped_streams", []),
             }
 
             folder_files.append(file_dict)

@@ -17,6 +17,7 @@ let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'duration' | 'es
 let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
 let _sessionSavedMB = null;   // null = no run this session, number = MB saved this run
+let _sessionProcessed = 0;    // files completed (done/failed/no_saving) this run
 let _sessionStartedAt = 0;        // unix epoch (s) when current session started; 0 = not started
 let _sessionElapsedTimer = null;  // setInterval ID for the live session elapsed clock
 let _fileElapsedTimer    = null;  // setInterval ID for the live per-file elapsed clock
@@ -45,6 +46,15 @@ function _badgeHtml(status, force_sw) {
             : (status || 'pending');
   const sw  = force_sw ? ' <small style="font-size:.7em;opacity:.85" class="text-warning">SW</small>' : '';
   return '<span class="badge ' + cls + '">' + lbl + sw + '</span>';
+}
+
+// Returns a small secondary badge showing OCR outcome, or '' if not yet known
+function _ocrBadgeHtml(f) {
+  if (f.ocr_status === 'done')
+    return ' <span class="badge badge-ocr-done ms-1" title="OCR complete \u2014 bitmap subtitles extracted to SRT">OCR \u2713</span>';
+  if (f.ocr_status === 'skipped')
+    return ' <span class="badge badge-ocr-skip ms-1" title="No PGS bitmap subtitle tracks \u2014 OCR not required">No PGS</span>';
+  return '';
 }
 
 // Returns a small badge when the file has dropped streams, otherwise ''
@@ -272,7 +282,9 @@ function buildRow(f, index) {
 
   // col 5 — Status badge
   const tdStatus = document.createElement('td');
-  tdStatus.innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f);
+  // Suppress the primary "OCR" badge once an OCR outcome badge is available
+  const _ocrDone = f.status === 'ocr' && (f.ocr_status === 'done' || f.ocr_status === 'skipped');
+  tdStatus.innerHTML = (_ocrDone ? '' : _badgeHtml(f.status, f.force_sw)) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
   tr.appendChild(tdStatus);
 
   // col 5b — Est. saving
@@ -479,7 +491,10 @@ function _updateSessionCard() {
   } else {
     const gb = _sessionSavedMB / 1024;
     el.textContent = gb >= 1 ? gb.toFixed(1) + ' GB' : _sessionSavedMB.toFixed(0) + ' MB';
-    if (sub) sub.textContent = 'this run';
+    if (sub) {
+      const fileLabel = _sessionProcessed === 1 ? '1 file' : _sessionProcessed + ' files';
+      sub.textContent = _sessionProcessed > 0 ? fileLabel + ' processed this run' : 'this run';
+    }
     // Bar: proportional to total saved card's bar (cap at 100%)
     // Use ratio vs total saved for relative sense, or just show fill capped at bar width
     if (bar) {
@@ -647,6 +662,7 @@ function scanFolder(path) {
   _probeTotal = 0;
   _probeDone  = 0;
   _sessionSavedMB = null;
+  _sessionProcessed = 0;
   _updateSessionCard();
   _scanStripPhase1();
   _activeFilter  = 'all';
@@ -953,15 +969,88 @@ function _stopPolling() {
   if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
 }
 
+function _stepIcon(state) {
+  if (state === 'done')    return '<i class="bi bi-check-circle-fill"></i>';
+  if (state === 'running') return '<i class="bi bi-arrow-repeat"></i>';
+  if (state === 'retry')   return '<i class="bi bi-arrow-clockwise"></i>';
+  if (state === 'failed')  return '<i class="bi bi-x-circle-fill"></i>';
+  if (state === 'skipped') return '<i class="bi bi-dash-circle"></i>';
+  return '<i class="bi bi-circle"></i>'; // waiting
+}
+
+function _esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function _renderCurrentJob(s) {
+  const idle       = document.getElementById('jobIdle');
+  const ocrDiv     = document.getElementById('jobOcrBatch');
+  const convDiv    = document.getElementById('jobConverting');
+  const overallDiv = document.getElementById('jobOverall');
+  const counter    = document.getElementById('jobFileCounter');
+  if (!idle) return; // card not in DOM yet
+
+  const phase     = s.phase || '';
+  const isRunning = s.state === 'running';
+
+  if (counter) {
+    counter.textContent = isRunning && s.total
+      ? (s.current_index + 1) + ' of ' + s.total
+      : '';
+  }
+
+  idle.classList.toggle('d-none',       phase !== '');
+  ocrDiv.classList.toggle('d-none',     phase !== 'ocr_batch');
+  convDiv.classList.toggle('d-none',    phase !== 'converting');
+  if (overallDiv) overallDiv.classList.toggle('d-none', !isRunning);
+
+  if (phase === 'ocr_batch' && s.ocr_batch) {
+    const b   = s.ocr_batch;
+    const pct = b.total > 0 ? Math.round(b.done / b.total * 100) : 0;
+    const bar = document.getElementById('ocrBatchBar');
+    if (bar) bar.style.width = pct + '%';
+    const listEl = document.getElementById('ocrBatchFileList');
+    if (listEl) {
+      listEl.innerHTML = (b.files || []).map(f => {
+        const cls  = 'ocr-file-' + (f.state || 'waiting');
+        const icon = f.state === 'done'    ? '<i class="bi bi-check-circle-fill"></i>'
+                   : f.state === 'running' ? '<i class="bi bi-cpu-fill" style="animation:step-pulse 1.2s ease infinite"></i>'
+                   : f.state === 'failed'  ? '<i class="bi bi-x-circle-fill"></i>'
+                   :                         '<i class="bi bi-circle"></i>';
+        return '<div class="ocr-batch-file ' + cls + '">' + icon +
+               '<span class="text-truncate">' + _esc(f.name) + '</span></div>';
+      }).join('');
+      // Scroll the running item into view
+      const running = listEl.querySelector('.ocr-file-running');
+      if (running) running.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  if (phase === 'converting') {
+    const filename = s.current_file ? s.current_file.split(/[\\/]/).pop() : '\u2014';
+    const fnEl = document.getElementById('jobFilename');
+    if (fnEl) { fnEl.textContent = filename; fnEl.title = s.current_file || ''; }
+
+    const listEl = document.getElementById('stepList');
+    if (listEl && s.steps) {
+      listEl.innerHTML = s.steps.map(st => {
+        return '<li class="step-' + (st.state || 'waiting') + '">' +
+          '<span class="step-icon">' + _stepIcon(st.state) + '</span>' +
+          '<span class="step-label">' + _esc(st.label) + '</span>' +
+          (st.detail ? '<span class="step-detail">' + _esc(st.detail) + '</span>' : '') +
+          '</li>';
+      }).join('');
+    }
+  }
+}
+
 function _pollStatus() {
   fetch('/api/status')
     .then(r => r.json())
     .then(s => {
+      _renderCurrentJob(s);
       // Update progress widgets
       const pct = s.progress_pct || 0;
-      document.getElementById('currentFilename').textContent = s.current_file
-        ? s.current_file.split(/[\\/]/).pop()
-        : (s.state === 'done' ? 'Complete' : '\u2014');
       document.getElementById('fileBar').style.width = pct + '%';
       document.getElementById('filePct').textContent  = Math.round(pct) + '%';
       document.getElementById('fpsVal').textContent   = s.fps ? s.fps.toFixed(0) : '\u2014';
@@ -973,7 +1062,15 @@ function _pollStatus() {
             ? (s.saved_mb / 1024).toFixed(1) + ' GB'
             : s.saved_mb.toFixed(0) + ' MB')
         : '\u2014';
-      if (s.saved_mb !== undefined) { _sessionSavedMB = s.saved_mb || 0; _updateSessionCard(); }
+      if (s.saved_mb !== undefined) {
+        _sessionSavedMB = s.saved_mb || 0;
+        if (s.files) {
+          _sessionProcessed = s.files.filter(f =>
+            f.status === 'done' || f.status === 'failed' || f.status === 'no_saving'
+          ).length;
+        }
+        _updateSessionCard();
+      }
       if (s.session_started_at && _sessionStartedAt !== s.session_started_at) _startElapsedTimer(s.session_started_at);
       if (s.file_started_at && s.state === 'running') _startFileElapsedTimer(s.file_started_at);
       const overallDone  = s.files ? s.files.filter(f => f.status === 'done' || f.status === 'failed' || f.status === 'no_saving').length : 0;
@@ -1011,13 +1108,14 @@ function _pollStatus() {
           if (sf.ffmpeg_cmd !== undefined) f.ffmpeg_cmd = sf.ffmpeg_cmd;
           if (sf.error_tail !== undefined) f.error_tail = sf.error_tail;
           if (sf.log_dir    !== undefined) f.log_dir    = sf.log_dir;
+          if (sf.ocr_status !== undefined) f.ocr_status = sf.ocr_status;
 
           const row = document.getElementById('row-' + idx);
           if (!row) return;
           // Status badge (col index 7)
           const badgeCell = row.cells[7];
           if (badgeCell) {
-            badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw);
+            badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw) + _ocrBadgeHtml(f);
             row.classList.toggle('tr-done',       sf.status === 'done');
             row.classList.toggle('tr-failed',     sf.status === 'failed');
             row.classList.toggle('tr-no-saving',  sf.status === 'no_saving');
@@ -1091,6 +1189,7 @@ function startConversion() {
     return;
   }
   _sessionSavedMB = 0;
+  _sessionProcessed = 0;
   _updateSessionCard();
   _stopElapsedTimer();
   _stopFileElapsedTimer();
@@ -1769,11 +1868,71 @@ function toggleTheme() {
   _saveTheme(next);
 }
 
+function toggleTheme() {
+  const html = document.documentElement;
+  const icon = document.getElementById('themeIcon');
+  const isDark = html.getAttribute('data-bs-theme') === 'dark';
+  const next = isDark ? 'light' : 'dark';
+  html.setAttribute('data-bs-theme', next);
+  icon.className = isDark ? 'bi bi-sun-fill' : 'bi bi-moon-stars-fill';
+  _saveTheme(next);
+}
+
 // Sync icon to whatever theme was applied before paint
 (function() {
   const saved = _storedTheme();
   const icon = document.getElementById('themeIcon');
   if (icon) icon.className = saved === 'dark' ? 'bi bi-moon-stars-fill' : 'bi bi-sun-fill';
+})();
+
+// ============================================================
+// Right-panel vertical splitter
+// ============================================================
+(function() {
+  const STORAGE_KEY = 'vc-job-panel-height';
+  const DEFAULT_H   = 260;
+  const MIN_H       = 80;
+
+  function init() {
+    const splitter = document.getElementById('rightSplitter');
+    const jobCard  = document.getElementById('currentJobCard');
+    if (!splitter || !jobCard) return;
+
+    // Restore persisted height
+    const saved = parseInt(localStorage.getItem(STORAGE_KEY), 10);
+    if (saved >= MIN_H) jobCard.style.height = saved + 'px';
+
+    splitter.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = jobCard.getBoundingClientRect().height;
+      splitter.classList.add('dragging');
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
+
+      function onMove(e) {
+        const maxH = window.innerHeight * 0.72;
+        const newH = Math.max(MIN_H, Math.min(maxH, startH + (e.clientY - startY)));
+        jobCard.style.height = newH + 'px';
+      }
+      function onUp() {
+        splitter.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        localStorage.setItem(STORAGE_KEY, Math.round(jobCard.getBoundingClientRect().height));
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 })();
 
 // ============================================================

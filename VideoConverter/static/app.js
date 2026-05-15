@@ -6,7 +6,8 @@ let _fileIndexByPath = {}; // full_path → _files index for O(1) probe/remove l
 let _scanEs       = null; // active EventSource for /api/scan
 let _probeTotal   = 0;    // files queued for phase-2 probe
 let _probeDone    = 0;    // probe events received so far
-let _activeFilter = 'all';
+const _ALL_STATUSES = ['pending', 'done', 'failed', 'no_saving', 'skipped', 'low_savings'];
+let _activeStatuses = new Set(_ALL_STATUSES);
 let _searchQuery  = '';
 let _filterSizeMin = ''; let _filterSizeMax = '';
 let _filterBrMin   = ''; let _filterBrMax   = '';
@@ -33,16 +34,18 @@ let _estLastFolder  = null;
 
 // Build status badge HTML (includes SW indicator when force_sw is true)
 function _badgeHtml(status, force_sw) {
-  const cls = status === 'done'       ? 'badge-done'
-            : status === 'failed'     ? 'badge-failed'
-            : status === 'no_saving'  ? 'badge-no-saving'
-            : status === 'skipped'    ? 'badge-skipped'
-            : status === 'converting' ? 'badge-converting'
-            : status === 'ocr'        ? 'badge-ocr'
+  const cls = status === 'done'         ? 'badge-done'
+            : status === 'failed'       ? 'badge-failed'
+            : status === 'no_saving'    ? 'badge-no-saving'
+            : status === 'low_savings'  ? 'badge-low-savings'
+            : status === 'skipped'      ? 'badge-skipped'
+            : status === 'converting'   ? 'badge-converting'
+            : status === 'ocr'          ? 'badge-ocr'
             : 'badge-pending';
-  const lbl = status === 'no_saving' ? 'Skipped \u2013 Larger'
-            : status === 'skipped'   ? 'Skipped \u2013 Manual'
-            : status === 'ocr'       ? 'OCR'
+  const lbl = status === 'no_saving'   ? 'Skipped \u2013 Larger'
+            : status === 'low_savings' ? 'Low Savings'
+            : status === 'skipped'     ? 'Skipped \u2013 Manual'
+            : status === 'ocr'         ? 'OCR'
             : (status || 'pending');
   const sw  = force_sw ? ' <small style="font-size:.7em;opacity:.85" class="text-warning">SW</small>' : '';
   return '<span class="badge ' + cls + '">' + lbl + sw + '</span>';
@@ -97,6 +100,7 @@ function _sortFiles(files) {
   if (_sortBy === 'bitrate') arr.sort((a, b) => (_fileBitrate(b) - _fileBitrate(a)) * mul);
   else if (_sortBy === 'size') arr.sort((a, b) => ((parseFloat((b.size||'0').replace(/,/g,''))||0) - (parseFloat((a.size||'0').replace(/,/g,''))||0)) * mul);
   else if (_sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name) * mul);
+  else if (_sortBy === 'path') arr.sort((a, b) => (a.full_path || '').localeCompare(b.full_path || '') * mul);
   else if (_sortBy === 'duration') arr.sort((a, b) => (_parseDuration(b.duration) - _parseDuration(a.duration)) * mul);
   else if (_sortBy === 'est_saving') arr.sort((a, b) => ((b.est_pct || 0) - (a.est_pct || 0)) * mul);
   return arr;
@@ -291,11 +295,11 @@ function buildRow(f, index) {
   const tdEst = document.createElement('td');
   tdEst.className = 'text-end';
   tdEst.id = 'est-' + index;
-  if (f.est_pct !== undefined) {
+  if (f.est_pct != null) {
     tdEst.innerHTML =
       '<span class="text-success fw-semibold">' + f.est_pct + '%</span>' +
       '<br><small class="text-secondary">' + (f.est_mb || 0) + '\u202fMB</small>';
-  } else if (f.status === 'done' || f.status === 'failed' || f.status === 'no_saving' || f.status === 'skipped') {
+  } else if (f.status === 'done' || f.status === 'failed' || f.status === 'no_saving' || f.status === 'low_savings' || f.status === 'skipped') {
     tdEst.textContent = '\u2014';
   } else {
     tdEst.innerHTML = '<span class="text-secondary" style="font-size:.75rem">\u2026</span>';
@@ -403,7 +407,7 @@ function updateStats(files) {
   const failed    = files.filter(f => f.status === 'failed').length;
   const noSaving  = files.filter(f => f.status === 'no_saving').length;
   const skipped    = files.filter(f => f.status === 'skipped').length;
-  const pending   = files.filter(f => f.status === 'pending').length;
+  const pending   = files.filter(f => f.status === 'pending' || f.status === 'ocr').length;
   const savedMB  = files.reduce((s, f) => s + (f.saved  ? parseFloat(f.saved.replace(/,/g, ''))  || 0 : 0), 0);
   const origMB   = files.filter(f => f.status === 'done')
                         .reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
@@ -436,24 +440,35 @@ function updateStats(files) {
   document.getElementById('overallPct').textContent = overallPct + '%';
   document.getElementById('overallBar').style.width = overallPct + '%';
   document.getElementById('totalSizeLabel').textContent = (totalMB / 1024).toFixed(1) + ' GB total';
+  const lowSavings = files.filter(f => f.status === 'low_savings').length;
   // Filter chip counts
-  document.getElementById('chipCount-all').textContent     = files.length;
-  document.getElementById('chipCount-pending').textContent = pending;
-  document.getElementById('chipCount-done').textContent    = done;
-  document.getElementById('chipCount-failed').textContent    = failed;
+  document.getElementById('chipCount-pending').textContent      = pending;
+  document.getElementById('chipCount-done').textContent         = done;
+  document.getElementById('chipCount-failed').textContent       = failed;
   const nsEl = document.getElementById('chipCount-no-saving');
   if (nsEl) nsEl.textContent = noSaving;
   const skEl = document.getElementById('chipCount-skipped');
   if (skEl) skEl.textContent = skipped;
+  const lsEl = document.getElementById('chipCount-low_savings');
+  if (lsEl) lsEl.textContent = lowSavings;
 }
 
 // ============================================================
 // Filter + Search
 // ============================================================
-function setFilter(f) {
-  _activeFilter = f;
-  document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-  document.getElementById('chip-' + f).classList.add('active');
+function toggleStatus(s) {
+  if (_activeStatuses.has(s)) {
+    _activeStatuses.delete(s);
+  } else {
+    _activeStatuses.add(s);
+  }
+  document.getElementById('chip-' + s).classList.toggle('active', _activeStatuses.has(s));
+  applyFilter();
+}
+
+function resetStatusFilter() {
+  _ALL_STATUSES.forEach(s => _activeStatuses.add(s));
+  _ALL_STATUSES.forEach(s => document.getElementById('chip-' + s).classList.add('active'));
   applyFilter();
 }
 
@@ -463,7 +478,8 @@ function onSearchInput(val) {
 }
 
 function _fileMatchesFilter(f) {
-  const matchStatus = _activeFilter === 'all' || f.status === _activeFilter;
+  const _eff = (f.status === 'ocr' || f.status === 'converting') ? 'pending' : f.status;
+  const matchStatus = _activeStatuses.has(_eff);
   const matchSearch = !_searchQuery ||
     f.name.toLowerCase().includes(_searchQuery) ||
     (f.folder || '').toLowerCase().includes(_searchQuery);
@@ -651,8 +667,6 @@ function scanFolder(path) {
   const cleanupBtn2 = document.getElementById('cleanupBtn');
   if (cleanupBtn2) cleanupBtn2.disabled = false;
   _estCancelled  = true;   // stop any in-flight estimation from previous scan
-  // Restore estimation state from settings (don't override a deliberate user pause)
-  fetch('/api/settings').then(r => r.json()).then(s => { _estUserPaused = !(s.estimation_enabled); }).catch(() => {});
   _estAutoPaused = false;
   _estRunning    = false;
   const estStrip = document.getElementById('estStrip');
@@ -665,7 +679,6 @@ function scanFolder(path) {
   _sessionProcessed = 0;
   _updateSessionCard();
   _scanStripPhase1();
-  _activeFilter  = 'all';
   _searchQuery   = '';
   _filterSizeMin = ''; _filterSizeMax = '';
   _filterBrMin   = ''; _filterBrMax   = '';
@@ -680,8 +693,7 @@ function scanFolder(path) {
   const ss = document.getElementById('sortSelect');
   if (ss) ss.value = _sortBy;
   document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-  const chipAll = document.getElementById('chip-all');
-  if (chipAll) chipAll.classList.add('active');
+  resetStatusFilter();
   setButtonStates('scanning');
   document.getElementById('queueBody').innerHTML =
     '<tr><td colspan="13" class="text-center text-secondary py-4">' +
@@ -753,7 +765,6 @@ function scanFolder(path) {
         setButtonStates('idle');
         if (_probeTotal === 0) { _scanEs.close(); _scanEs = null; _scanStripHide(); setSortBy(_sortBy); }
         else { _scanStripPhase2(); }
-        runEstimation(_files);
       } else {
         const cached = _files.length - _probeTotal;
         const cacheNote = cached > 0 ? ' (\u202f' + cached + ' cached)' : '';
@@ -765,7 +776,6 @@ function scanFolder(path) {
           setSortBy(_sortBy);
         }
         setButtonStates('ready');
-        runEstimation(_files);
       }
     } else if (msg.type === 'done') {
       // Phase 2 complete — re-render with sort applied now that bitrates are known
@@ -1066,14 +1076,14 @@ function _pollStatus() {
         _sessionSavedMB = s.saved_mb || 0;
         if (s.files) {
           _sessionProcessed = s.files.filter(f =>
-            f.status === 'done' || f.status === 'failed' || f.status === 'no_saving'
+            f.status === 'done' || f.status === 'failed' || f.status === 'no_saving' || f.status === 'low_savings'
           ).length;
         }
         _updateSessionCard();
       }
       if (s.session_started_at && _sessionStartedAt !== s.session_started_at) _startElapsedTimer(s.session_started_at);
       if (s.file_started_at && s.state === 'running') _startFileElapsedTimer(s.file_started_at);
-      const overallDone  = s.files ? s.files.filter(f => f.status === 'done' || f.status === 'failed' || f.status === 'no_saving').length : 0;
+      const overallDone  = s.files ? s.files.filter(f => f.status === 'done' || f.status === 'failed' || f.status === 'no_saving' || f.status === 'low_savings').length : 0;
       const overallTotal = s.total || 0;
       const overallPct   = overallTotal > 0 ? Math.round(overallDone / overallTotal * 100) : 0;
       document.getElementById('overallPct').textContent  = overallPct + '%';
@@ -1109,6 +1119,8 @@ function _pollStatus() {
           if (sf.error_tail !== undefined) f.error_tail = sf.error_tail;
           if (sf.log_dir    !== undefined) f.log_dir    = sf.log_dir;
           if (sf.ocr_status !== undefined) f.ocr_status = sf.ocr_status;
+          if (sf.est_pct    != null) f.est_pct    = sf.est_pct;
+          if (sf.est_mb     != null) f.est_mb     = sf.est_mb;
 
           const row = document.getElementById('row-' + idx);
           if (!row) return;
@@ -1116,11 +1128,12 @@ function _pollStatus() {
           const badgeCell = row.cells[7];
           if (badgeCell) {
             badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw) + _ocrBadgeHtml(f);
-            row.classList.toggle('tr-done',       sf.status === 'done');
-            row.classList.toggle('tr-failed',     sf.status === 'failed');
-            row.classList.toggle('tr-no-saving',  sf.status === 'no_saving');
-            row.classList.toggle('tr-skipped',    sf.status === 'skipped');
-            row.classList.toggle('tr-converting', sf.status === 'converting');
+            row.classList.toggle('tr-done',        sf.status === 'done');
+            row.classList.toggle('tr-failed',      sf.status === 'failed');
+            row.classList.toggle('tr-no-saving',   sf.status === 'no_saving');
+            row.classList.toggle('tr-low-savings', sf.status === 'low_savings');
+            row.classList.toggle('tr-skipped',     sf.status === 'skipped');
+            row.classList.toggle('tr-converting',  sf.status === 'converting');
           }
           // Output/Saved/% cells (cols 9, 10, 11)
           if (sf.status === 'done') {
@@ -1130,6 +1143,13 @@ function _pollStatus() {
           }
           if (sf.conv_secs !== undefined && row.cells[12])
             row.cells[12].textContent = sf.conv_secs > 0 ? _fmtDuration(sf.conv_secs) : '';
+          // Update est. savings cell live when the estimate step completes
+          const estCell = document.getElementById('est-' + idx);
+          if (estCell && sf.est_pct != null) {
+            estCell.innerHTML =
+              '<span class="text-success fw-semibold">' + sf.est_pct + '%</span>' +
+              '<br><small class="text-secondary">' + (sf.est_mb || 0) + '\u202fMB</small>';
+          }
         });
         updateStats(_files);
       }
@@ -1950,7 +1970,9 @@ function openSettings() {
       document.getElementById('swCrfVal').textContent = s.sw_hevc_crf;
       document.getElementById('settingsTempDir').value      = s.local_temp_dir;
       document.getElementById('settingsDefaultSort').value  = s.default_sort || 'bitrate';
-      document.getElementById('settingsEstimation').checked = !!s.estimation_enabled;
+      const thr = s.low_savings_threshold_pct !== undefined ? s.low_savings_threshold_pct : 5;
+      document.getElementById('settingsLowSavingsThreshold').value = thr;
+      document.getElementById('lowSavingsThresholdVal').textContent = thr;
     })
     .catch(() => {}); // show modal even if fetch fails — defaults already in HTML
   _settingsModal = new bootstrap.Modal(document.getElementById('settingsModal'));
@@ -1959,11 +1981,11 @@ function openSettings() {
 
 function saveSettings() {
   const payload = {
-    qsv_quality:         parseInt(document.getElementById('qsvQuality').value, 10),
-    sw_hevc_crf:         parseInt(document.getElementById('swCrf').value, 10),
-    local_temp_dir:      document.getElementById('settingsTempDir').value.trim(),
-    default_sort:        document.getElementById('settingsDefaultSort').value,
-    estimation_enabled:  document.getElementById('settingsEstimation').checked,
+    qsv_quality:               parseInt(document.getElementById('qsvQuality').value, 10),
+    sw_hevc_crf:               parseInt(document.getElementById('swCrf').value, 10),
+    local_temp_dir:            document.getElementById('settingsTempDir').value.trim(),
+    default_sort:              document.getElementById('settingsDefaultSort').value,
+    low_savings_threshold_pct: parseInt(document.getElementById('settingsLowSavingsThreshold').value, 10),
   };
   fetch('/api/settings', {
     method: 'POST',
@@ -2007,8 +2029,6 @@ document.addEventListener('DOMContentLoaded', function() {
         const am = document.getElementById('animeMode');
         if (am) am.checked = s.anime_mode;
       }
-      // Estimation off by default — respect saved setting
-      _estUserPaused = !(s.estimation_enabled);
     })
     .catch(() => {});
 })();
@@ -2077,8 +2097,7 @@ async function cleanupLegacyFolders() {
   const btn = document.getElementById('cleanupBtn');
   if (btn) btn.disabled = true;
 
-  // Stop the estimation chain so no in-flight sample encode holds a file open.
-  // We can't abort a fetch already sent, so wait up to 12 s for it to finish.
+  // Stop any in-flight estimation so no sample encode holds a file open.
   if (_estRunning) {
     _estCancelled = true;
     _estRunning   = false;
@@ -2090,30 +2109,55 @@ async function cleanupLegacyFolders() {
     });
   }
 
-  try {
-    const resp = await fetch('/api/cleanup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: _currentScanPath }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      alert('Cleanup error: ' + (data.error || resp.statusText));
-      return;
-    }
-    const moved   = (data.moved   || []).length;
-    const skipped = (data.skipped || []).length;
-    const errors  = (data.errors  || []).length;
-    let msg = `Cleanup complete: ${moved} file(s) moved out of legacy folders.`;
-    if (skipped) msg += ` ${skipped} skipped (destination exists).`;
-    if (errors)  msg += ` ${errors} error(s).`;
-    alert(msg);
-    if (moved > 0) rescanFolder();
-  } catch (e) {
-    alert('Cleanup failed: ' + e.message);
-  } finally {
+  // Prepare and show the progress modal
+  const modalEl = document.getElementById('cleanupModal');
+  const modal   = bootstrap.Modal.getOrCreateInstance(modalEl);
+  document.getElementById('cleanupBar').style.width      = '0%';
+  document.getElementById('cleanupCountLabel').textContent = 'Scanning\u2026';
+  document.getElementById('cleanupMovedLabel').textContent = '';
+  document.getElementById('cleanupCurrentFile').textContent = '\u00a0';
+  modal.show();
+
+  let movedFinal = 0;
+  await new Promise(resolve => {
+    const es = new EventSource('/api/cleanup_stream?path=' + encodeURIComponent(_currentScanPath));
+    es.onmessage = e => {
+      const ev = JSON.parse(e.data);
+      if (ev.type === 'scan_done') {
+        const t = ev.total;
+        document.getElementById('cleanupCountLabel').textContent = t === 0 ? 'Nothing to move' : '0 / ' + t;
+        if (t === 0) document.getElementById('cleanupBar').style.width = '100%';
+      } else if (ev.type === 'progress') {
+        const pct = ev.total > 0 ? Math.round(ev.done / ev.total * 100) : 100;
+        document.getElementById('cleanupBar').style.width      = pct + '%';
+        document.getElementById('cleanupCountLabel').textContent = ev.done + ' / ' + ev.total;
+        document.getElementById('cleanupCurrentFile').textContent = ev.name || '\u00a0';
+      } else if (ev.type === 'done') {
+        movedFinal = ev.moved;
+        document.getElementById('cleanupBar').style.width      = '100%';
+        document.getElementById('cleanupCountLabel').textContent = ev.total !== undefined ? ev.total + ' / ' + ev.total : 'Done';
+        let lbl = ev.moved + ' moved';
+        if (ev.skipped) lbl += ', ' + ev.skipped + ' skipped';
+        if (ev.errors)  lbl += ', ' + ev.errors  + ' errors';
+        document.getElementById('cleanupMovedLabel').textContent  = lbl;
+        document.getElementById('cleanupCurrentFile').textContent = '\u00a0';
+        es.close();
+        resolve();
+      } else if (ev.type === 'error') {
+        document.getElementById('cleanupCountLabel').textContent = 'Error: ' + (ev.message || 'unknown');
+        es.close();
+        resolve();
+      }
+    };
+    es.onerror = () => { es.close(); resolve(); };
+  });
+
+  // Brief pause so the user can see the final state, then close
+  setTimeout(() => {
+    modal.hide();
     if (btn) btn.disabled = false;
-  }
+    if (movedFinal > 0) rescanFolder();
+  }, 900);
 }
 
 // ============================================================

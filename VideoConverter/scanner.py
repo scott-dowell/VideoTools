@@ -391,6 +391,8 @@ def walk(root: str) -> Generator[dict, None, None]:
                     out_mb_val  = db_info.get("output_size_mb")
                     saved_mb_val = db_info.get("saved_mb")
                     saved_pct_val = db_info.get("saved_pct")
+                    est_pct_val = db_info.get("est_saving_pct")
+                    est_mb_val  = db_info.get("est_saving_mb")
                     folder_files.append({
                         "full_path":    fp,
                         "name":         filename,
@@ -405,6 +407,8 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "output":       str(round(out_mb_val, 1)) if out_mb_val else None,
                         "saved":        str(round(saved_mb_val, 1)) if saved_mb_val else None,
                         "pct":          str(saved_pct_val) if saved_pct_val is not None else None,
+                        "est_pct":      est_pct_val,
+                        "est_mb":       est_mb_val,
                     })
                     if cached_bitrate is None:
                         record_id = db_info.get("id")
@@ -437,6 +441,8 @@ def walk(root: str) -> Generator[dict, None, None]:
                 "status":          db_status if (db_status and db_status not in ("pending", "queued")) else "pending",
                 "force_sw":        bool(db_info.get("force_sw", False)),
                 "dropped_streams": db_info.get("dropped_streams", []),
+                "est_pct":         db_info.get("est_saving_pct"),
+                "est_mb":          db_info.get("est_saving_mb"),
             }
 
             folder_files.append(file_dict)

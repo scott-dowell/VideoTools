@@ -29,6 +29,7 @@ td, th { vertical-align: middle; border-color: #21262d; }
 .badge-done       { background:#14532d; color:#86efac; }
 .badge-failed     { background:#7f1d1d; color:#fca5a5; }
 .badge-no-saving  { background:#1c2d3d; color:#7ab8d9; }
+.badge-low-savings{ background:#1c2d1c; color:#6ee7b7; }
 .badge-skipped    { background:#2d1f3d; color:#c084fc; }
 .badge-ocr-done   { background:#0d3d2d; color:#34d399; font-size:.65rem; }
 .badge-ocr-skip   { background:#1e2530; color:#6b7280; font-size:.65rem; }
@@ -107,6 +108,7 @@ tr.drag-over > td { background-color: rgba(29,109,224,.15) !important;
 .chip-no-saving.active { border-color:#4a9bc0; color:#4a9bc0; background:rgba(74,155,192,.1); }
 .chip-skipped.active   { border-color:#c084fc; color:#c084fc; background:rgba(192,132,252,.1); }
 .chip-pending.active   { border-color:#d29922; color:#d29922; background:rgba(210,153,34,.1); }
+.chip-low-savings.active { border-color:#6ee7b7; color:#6ee7b7; background:rgba(110,231,183,.1); }
 /* Range filter bar */
 .filter-bar { display:flex; align-items:center; gap:.45rem; flex-wrap:wrap; background: var(--bs-body-bg); }
 .filter-label { font-size:.72rem; font-weight:600; color:var(--bs-secondary-color); white-space:nowrap; }

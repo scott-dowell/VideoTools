@@ -46,6 +46,17 @@ def fresh_db(tmp_path):
     yield db_path
 
 
+@pytest.fixture(autouse=True)
+def mock_estimate():
+    """Prevent real ffmpeg test-encode during the estimate step in all worker tests."""
+    with patch.object(converter, "estimate", return_value={
+        "estimated_saving_pct": 20,
+        "estimated_saving_mb":  100.0,
+        "error": None,
+    }):
+        yield
+
+
 @pytest.fixture
 def client():
     flask_app.app.testing = True

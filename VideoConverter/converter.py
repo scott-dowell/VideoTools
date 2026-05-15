@@ -142,13 +142,49 @@ ProgressCb = Callable[[float, float, int], None]   # pct, fps, eta_secs
 # FFmpeg command builders
 # ---------------------------------------------------------------------------
 
-def _qsv_cmd(input_path: str, output_path: str, quality: int, dropped_streams: list[int] | None = None) -> list[str]:
+# Codecs with a reliable QSV decoder on Intel Quick Sync hardware.
+_QSV_DECODERS: dict[str, str] = {
+    "h264":        "h264_qsv",
+    "hevc":        "hevc_qsv",
+    "mpeg2video":  "mpeg2_qsv",
+    "vp9":         "vp9_qsv",
+    "vc1":         "vc1_qsv",
+    "mjpeg":       "mjpeg_qsv",
+}
+
+
+def _ffprobe_vcodec(input_path: str) -> str:
+    """Return the codec_name of the first video stream, or '' on failure."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-select_streams", "v:0", input_path],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+        )
+        streams = json.loads(result.stdout).get("streams", [])
+        return (streams[0].get("codec_name") or "").lower() if streams else ""
+    except Exception:
+        return ""
+
+
+def _qsv_cmd(input_path: str, output_path: str, quality: int,
+             dropped_streams: list[int] | None = None,
+             v_codec: str = "") -> list[str]:
+    # Use QSV hardware decode when a QSV decoder exists for the source codec.
+    # This keeps decoded frames on the GPU surface, avoiding a CPU↔GPU copy
+    # and dramatically reducing CPU load during encode.
+    qsv_dec = _QSV_DECODERS.get(v_codec or "")
+    if qsv_dec:
+        hw_args = ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", qsv_dec]
+    else:
+        hw_args = []
     cmd = [
         "ffmpeg", "-y",
         "-stats_period", "1",
         "-fflags", "+discardcorrupt",
         "-probesize", "100M",
         "-analyzeduration", "100M",
+    ] + hw_args + [
         "-i", input_path,
         "-c:v", "hevc_qsv",
         "-global_quality", str(quality),
@@ -450,6 +486,9 @@ def compress_simple(
     if tmp_holder is not None:
         tmp_holder[0] = tmp_path
 
+    # Probe source video codec once — used to enable QSV hardware decoding.
+    v_codec = _ffprobe_vcodec(input_path)
+
     encoder_used = ""
     try:
         # Try QSV first (unless the caller requested SW-only for this file)
@@ -458,10 +497,11 @@ def compress_simple(
             success = False  # fall straight through to SW block below
         else:
             encoder_used = "hevc_qsv"
-            log("Compressing with hevc_qsv...")
+            dec_note = f" (hw decode via {_QSV_DECODERS[v_codec]})" if v_codec in _QSV_DECODERS else " (sw decode)"
+            log(f"Compressing with hevc_qsv{dec_note}...")
             qsv_log = conv_logger.tee(log, "compress_qsv") if conv_logger else log
             success = _run_ffmpeg(
-                _qsv_cmd(input_path, tmp_path, quality, dropped_streams), qsv_log, stop_event,
+                _qsv_cmd(input_path, tmp_path, quality, dropped_streams, v_codec=v_codec), qsv_log, stop_event,
                 duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
                 output_path=tmp_path,
             )
@@ -663,6 +703,10 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
     if not os.path.isfile(input_path):
         return {"error": "File not found"}
 
+    # WMV/ASF containers don't support reliable fast-seeking; skip estimation.
+    if Path(input_path).suffix.lower() == ".wmv":
+        return {"error": "Estimation not supported for WMV"}
+
     src_size = os.path.getsize(input_path)
     src_mb   = src_size / 1024 / 1024
 
@@ -680,11 +724,16 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
         f"_est_{Path(input_path).stem}.mkv",
     )
 
+    v_codec = _ffprobe_vcodec(input_path)
+    qsv_dec = _QSV_DECODERS.get(v_codec or "")
+    hw_args = ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", qsv_dec] if qsv_dec else []
+
     try:
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(seek),
             "-t",  str(clip_secs),
+        ] + hw_args + [
             "-i",  input_path,
             "-c:v", "hevc_qsv",
             "-global_quality", str(quality),

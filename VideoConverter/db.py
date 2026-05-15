@@ -120,6 +120,8 @@ def init_db(db_path: str) -> None:
             ("output_bitrate_kbps",  "INTEGER"),
             ("force_sw",             "INTEGER DEFAULT 0"),
             ("dropped_streams",       "TEXT"),
+            ("est_saving_pct",        "INTEGER"),
+            ("est_saving_mb",         "REAL"),
         ]:
             if col not in existing:
                 conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} {typedef}")
@@ -252,7 +254,8 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             SELECT c.id, c.source_path, c.status,
                    c.source_bitrate_kbps, c.source_codec, c.source_duration_secs,
                    c.output_bitrate_kbps, c.output_size_mb, c.saved_mb, c.saved_pct,
-                   c.force_sw, c.dropped_streams
+                   c.force_sw, c.dropped_streams,
+                   c.est_saving_pct, c.est_saving_mb
               FROM conversions c
              INNER JOIN (
                  SELECT source_path, MAX(id) AS max_id
@@ -288,6 +291,8 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             "saved_pct":      row["saved_pct"],
             "force_sw":       bool(row["force_sw"]),
             "dropped_streams": _json_loads_safe(row["dropped_streams"]),
+            "est_saving_pct": row["est_saving_pct"],
+            "est_saving_mb":  row["est_saving_mb"],
         }
     return result
 
@@ -440,6 +445,30 @@ def mark_no_saving(record_id: int, completed_at: str) -> None:
              WHERE id = ?
             """,
             (completed_at, record_id),
+        )
+
+
+def mark_low_savings(record_id: int, est_pct: int, threshold_pct: int, completed_at: str) -> None:
+    """Flip a record to status='low_savings' — pre-encode estimate predicted insufficient savings."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE conversions
+               SET status       = 'low_savings',
+                   error_tail   = ?,
+                   completed_at = ?
+             WHERE id = ?
+            """,
+            (f"Estimated savings: {est_pct}% (below {threshold_pct}% threshold)", completed_at, record_id),
+        )
+
+
+def save_estimate(record_id: int, est_pct: int, est_mb: float) -> None:
+    """Persist the estimate result so it is not re-computed on subsequent runs."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE conversions SET est_saving_pct = ?, est_saving_mb = ? WHERE id = ?",
+            (est_pct, est_mb, record_id),
         )
 
 

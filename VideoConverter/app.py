@@ -150,11 +150,13 @@ def _build_steps(file_info: dict, anime_mode: bool) -> list:
         elif v_codec in ("hevc", "hevc_cuvid", "hevc_qsv"):
             steps.append({"id": "remux", "label": "Remux", "state": "waiting", "detail": "HEVC stream-copy \u2192 MP4", "attempt": 1})
         else:
+            steps.append({"id": "estimate", "label": "Estimate", "state": "waiting", "detail": "", "attempt": 1})
             steps.append({"id": "compress", "label": "Compress", "state": "waiting", "detail": "",           "attempt": 1})
             steps.append({"id": "audio",    "label": "Audio",    "state": "waiting", "detail": "",           "attempt": 1})
             steps.append({"id": "remux",    "label": "Remux",    "state": "waiting", "detail": "MKV \u2192 MP4", "attempt": 1})
         steps.append({"id": "verify", "label": "Verify", "state": "waiting", "detail": "", "attempt": 1})
     else:
+        steps.append({"id": "estimate", "label": "Estimate", "state": "waiting", "detail": "", "attempt": 1})
         steps.append({"id": "compress", "label": "Compress", "state": "waiting", "detail": "", "attempt": 1})
         steps.append({"id": "verify",   "label": "Verify",   "state": "waiting", "detail": "", "attempt": 1})
     return steps
@@ -244,7 +246,7 @@ def _is_fatal_device_error(exc: BaseException) -> bool:
     return False
 
 
-def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
+def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings_threshold_pct: int = 5) -> None:
     """Runs in a daemon thread; processes the file queue sequentially."""
     total_saved = 0.0
 
@@ -471,7 +473,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         # Always check the live DB status — never trust what the client sent
         db_rec = db.get_latest_statuses_by_paths([full_path]).get(full_path, {})
         db_status = db_rec.get("status")
-        if db_status in ("done", "skipped", "no_saving"):
+        if db_status in ("done", "skipped", "no_saving", "low_savings"):
             with _job_lock:
                 _job["files"][idx]["status"] = db_status
                 _job["current_index"] = idx
@@ -594,6 +596,41 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
         src_hash = db.hash_file_head(full_path)
         if src_hash:
             db.update_source_hash(rec_id, src_hash)
+
+        # --- Step 0: Estimate (run before encode when step is present) ---
+        _has_estimate = any(s["id"] == "estimate" for s in _new_steps)
+        if _has_estimate and not _stop_event.is_set():
+            # Use cached estimate from DB if available — avoids the 10s test-encode
+            # on re-runs (e.g. queue re-started after threshold change).
+            _cached_pct = db_rec.get("est_saving_pct")
+            _cached_mb  = db_rec.get("est_saving_mb")
+            if _cached_pct is not None and _cached_mb is not None:
+                _est = {"estimated_saving_pct": _cached_pct, "estimated_saving_mb": _cached_mb, "error": None}
+                _step("estimate", "running", "cached")
+            else:
+                _step("estimate", "running", "sampling 10s clip\u2026")
+                _est = converter.estimate(full_path, quality=quality)
+            if _est.get("error"):
+                # WMV, too short, etc. — skip estimate, proceed to encode normally
+                _step("estimate", "skipped", _est["error"])
+            else:
+                _est_pct = _est["estimated_saving_pct"]
+                _est_mb  = _est["estimated_saving_mb"]
+                # Persist result so it is reused on any future run
+                db.save_estimate(rec_id, _est_pct, _est_mb)
+                with _job_lock:
+                    _job["files"][idx]["est_pct"] = _est_pct
+                    _job["files"][idx]["est_mb"]  = _est_mb
+                _threshold = low_savings_threshold_pct
+                if _est_pct < _threshold:
+                    _step("estimate", "done", f"~{_est_pct}% \u2014 below {_threshold}% threshold")
+                    _job_log(f"Estimated savings {_est_pct}% < {_threshold}% threshold \u2014 skipping encode.")
+                    db.mark_low_savings(rec_id, _est_pct, _threshold, _utcnow())
+                    with _job_lock:
+                        _job["files"][idx]["status"] = "low_savings"
+                    continue
+                else:
+                    _step("estimate", "done", f"~{_est_pct}% \u00b7 {_est_mb}\u202fMB")
 
         _conv_start = time.time()
         try:
@@ -748,12 +785,12 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int) -> None:
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
 
 _SETTINGS_DEFAULTS = {
-    "qsv_quality":        config.QSV_QUALITY,
-    "sw_hevc_crf":        config.SW_HEVC_CRF,
-    "local_temp_dir":     config.LOCAL_TEMP_DIR,
-    "default_sort":       "bitrate",   # bitrate | size | name
-    "anime_mode":         False,
-    "estimation_enabled": False,
+    "qsv_quality":               config.QSV_QUALITY,
+    "sw_hevc_crf":               config.SW_HEVC_CRF,
+    "local_temp_dir":            config.LOCAL_TEMP_DIR,
+    "default_sort":              "bitrate",   # bitrate | size | name
+    "anime_mode":                False,
+    "low_savings_threshold_pct": 5,
 }
 
 def _load_settings() -> dict:
@@ -856,6 +893,57 @@ def _cleanup_legacy_folders(root_path: str) -> dict:
             pass
 
     return {"moved": moved, "skipped": skipped, "errors": errors}
+
+
+def _cleanup_legacy_folders_stream(root_path: str):
+    """Generator version of cleanup — yields SSE-ready progress dicts.
+
+    Events:
+      {"type": "scan_done", "total": N}
+      {"type": "progress",  "done": N, "total": N, "name": "<filename>"}
+      {"type": "done",      "moved": N, "skipped": N, "errors": N}
+    """
+    # Phase 1: fast walk to collect all candidates first (gives us a total)
+    candidates: list[tuple[str, str]] = []
+    legacy_dirs: list[str] = []
+    for dirpath, _dirnames, filenames in os.walk(root_path, topdown=False):
+        if os.path.basename(dirpath).lower() not in _LEGACY_FOLDERS:
+            continue
+        legacy_dirs.append(dirpath)
+        for filename in filenames:
+            src = os.path.join(dirpath, filename)
+            dest = _resolve_cleanup_dest(src)
+            if dest is not None:
+                candidates.append((src, dest))
+
+    total = len(candidates)
+    yield {"type": "scan_done", "total": total}
+
+    # Phase 2: move files one by one, yielding progress before each
+    moved_n = skipped_n = errors_n = 0
+    for i, (src, dest) in enumerate(candidates):
+        yield {"type": "progress", "done": i, "total": total, "name": os.path.basename(src)}
+        if os.path.exists(dest):
+            skipped_n += 1
+            continue
+        try:
+            shutil.move(src, dest)
+            moved_n += 1
+            if os.path.basename(os.path.dirname(src)).lower() == "failed":
+                db.delete_records_by_path(src)
+                db.delete_records_by_path(dest)
+        except Exception:
+            errors_n += 1
+
+    # Remove now-empty legacy dirs
+    for d in legacy_dirs:
+        try:
+            if os.path.isdir(d) and not os.listdir(d):
+                os.rmdir(d)
+        except Exception:
+            pass
+
+    yield {"type": "done", "moved": moved_n, "skipped": skipped_n, "errors": errors_n}
 
 
 def _volume_label(drive: str) -> str:
@@ -962,6 +1050,8 @@ def api_settings_post():
             data["qsv_quality"] = max(1, min(51, int(data["qsv_quality"])))
         if "sw_hevc_crf" in data:
             data["sw_hevc_crf"] = max(0, min(51, int(data["sw_hevc_crf"])))
+        if "low_savings_threshold_pct" in data:
+            data["low_savings_threshold_pct"] = max(0, min(100, int(data["low_savings_threshold_pct"])))
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid numeric value"}), 400
     _save_settings({**_load_settings(), **data})
@@ -992,6 +1082,7 @@ def api_start():
     anime     = bool(data.get("anime_mode", False))
     settings  = _load_settings()
     quality   = int(settings.get("qsv_quality", config.QSV_QUALITY))
+    threshold = int(settings.get("low_savings_threshold_pct", 5))
     # Apply local_temp_dir so ffmpeg staging uses the user-configured path
     temp_dir  = settings.get("local_temp_dir", "").strip()
     if temp_dir:
@@ -1025,7 +1116,7 @@ def api_start():
 
     def _worker_safe():
         try:
-            _queue_worker(list(files), anime, quality)
+            _queue_worker(list(files), anime, quality, threshold)
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
@@ -1131,6 +1222,34 @@ def api_cleanup():
         return jsonify({"error": "Not a directory"}), 400
     result = _cleanup_legacy_folders(path)
     return jsonify(result)
+
+
+@app.route("/api/cleanup_stream")
+def api_cleanup_stream():
+    """Stream cleanup progress as Server-Sent Events.
+
+    Query param: path=<root directory to clean up>
+    Emits: scan_done → progress (×N) → done
+    """
+    path = request.args.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    path = os.path.normpath(path)
+    if not os.path.isdir(path):
+        return jsonify({"error": "Not a directory"}), 400
+
+    def _generate():
+        try:
+            for event in _cleanup_legacy_folders_stream(path):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    return Response(
+        stream_with_context(_generate()),
+        mimetype="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @app.route("/api/open")

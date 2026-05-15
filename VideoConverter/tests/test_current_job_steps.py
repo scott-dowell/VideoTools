@@ -45,7 +45,7 @@ NON_ANIME = {
 def test_h264_anime_with_pgs():
     steps = _build_steps(H264_PGS, anime_mode=True)
     ids = [s["id"] for s in steps]
-    assert ids == ["ocr", "compress", "audio", "remux", "verify"]
+    assert ids == ["ocr", "estimate", "compress", "audio", "remux", "verify"]
     ocr = next(s for s in steps if s["id"] == "ocr")
     assert ocr["state"] == "waiting"
 
@@ -53,7 +53,7 @@ def test_h264_anime_with_pgs():
 def test_h264_anime_no_pgs():
     steps = _build_steps(H264_ASS, anime_mode=True)
     ids = [s["id"] for s in steps]
-    assert ids == ["ocr", "compress", "audio", "remux", "verify"]
+    assert ids == ["ocr", "estimate", "compress", "audio", "remux", "verify"]
     ocr = next(s for s in steps if s["id"] == "ocr")
     assert ocr["state"] == "skipped"
     assert ocr["detail"] == "No PGS tracks"
@@ -82,7 +82,7 @@ def test_hevc_anime_no_pgs():
 def test_non_anime():
     steps = _build_steps(NON_ANIME, anime_mode=False)
     ids = [s["id"] for s in steps]
-    assert ids == ["compress", "verify"]
+    assert ids == ["estimate", "compress", "verify"]
     assert all(s["state"] == "waiting" for s in steps)
 
 

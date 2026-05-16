@@ -364,14 +364,22 @@ def walk(root: str) -> Generator[dict, None, None]:
                     }
                     db.update_source_path(fallback_rec["id"], full_path)
 
-            if db_status == "done":
-                # If sidecar subtitle files exist alongside the file, reset to pending
-                # so the converter will re-mux them in on the next conversion.
+            if db_status in ("done", "low_savings", "no_saving"):
+                # If sidecar subtitle files exist alongside the file, reset to
+                # pending so the converter's sub-inject path can mux them in
+                # (no re-encode — fast copy + merge).  Match both exact-stem
+                # (Title.srt) and prefix-style (Title.pgs1.srt, Title.en.srt)
+                # using the same dot-separator rule as converter.py.
+                # Note: 'skipped' is an explicit manual skip — not overridden.
                 _SIDECAR_EXTS = {".srt", ".ass", ".ssa"}
                 _src_path = Path(full_path)
+                _stem_lower = _src_path.stem.lower()
                 _has_sidecars = any(
-                    _src_path.parent.joinpath(_src_path.stem + ext).exists()
-                    for ext in _SIDECAR_EXTS
+                    p.suffix.lower() in _SIDECAR_EXTS and (
+                        p.stem.lower() == _stem_lower
+                        or p.stem.lower().startswith(_stem_lower + ".")
+                    )
+                    for p in _src_path.parent.iterdir()
                 )
                 if _has_sidecars:
                     record_id = db_info.get("id")
@@ -379,7 +387,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                         db.reset_done_to_pending(record_id)
                     db_status = "pending"
                     # fall through to normal pending handling below
-                else:
+                elif db_status == "done":
                     # Include done files in the grid (read-only row, no re-encoding).
                     # If we don't have the output bitrate, queue for a one-time probe so
                     # the bitrate column is populated (and filterable) going forward.

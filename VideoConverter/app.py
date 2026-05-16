@@ -468,16 +468,69 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
         if _stop_event.is_set() or _soft_stop_event.is_set():
             break
 
+        _sidecar_reset = False  # set True when re-queuing a done/low_savings file for sub-inject only
         full_path = file_info["full_path"].replace("\\", "/")
 
         # Always check the live DB status — never trust what the client sent
         db_rec = db.get_latest_statuses_by_paths([full_path]).get(full_path, {})
         db_status = db_rec.get("status")
         if db_status in ("done", "skipped", "no_saving", "low_savings"):
-            with _job_lock:
-                _job["files"][idx]["status"] = db_status
-                _job["current_index"] = idx
-            continue
+            # For statuses where re-encode is normally suppressed, check if
+            # sidecar subtitle files have appeared alongside the file
+            # (.pgsN.srt, .en.srt, .srt, etc.).  If so, re-process so the
+            # converter's sub-inject path can mux them in (no re-encode —
+            # just a fast copy + merge).  Applies to done/low_savings/no_saving;
+            # 'skipped' is an explicit manual skip so we leave it alone.
+            _should_skip = True
+            if db_status in ("done", "low_savings", "no_saving"):
+                from pathlib import Path as _Path
+                _SIDECAR_EXTS = {".srt", ".ass", ".ssa"}
+                _fp = _Path(full_path)
+                _stem_lower = _fp.stem.lower()
+                try:
+                    _should_skip = not any(
+                        p.suffix.lower() in _SIDECAR_EXTS and (
+                            p.stem.lower() == _stem_lower
+                            or p.stem.lower().startswith(_stem_lower + ".")
+                        )
+                        for p in _fp.parent.iterdir()
+                    )
+                except OSError:
+                    pass
+            if _should_skip:
+                with _job_lock:
+                    _job["files"][idx]["status"] = db_status
+                    _job["current_index"] = idx
+                continue
+            # Sidecar(s) found — reset DB and flag that this is a sub-inject
+            # operation (no re-encode).  The estimate step will be skipped.
+            _rec_id_for_reset = db_rec.get("id")
+            if _rec_id_for_reset:
+                db.reset_done_to_pending(_rec_id_for_reset)
+            db_status = "pending"
+            _sidecar_reset = True
+        # Independent sidecar check for files already at pending status (e.g.
+        # reset to pending by the scanner before the worker got here).
+        # An MP4 with sidecar SRT/ASS files will always hit the sub-inject
+        # fast-path in compress_and_remux (no re-encode), so the savings
+        # estimate is meaningless and must be skipped to avoid re-triggering
+        # low_savings from a stale cached estimate.
+        if not _sidecar_reset and full_path.lower().endswith(".mp4"):
+            from pathlib import Path as _Path
+            _SIDECAR_EXTS = {".srt", ".ass", ".ssa"}
+            _sfp = _Path(full_path)
+            _stem_l = _sfp.stem.lower()
+            try:
+                if any(
+                    p.suffix.lower() in _SIDECAR_EXTS and (
+                        p.stem.lower() == _stem_l
+                        or p.stem.lower().startswith(_stem_l + ".")
+                    )
+                    for p in _sfp.parent.iterdir()
+                ):
+                    _sidecar_reset = True
+            except OSError:
+                pass
         force_sw = bool(db_rec.get("force_sw", False))
 
         try:
@@ -600,37 +653,42 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
         # --- Step 0: Estimate (run before encode when step is present) ---
         _has_estimate = any(s["id"] == "estimate" for s in _new_steps)
         if _has_estimate and not _stop_event.is_set():
-            # Use cached estimate from DB if available — avoids the 10s test-encode
-            # on re-runs (e.g. queue re-started after threshold change).
-            _cached_pct = db_rec.get("est_saving_pct")
-            _cached_mb  = db_rec.get("est_saving_mb")
-            if _cached_pct is not None and _cached_mb is not None:
-                _est = {"estimated_saving_pct": _cached_pct, "estimated_saving_mb": _cached_mb, "error": None}
-                _step("estimate", "running", "cached")
+            if _sidecar_reset:
+                # Re-queued for sidecar merge only — no re-encode, so the
+                # savings estimate is meaningless.  Skip it unconditionally.
+                _step("estimate", "skipped", "sidecar merge — no re-encode")
             else:
-                _step("estimate", "running", "sampling 10s clip\u2026")
-                _est = converter.estimate(full_path, quality=quality)
-            if _est.get("error"):
-                # WMV, too short, etc. — skip estimate, proceed to encode normally
-                _step("estimate", "skipped", _est["error"])
-            else:
-                _est_pct = _est["estimated_saving_pct"]
-                _est_mb  = _est["estimated_saving_mb"]
-                # Persist result so it is reused on any future run
-                db.save_estimate(rec_id, _est_pct, _est_mb)
-                with _job_lock:
-                    _job["files"][idx]["est_pct"] = _est_pct
-                    _job["files"][idx]["est_mb"]  = _est_mb
-                _threshold = low_savings_threshold_pct
-                if _est_pct < _threshold:
-                    _step("estimate", "done", f"~{_est_pct}% \u2014 below {_threshold}% threshold")
-                    _job_log(f"Estimated savings {_est_pct}% < {_threshold}% threshold \u2014 skipping encode.")
-                    db.mark_low_savings(rec_id, _est_pct, _threshold, _utcnow())
-                    with _job_lock:
-                        _job["files"][idx]["status"] = "low_savings"
-                    continue
+                # Use cached estimate from DB if available — avoids the 10s test-encode
+                # on re-runs (e.g. queue re-started after threshold change).
+                _cached_pct = db_rec.get("est_saving_pct")
+                _cached_mb  = db_rec.get("est_saving_mb")
+                if _cached_pct is not None and _cached_mb is not None:
+                    _est = {"estimated_saving_pct": _cached_pct, "estimated_saving_mb": _cached_mb, "error": None}
+                    _step("estimate", "running", "cached")
                 else:
-                    _step("estimate", "done", f"~{_est_pct}% \u00b7 {_est_mb}\u202fMB")
+                    _step("estimate", "running", "sampling 10s clip\u2026")
+                    _est = converter.estimate(full_path, quality=quality)
+                if _est.get("error"):
+                    # WMV, too short, etc. — skip estimate, proceed to encode normally
+                    _step("estimate", "skipped", _est["error"])
+                else:
+                    _est_pct = _est["estimated_saving_pct"]
+                    _est_mb  = _est["estimated_saving_mb"]
+                    # Persist result so it is reused on any future run
+                    db.save_estimate(rec_id, _est_pct, _est_mb)
+                    with _job_lock:
+                        _job["files"][idx]["est_pct"] = _est_pct
+                        _job["files"][idx]["est_mb"]  = _est_mb
+                    _threshold = low_savings_threshold_pct
+                    if _est_pct < _threshold:
+                        _step("estimate", "done", f"~{_est_pct}% \u2014 below {_threshold}% threshold")
+                        _job_log(f"Estimated savings {_est_pct}% < {_threshold}% threshold \u2014 skipping encode.")
+                        db.mark_low_savings(rec_id, _est_pct, _threshold, _utcnow())
+                        with _job_lock:
+                            _job["files"][idx]["status"] = "low_savings"
+                        continue
+                    else:
+                        _step("estimate", "done", f"~{_est_pct}% \u00b7 {_est_mb}\u202fMB")
 
         _conv_start = time.time()
         try:

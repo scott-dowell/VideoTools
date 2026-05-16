@@ -1169,19 +1169,50 @@ def remux_to_mp4(
                 os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
                 if tmp_holder is not None:
                     tmp_holder[0] = _si_tmp
+
+                # Pre-process SRT files with pysubs2 to fix overlapping /
+                # non-monotonic timestamps that cause mov_text muxing to fail.
+                # pysubs2 is already an OCR dependency so it is always available.
+                _processed_sub_paths: list[str] = []
+                _sub_tmp_files: list[str] = []
+                for _srt_p in ext_sub_paths:
+                    if not _srt_p.lower().endswith(".srt"):
+                        _processed_sub_paths.append(_srt_p)
+                        continue
+                    try:
+                        import pysubs2 as _ps2
+                        _subs = _ps2.load(_srt_p, encoding="utf-8-sig")
+                        _subs.sort()
+                        # Clamp each entry's end time to the next entry's start
+                        # so no two events overlap (mov_text requirement).
+                        for _ei in range(len(_subs) - 1):
+                            if _subs[_ei].end > _subs[_ei + 1].start:
+                                _subs[_ei].end = _subs[_ei + 1].start
+                        _tmp_srt = os.path.join(
+                            config.LOCAL_TEMP_DIR,
+                            f"_subfix_{os.getpid()}_{len(_sub_tmp_files)}.srt",
+                        )
+                        _subs.save(_tmp_srt, format_="srt", encoding="utf-8")
+                        _processed_sub_paths.append(_tmp_srt)
+                        _sub_tmp_files.append(_tmp_srt)
+                        log(f"Pre-processed {Path(_srt_p).name}: fixed overlapping timestamps")
+                    except Exception as _pe:
+                        log(f"WARNING: could not pre-process {Path(_srt_p).name}: {_pe} — using original")
+                        _processed_sub_paths.append(_srt_p)
+
                 _si_cmd = ["ffmpeg", "-y", "-i", input_path]
-                for sp in ext_sub_paths:
+                for sp in _processed_sub_paths:
                     _si_cmd += ["-i", sp]
                 _si_cmd += ["-map", "0"]
                 _existing_sub_count = sum(
                     1 for s in sub_streams
                 )
-                for j in range(len(ext_sub_paths)):
+                for j in range(len(_processed_sub_paths)):
                     _si_cmd += ["-map", f"{j+1}:s:0"]
                 _si_cmd += ["-c", "copy", "-c:s", "mov_text"]
-                for j in range(len(ext_sub_paths)):
+                for j in range(len(_processed_sub_paths)):
                     _si_cmd += [f"-metadata:s:s:{_existing_sub_count + j}", "language=eng"]
-                _si_cmd += ["-movflags", "+faststart", _si_tmp]
+                _si_cmd += ["-max_interleave_delta", "0", "-movflags", "+faststart", _si_tmp]
                 log(f"Running: {' '.join(_si_cmd)}")
                 try:
                     _si_proc = subprocess.run(
@@ -1190,7 +1221,13 @@ def remux_to_mp4(
                     )
                 except FileNotFoundError:
                     log("ERROR: ffmpeg not found.")
+                    for _tf in _sub_tmp_files:
+                        try: os.remove(_tf)
+                        except OSError: pass
                     return False, ""
+                for _tf in _sub_tmp_files:
+                    try: os.remove(_tf)
+                    except OSError: pass
                 if conv_logger:
                     conv_logger.write_phase("sub_inject", _si_proc.stdout + _si_proc.stderr)
                 if _si_proc.returncode != 0 or not os.path.exists(_si_tmp):
@@ -1964,9 +2001,13 @@ def compress_and_remux(
     if Path(input_path).suffix.lower() == ".mp4":
         _EXT_SUB_EXTS = {".srt", ".ass", ".ssa"}
         _src = Path(input_path)
+        _stem_lower = _src.stem.lower()
         _has_sidecars = any(
-            _src.parent.joinpath(_src.stem + _ext).exists()
-            for _ext in _EXT_SUB_EXTS
+            p.suffix.lower() in _EXT_SUB_EXTS and (
+                p.stem.lower() == _stem_lower
+                or p.stem.lower().startswith(_stem_lower + ".")
+            )
+            for p in _src.parent.iterdir()
         )
         if _has_sidecars:
             log("MP4 with sidecar subtitles — skipping compression, injecting subs directly.")

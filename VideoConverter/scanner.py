@@ -286,6 +286,7 @@ def walk(root: str) -> Generator[dict, None, None]:
     to_hash_check: list[dict] = []  # files with no DB record — need 2 MB hash read
     to_probe: list[dict] = []       # files needing ffprobe (no cached bitrate)
     to_probe_done: list[dict] = []  # done files with no output bitrate — probe to fill gap
+    to_update_size: list[tuple] = []  # (record_id, size_bytes, size_mb) — fill missing sizes
 
     # ----------------------------------------------------------------
     # Phase 1 — fast folder scan (stat + one batch DB query per folder)
@@ -457,10 +458,15 @@ def walk(root: str) -> Generator[dict, None, None]:
             total_bytes += size_bytes
             if not db_info:
                 # No DB record — must hash-check in Phase 2 before deciding to probe
-                to_hash_check.append({"full_path": fp, "mtime": mtime})
+                to_hash_check.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
             elif cached_bitrate is None:
                 # Known pending file but never probed — queue for Phase 3 ffprobe
-                to_probe.append({"full_path": fp, "mtime": mtime})
+                to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
+            else:
+                # Already probed — queue a size back-fill if DB record lacks it
+                rec_id = db_info.get("id")
+                if rec_id:
+                    to_update_size.append((rec_id, size_bytes, size_bytes / (1024 * 1024)))
 
         if folder_files:
             yield {
@@ -484,6 +490,7 @@ def walk(root: str) -> Generator[dict, None, None]:
     for entry in to_hash_check:
         fp    = entry["full_path"]
         mtime = entry["mtime"]
+        size_bytes = entry["size_bytes"]
         file_hash = db.hash_file_head(fp)
         if file_hash:
             hash_rec = db.get_record_by_hash(file_hash)
@@ -492,15 +499,16 @@ def walk(root: str) -> Generator[dict, None, None]:
                 yield {"type": "remove", "full_path": fp, "reason": "already converted (hash match)"}
                 continue
         # No hash match — forward to Phase 3 for ffprobe
-        to_probe.append({"full_path": fp, "mtime": mtime})
+        to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
 
     # ----------------------------------------------------------------
     # Phase 3 — ffprobe each file, emit probe / remove events
     # ----------------------------------------------------------------
     kept = 0
     for entry in to_probe:
-        fp    = entry["full_path"]
-        mtime = entry["mtime"]
+        fp         = entry["full_path"]
+        mtime      = entry["mtime"]
+        size_bytes = entry.get("size_bytes") or 0
         probe_data = _ffprobe(fp)
         if probe_data is None:
             yield {"type": "warning", "path": fp, "message": "ffprobe failed — skipping"}
@@ -516,11 +524,17 @@ def walk(root: str) -> Generator[dict, None, None]:
         video_info    = parsed["streams"]["video"]
         display_codec = video_info["codec"] if video_info else "unknown"
         dur_secs      = parsed["duration_secs"]
-        size_bytes    = os.path.getsize(fp)
+        if not size_bytes:
+            try:
+                size_bytes = os.path.getsize(fp)
+            except OSError:
+                size_bytes = 0
+        size_mb      = size_bytes / (1024 * 1024)
         bitrate_kbps  = round(size_bytes * 8 / dur_secs / 1000) if dur_secs > 0 else 0
 
-        # Persist probe result so future scans skip ffprobe for this file.
-        db.save_probe_result(fp, mtime, display_codec, bitrate_kbps, dur_secs)
+        # Persist probe result (including file size) so future scans skip ffprobe.
+        db.save_probe_result(fp, mtime, display_codec, bitrate_kbps, dur_secs,
+                             source_size_bytes=size_bytes, source_size_mb=size_mb)
 
         yield {
             "type":        "probe",
@@ -579,3 +593,6 @@ def walk(root: str) -> Generator[dict, None, None]:
         "total_files": kept,
         "total_mb":    total_bytes / (1024 * 1024),
     }
+
+    # Back-fill size data for existing records that lacked it (single batch write).
+    db.batch_update_sizes(to_update_size)

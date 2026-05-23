@@ -12,9 +12,10 @@ let _searchQuery  = '';
 let _filterSizeMin = ''; let _filterSizeMax = '';
 let _filterBrMin   = ''; let _filterBrMax   = '';
 let _filterDurMin  = ''; let _filterDurMax  = '';
+let _filterCodec   = '';
 let _appState     = 'idle';  // idle | scanning | ready | running | done | stopped
 let _dragSrcIndex = null;
-let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'duration' | 'est_saving'
+let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'duration' | 'est_saving' | 'est_saving_mb'
 let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
 let _sessionSavedMB = null;   // null = no run this session, number = MB saved this run
@@ -102,7 +103,8 @@ function _sortFiles(files) {
   else if (_sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name) * mul);
   else if (_sortBy === 'path') arr.sort((a, b) => (a.full_path || '').localeCompare(b.full_path || '') * mul);
   else if (_sortBy === 'duration') arr.sort((a, b) => (_parseDuration(b.duration) - _parseDuration(a.duration)) * mul);
-  else if (_sortBy === 'est_saving') arr.sort((a, b) => ((b.est_pct || 0) - (a.est_pct || 0)) * mul);
+  else if (_sortBy === 'est_saving')    arr.sort((a, b) => ((b.est_pct || 0) - (a.est_pct || 0)) * mul);
+  else if (_sortBy === 'est_saving_mb') arr.sort((a, b) => ((b.est_mb  || 0) - (a.est_mb  || 0)) * mul);
   return arr;
 }
 
@@ -161,6 +163,8 @@ function setButtonStates(state) {
   const prev = _appState;
   _appState = state;
   document.getElementById('startBtn').disabled  = state !== 'ready';
+  const estimateBtn = document.getElementById('estimateBtn');
+  if (estimateBtn) estimateBtn.disabled = state !== 'ready';
   document.getElementById('pauseBtn').disabled  = state !== 'running';
   document.getElementById('stopBtn').disabled   = !(state === 'running' || state === 'scanning');
   const hstopBtn = document.getElementById('hstopBtn');
@@ -169,6 +173,11 @@ function setButtonStates(state) {
   if (rescanBtn) rescanBtn.disabled = !_currentScanPath || state === 'running';
   const cleanupBtn = document.getElementById('cleanupBtn');
   if (cleanupBtn) cleanupBtn.disabled = !_currentScanPath || state === 'running';
+  // Modal action buttons — disable Prep and Cleanup when a job is running
+  const modalPrepBtn    = document.getElementById('modalPrepBtn');
+  const modalCleanupBtn = document.getElementById('modalCleanupBtn');
+  if (modalPrepBtn    && _selectedPath) modalPrepBtn.disabled    = state === 'running';
+  if (modalCleanupBtn && _selectedPath) modalCleanupBtn.disabled = state === 'running';
   // Enable drag handles only when queue is ready and not running
   const canDrag = (state === 'ready');
   document.querySelectorAll('#queueBody tr[id^="row-"]').forEach(tr => {
@@ -386,6 +395,10 @@ function _updateRowProbe(idx, f) {
   if (tdDur) {
     tdDur.textContent = f.duration || '—';
   }
+  // Scroll to keep the probed row visible (instant — no smooth-scroll jitter)
+  if (_probeDone < _probeTotal) {
+    tr.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  }
 }
 
 function populateTable(files) {
@@ -486,13 +499,15 @@ function _fileMatchesFilter(f) {
   const sizeMB = parseFloat((f.size || '0').replace(/,/g, '')) || 0;
   const kbps   = f.bitrate_kbps || _fileBitrate(f);
   const durMin = _parseDuration(f.duration) / 60;
-  const matchSize = (!_filterSizeMin || sizeMB >= +_filterSizeMin) &&
-                    (!_filterSizeMax || sizeMB <= +_filterSizeMax);
-  const matchBr   = (!_filterBrMin   || kbps   >= +_filterBrMin)   &&
-                    (!_filterBrMax   || kbps   <= +_filterBrMax);
-  const matchDur  = (!_filterDurMin  || durMin >= +_filterDurMin)  &&
-                    (!_filterDurMax  || durMin <= +_filterDurMax);
-  return matchStatus && matchSearch && matchSize && matchBr && matchDur;
+  const matchSize  = (!_filterSizeMin || sizeMB >= +_filterSizeMin) &&
+                     (!_filterSizeMax || sizeMB <= +_filterSizeMax);
+  const matchBr    = (!_filterBrMin   || kbps   >= +_filterBrMin)   &&
+                     (!_filterBrMax   || kbps   <= +_filterBrMax);
+  const matchDur   = (!_filterDurMin  || durMin >= +_filterDurMin)  &&
+                     (!_filterDurMax  || durMin <= +_filterDurMax);
+  const matchCodec = !_filterCodec ||
+                     (f.codec || '').toLowerCase().includes(_filterCodec);
+  return matchStatus && matchSearch && matchSize && matchBr && matchDur && matchCodec;
 }
 
 function _updateSessionCard() {
@@ -595,14 +610,15 @@ function onFilterChange() {
   _filterBrMax   = document.getElementById('fBrMax').value;
   _filterDurMin  = document.getElementById('fDurMin').value;
   _filterDurMax  = document.getElementById('fDurMax').value;
-  const hasFilter = _filterSizeMin || _filterSizeMax || _filterBrMin || _filterBrMax || _filterDurMin || _filterDurMax;
+  _filterCodec   = (document.getElementById('fCodec').value || '').toLowerCase().trim();
+  const hasFilter = _filterSizeMin || _filterSizeMax || _filterBrMin || _filterBrMax || _filterDurMin || _filterDurMax || _filterCodec;
   const btn = document.getElementById('filterToggleBtn');
   if (btn) btn.classList.toggle('active', !!hasFilter);
   applyFilter();
 }
 
 function clearRangeFilters() {
-  ['fSizeMin','fSizeMax','fBrMin','fBrMax','fDurMin','fDurMax'].forEach(id => {
+  ['fSizeMin','fSizeMax','fBrMin','fBrMax','fDurMin','fDurMax','fCodec'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = '';
   });
@@ -683,9 +699,10 @@ function scanFolder(path) {
   _filterSizeMin = ''; _filterSizeMax = '';
   _filterBrMin   = ''; _filterBrMax   = '';
   _filterDurMin  = ''; _filterDurMax  = '';
+  _filterCodec   = '';
   const sb = document.getElementById('searchBox');
   if (sb) sb.value = '';
-  ['fSizeMin','fSizeMax','fBrMin','fBrMax','fDurMin','fDurMax'].forEach(id => {
+  ['fSizeMin','fSizeMax','fBrMin','fBrMax','fDurMin','fDurMax','fCodec'].forEach(id => {
     const el = document.getElementById(id); if (el) el.value = '';
   });
   const filterBtn = document.getElementById('filterToggleBtn');
@@ -718,7 +735,7 @@ function scanFolder(path) {
     } else if (msg.type === 'probe') {
       if (_probeDone === 0) _scanStripPhase2();
       const idx = _fileIndexByPath[msg.full_path];
-      if (idx === undefined) return;
+      if (idx === undefined) { _probeDone++; _scanStripProbeProgress(); return; }
       const f = _files[idx];
       f.codec        = msg.codec;
       f.duration     = msg.duration;
@@ -746,8 +763,8 @@ function scanFolder(path) {
       _scanStripProbeProgress();
       updateStats(_files);
     } else if (msg.type === 'scan_done') {
-      // Phase 1 complete — grid is fully populated, enable actions immediately.
-      // Phase 2 (ffprobe) will continue streaming for files without cached probe data.
+      // Phase 1 complete — grid may have buffered files still awaiting probe.
+      // Enable actions immediately; Phase 2 (ffprobe) streams the rest.
       const totalGB = (msg.total_mb / 1024).toFixed(1);
       document.getElementById('totalSizeLabel').textContent = totalGB + ' GB total';
       _probeTotal = msg.total_files;  // only files actually needing Phase 2/3 probe
@@ -778,7 +795,7 @@ function scanFolder(path) {
         setButtonStates('ready');
       }
     } else if (msg.type === 'done') {
-      // Phase 2 complete — re-render with sort applied now that bitrates are known
+      // Phase 3 complete — re-render with sort applied now that bitrates are known
       _scanEs.close(); _scanEs = null;
       _scanStripHide();
       const totalGB = (msg.total_mb / 1024).toFixed(1);
@@ -828,12 +845,19 @@ function _scanStripPhase2() {
   if (!strip) return;
   strip.classList.add('scan-probing');
   icon.className = 'bi bi-cpu est-strip-icon';
-  _scanStripProbeProgress();
+  // Looping indeterminate bar until the first probe result arrives
+  const label = document.getElementById('scanStripLabel');
+  const bar   = document.getElementById('scanBar');
+  if (label) label.textContent = 'Analysing\u2026';
+  if (bar) bar.classList.add('scan-bar-indeterminate');
 }
 function _scanStripProbeProgress() {
   const label = document.getElementById('scanStripLabel');
   const bar   = document.getElementById('scanBar');
   if (!label || !bar) return;
+  if (_probeDone === 0) return;  // still in hash-check phase — leave indeterminate
+  // First real probe — stop the looping animation
+  bar.classList.remove('scan-bar-indeterminate');
   const pct = _probeTotal > 0 ? Math.round(_probeDone / _probeTotal * 100) : 0;
   bar.style.transition = 'width .3s ease';
   bar.style.width = pct + '%';
@@ -939,7 +963,7 @@ function _estTick(pending, i) {
       }
       // If currently sorted by est_saving, re-apply the sort live so the table
       // reorders itself as each result arrives.
-      if (_sortBy === 'est_saving') setSortBy('est_saving');
+      if (_sortBy === 'est_saving' || _sortBy === 'est_saving_mb') setSortBy(_sortBy);
       _estDone++;
       _updateEstStrip();
       // Delay before next: longer when crossing folder boundary
@@ -1134,6 +1158,10 @@ function _pollStatus() {
             row.classList.toggle('tr-low-savings', sf.status === 'low_savings');
             row.classList.toggle('tr-skipped',     sf.status === 'skipped');
             row.classList.toggle('tr-converting',  sf.status === 'converting');
+            // Auto-scroll the active row into view when it starts converting
+            if (sf.status === 'converting') {
+              row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            }
           }
           // Output/Saved/% cells (cols 9, 10, 11)
           if (sf.status === 'done') {
@@ -1185,6 +1213,11 @@ function _pollStatus() {
         _isPaused = false;
         setButtonStates('ready');
         addLog('Queue complete. Saved ' + (s.saved_mb || 0).toFixed(1) + ' MB total.', 'ok');
+        if (_prepEstimateRoot) {
+          const _prepRoot = _prepEstimateRoot;
+          _prepEstimateRoot = null;
+          buildPrepQueue(_prepRoot);
+        }
       } else if (s.state === 'stopped') {
         _stopPolling();
         _stopElapsedTimer();
@@ -1240,6 +1273,47 @@ function startConversion() {
       _startPolling();
     } else {
       addLog('Start failed: ' + (d.error || 'unknown'), 'err');
+    }
+  })
+  .catch(e => addLog('Could not reach server: ' + e, 'err'));
+}
+
+function estimateAll() {
+  if (_files.length === 0) return;
+  _cancelProbeStream();
+  const pendingFiles = _files.filter(f =>
+    (f.status === 'pending' || f.status === 'failed') &&
+    !f.est_pct  // only files without a cached estimate
+  );
+  const alreadyEstimated = _files.filter(f =>
+    (f.status === 'pending' || f.status === 'failed') && f.est_pct
+  ).length;
+  if (pendingFiles.length === 0) {
+    addLog(alreadyEstimated > 0
+      ? `All ${alreadyEstimated} pending files already have estimates \u2014 sort by Est. Savings and start conversion.`
+      : 'No pending files to estimate.', 'warn');
+    return;
+  }
+  addLog(`Estimating savings for ${pendingFiles.length} files\u2026` +
+    (alreadyEstimated > 0 ? ` (${alreadyEstimated} already cached)` : ''), 'info');
+  fetch('/api/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files: pendingFiles, anime_mode: false, estimate_only: true }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      _isPaused = false;
+      _logCursor = 0;
+      const _lb = document.getElementById('logBox');
+      if (_lb) _lb.innerHTML = '';
+      const _fs = document.getElementById('ffmpegStatus');
+      if (_fs) { _fs.textContent = ''; _fs.classList.add('d-none'); }
+      setButtonStates('running');
+      _startPolling();
+    } else {
+      addLog('Estimate failed: ' + (d.error || 'unknown'), 'err');
     }
   })
   .catch(e => addLog('Could not reach server: ' + e, 'err'));
@@ -1312,6 +1386,48 @@ function _menuDivider() {
   const d = document.createElement('hr');
   d.className = 'dropdown-divider';
   return d;
+}
+
+// Delete item with inline confirm step
+function _menuDeleteItem(index, path) {
+  const a = document.createElement('a');
+  a.className = 'dropdown-item text-danger';
+  a.href = '#';
+  a.innerHTML = '<i class="bi bi-trash me-2"></i>Delete (Recycle Bin)';
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Replace with confirm button inline
+    a.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-2"></i>Confirm delete?'
+      + ' <span class="badge ms-1" style="background:rgba(248,81,73,.18);color:#f85149;border:1px solid #f85149;border-radius:2rem;padding:.15rem .55rem;font-size:.72rem;font-weight:600">Yes, trash it</span>';
+    a.onclick = e2 => {
+      e2.preventDefault();
+      e2.stopPropagation();
+      const m = _getRowMenu();
+      if (m) m.style.display = 'none';
+      trashFile(index, path);
+    };
+  });
+  return a;
+}
+
+function trashFile(index, path) {
+  fetch('/api/trash', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path})
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      _files.splice(index, 1);
+      populateTable(_files);
+      updateStats(_files);
+    } else {
+      alert('Delete failed: ' + (d.error || 'unknown error'));
+    }
+  })
+  .catch(err => alert('Delete failed: ' + err));
 }
 
 function showRowMenu(index, btn) {
@@ -1394,6 +1510,12 @@ function showRowMenu(index, btn) {
     _rowMenu.appendChild(_menuDivider());
     _rowMenu.appendChild(_menuItem('bi-x-circle text-danger', 'Remove from Queue',
       () => removeFromQueue(index)));
+  }
+
+  // Delete → Recycle Bin (available for all non-converting rows)
+  if (!isConverting) {
+    _rowMenu.appendChild(_menuDivider());
+    _rowMenu.appendChild(_menuDeleteItem(index, f.full_path));
   }
 
   // Position: align right of button, flip up if near bottom
@@ -2091,8 +2213,8 @@ function rescanFolder() {
   if (_currentScanPath) scanFolder(_currentScanPath);
 }
 
-async function cleanupLegacyFolders() {
-  if (!_currentScanPath) return;
+async function cleanupLegacyFolders(path = _currentScanPath) {
+  if (!path) return;
   _cancelProbeStream();
   const btn = document.getElementById('cleanupBtn');
   if (btn) btn.disabled = true;
@@ -2120,7 +2242,7 @@ async function cleanupLegacyFolders() {
 
   let movedFinal = 0;
   await new Promise(resolve => {
-    const es = new EventSource('/api/cleanup_stream?path=' + encodeURIComponent(_currentScanPath));
+    const es = new EventSource('/api/cleanup_stream?path=' + encodeURIComponent(path));
     es.onmessage = e => {
       const ev = JSON.parse(e.data);
       if (ev.type === 'scan_done') {
@@ -2156,28 +2278,43 @@ async function cleanupLegacyFolders() {
   setTimeout(() => {
     modal.hide();
     if (btn) btn.disabled = false;
-    if (movedFinal > 0) rescanFolder();
+    if (movedFinal > 0) {
+      if (path === _currentScanPath) rescanFolder();
+      else scanFolder(path);
+    }
   }, 900);
 }
 
 // ============================================================
 let _selectedPath = null;
 let _modal = null;
+let _prepEstimateRoot = null; // set during estimate-only pass; triggers buildPrepQueue on done
+
+const _MODAL_ACTION_BTNS = ['confirmFolderBtn', 'modalLoadBtn', 'modalPrepBtn', 'modalAnalyseBtn', 'modalCleanupBtn'];
+
+function _resetModalButtons() {
+  document.getElementById('selectedPathDisplay').textContent = 'No folder selected';
+  _MODAL_ACTION_BTNS.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = true;
+  });
+}
 
 function openBrowser() {
   _selectedPath = null;
-  document.getElementById('confirmFolderBtn').disabled = true;
-  document.getElementById('selectedPathDisplay').textContent = 'No folder selected';
+  _resetModalButtons();
   _modal = new bootstrap.Modal(document.getElementById('folderModal'));
   _modal.show();
-  const lastFolder = localStorage.getItem('vc_last_folder') || '';
-  browseTo(lastFolder);
+  browseTo(localStorage.getItem('vc_last_folder') || '');
 }
+
+// Aliases — all just open the unified folder browser
+function openBrowserForPrep()     { openBrowser(); }
+function openBrowserForAnalysis() { openBrowser(); }
 
 function browseTo(path) {
   _selectedPath = null;
-  document.getElementById('confirmFolderBtn').disabled = true;
-  document.getElementById('selectedPathDisplay').textContent = 'No folder selected';
+  _resetModalButtons();
   const listing = document.getElementById('dirListing');
   listing.innerHTML = '<div class="text-center text-secondary py-5"><div class="spinner-border spinner-border-sm"></div> Loading\u2026</div>';
 
@@ -2310,12 +2447,266 @@ function renderListing(dirs, currentPath, parent) {
 function selectFolder(path) {
   _selectedPath = path;
   document.getElementById('selectedPathDisplay').textContent = path;
-  document.getElementById('confirmFolderBtn').disabled = false;
+  _MODAL_ACTION_BTNS.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = false;
+  });
 }
 
+// Modal action handlers
 function confirmFolder() {
   if (!_selectedPath) return;
   document.getElementById('folderPath').textContent = _selectedPath;
   if (_modal) _modal.hide();
   scanFolder(_selectedPath);
+}
+
+function modalActionAnalyse() {
+  if (!_selectedPath) return;
+  if (_modal) _modal.hide();
+  document.getElementById('faRoot').value = _selectedPath;
+  const analysisModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('folderAnalysisModal'));
+  analysisModal.show();
+  runFolderAnalysis();
+}
+
+function modalActionPrep() {
+  if (!_selectedPath) return;
+  if (_modal) _modal.hide();
+  startPrepEstimate(_selectedPath);
+}
+
+function modalActionCleanup() {
+  if (!_selectedPath) return;
+  if (_modal) _modal.hide();
+  cleanupLegacyFolders(_selectedPath);
+}
+
+async function modalActionLoad() {
+  if (!_selectedPath) return;
+  if (_modal) _modal.hide();
+  await loadFromDb(_selectedPath);
+}
+
+// ============================================================
+// Folder Analysis
+// ============================================================
+function runFolderAnalysis() {
+  ['faSpinner','faTableWrap','faEmpty','faError'].forEach(id => {
+    document.getElementById(id).style.display = id === 'faSpinner' ? '' : 'none';
+  });
+  document.getElementById('faSummary').textContent = '';
+
+  const root       = (document.getElementById('faRoot').value || '').trim();
+  const minDone    = document.getElementById('faMinDone').value;
+  const minPending = document.getElementById('faMinPending').value;
+  const top        = document.getElementById('faTop').value;
+  const sort       = document.getElementById('faSort').value;
+
+  const params = new URLSearchParams({ root, min_done: minDone, min_pending: minPending, top, sort });
+
+  fetch('/api/analyse_folders?' + params)
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('faSpinner').style.display = 'none';
+      if (data.error) {
+        const el = document.getElementById('faError');
+        el.textContent = data.error;
+        el.style.display = '';
+        return;
+      }
+      if (!data.rows || data.rows.length === 0) {
+        document.getElementById('faEmpty').style.display = '';
+        return;
+      }
+      _renderFolderAnalysisTable(data);
+      document.getElementById('faTableWrap').style.display = '';
+      const staleNote = data.stale_removed > 0 ? ` · ${data.stale_removed} stale record${data.stale_removed === 1 ? '' : 's'} removed` : '';
+      document.getElementById('faSummary').textContent =
+        `${data.total_analysed} folders · ${data.opportunity_count} with opportunity · ` +
+        `${data.total_pending} pending files · Est. ${_faMbStr(data.total_est_mb)} additional savings` + staleNote;
+    })
+    .catch(e => {
+      document.getElementById('faSpinner').style.display = 'none';
+      const el = document.getElementById('faError');
+      el.textContent = 'Request failed: ' + e.message;
+      el.style.display = '';
+    });
+}
+
+function _faMbStr(mb) {
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+  return mb.toFixed(0) + ' MB';
+}
+
+function _renderFolderAnalysisTable(data) {
+  const tbody = document.getElementById('faBody');
+  tbody.innerHTML = '';
+
+  data.rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+
+    const pct = r.avg_savings_pct;
+    const pctCls = pct >= 40 ? 'text-success fw-semibold' : pct >= 20 ? 'text-warning' : 'text-secondary';
+    const pendingHtml = r.pending_count > 50
+      ? `<span class="text-success fw-semibold">${r.pending_count}</span>`
+      : r.pending_count;
+    const speedHtml = r.avg_speed != null ? r.avg_speed.toFixed(1) + '&times;' : '&mdash;';
+    const allNoSize = r.pending_no_size === r.pending_count;
+    const someNoSize = r.pending_no_size > 0 && !allNoSize;
+    let estHtml;
+    if (allNoSize) {
+      estHtml = '<span class="text-secondary" title="No size data for pending files — re-scan this folder to populate">? (no size data)</span>';
+    } else if (someNoSize) {
+      const partial = _faMbStr(r.est_additional_mb);
+      estHtml = `<span title="${r.pending_no_size} of ${r.pending_count} pending files have no size data — estimate is partial">~${i < 5 ? '<strong>' + partial + '</strong>' : partial}</span>`;
+    } else {
+      estHtml = i < 5
+        ? `<strong>${_faMbStr(r.est_additional_mb)}</strong>`
+        : _faMbStr(r.est_additional_mb);
+    }
+
+    tr.innerHTML =
+      `<td class="font-monospace small text-break" style="max-width:420px" title="${r.folder}">${r.folder}</td>` +
+      `<td class="text-end text-secondary">${r.done_count}</td>` +
+      `<td class="text-end">${pendingHtml}</td>` +
+      `<td class="text-end ${pctCls}">${Math.round(pct)}%</td>` +
+      `<td class="text-end text-secondary">${speedHtml}</td>` +
+      `<td class="text-end text-secondary">${_faMbStr(r.total_saved_mb)}</td>` +
+      `<td class="text-end">${estHtml}</td>` +
+      `<td class="text-end text-secondary">${r.priority_score.toFixed(1)}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  const tfoot = document.getElementById('faFoot');
+  tfoot.innerHTML =
+    `<tr class="table-secondary fw-semibold">` +
+    `<td>Total (${data.rows.length} shown)</td>` +
+    `<td></td>` +
+    `<td class="text-end">${data.total_pending}</td>` +
+    `<td></td><td></td><td></td>` +
+    `<td class="text-end">${_faMbStr(data.total_est_mb)}</td>` +
+    `<td></td></tr>`;
+}
+
+// ============================================================
+// Prep for Analysis
+// ============================================================
+async function loadFromDb(path) {
+  addLog('Loading records from database for ' + path + '\u2026', 'info');
+  let data;
+  try {
+    const resp = await fetch('/api/load_from_db?root=' + encodeURIComponent(path));
+    data = await resp.json();
+  } catch (e) {
+    addLog('Load from DB error: ' + e, 'err');
+    return;
+  }
+  if (data.error) { addLog('Load from DB error: ' + data.error, 'err'); return; }
+  if (!data.files || data.files.length === 0) {
+    addLog('Load from DB: no records found under ' + path + '. Try Scan instead.', 'warn');
+    return;
+  }
+
+  _currentScanPath = path;
+  localStorage.setItem('vc_last_folder', path);
+  document.getElementById('folderPath').textContent = path;
+
+  _files = data.files.map(f => Object.assign({}, f));
+  _fileIndexByPath = {};
+  _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });
+  populateTable(_files);
+  updateStats(_files);
+  setButtonStates('ready');
+
+  const done    = _files.filter(f => f.status === 'done').length;
+  const pending = _files.filter(f => f.status === 'pending' || f.status === 'failed').length;
+  const totalGB = (_files.reduce((s, f) => s + (parseFloat((f.size || '0').replace(/,/g, '')) || 0), 0) / 1024).toFixed(1);
+  addLog(`Loaded ${data.total} records from DB \u2014 ${totalGB}\u202fGB \u2014 ${done} done, ${pending} pending.`, 'ok');
+}
+
+async function startPrepEstimate(path) {
+  addLog('Prep: gathering pending files under ' + path + '\u2026', 'info');
+  let data;
+  try {
+    const resp = await fetch('/api/prep_scan?root=' + encodeURIComponent(path));
+    data = await resp.json();
+  } catch (e) {
+    addLog('Prep scan error: ' + e, 'err');
+    return;
+  }
+  if (data.error) { addLog('Prep error: ' + data.error, 'err'); return; }
+  if (!data.files || data.files.length === 0) {
+    addLog('Prep: no pending files found under ' + path, 'warn');
+    return;
+  }
+
+  addLog('Prep: ' + data.total + ' pending files found \u2014 starting estimate pass\u2026', 'info');
+
+  // Populate the table so the user sees the files being estimated
+  _currentScanPath = path;
+  document.getElementById('folderPath').textContent = path;
+  _files = data.files.map(f => Object.assign({}, f));
+  _fileIndexByPath = {};
+  _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });
+  populateTable(_files);
+  updateStats(_files);
+
+  _prepEstimateRoot = path;
+  _logCursor = 0;
+  _sessionSavedMB = 0;
+  _sessionProcessed = 0;
+  _updateSessionCard();
+
+  let startData;
+  try {
+    const startResp = await fetch('/api/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: data.files, estimate_only: true, anime_mode: false }),
+    });
+    startData = await startResp.json();
+  } catch (e) {
+    addLog('Prep start error: ' + e, 'err');
+    _prepEstimateRoot = null;
+    return;
+  }
+  if (startData.error) {
+    addLog('Prep start error: ' + startData.error, 'err');
+    _prepEstimateRoot = null;
+    return;
+  }
+  setButtonStates('running');
+  _startPolling();
+}
+
+async function buildPrepQueue(root) {
+  addLog('Prep: selecting one representative file per folder\u2026', 'info');
+  let data;
+  try {
+    const resp = await fetch('/api/build_prep_queue?root=' + encodeURIComponent(root));
+    data = await resp.json();
+  } catch (e) {
+    addLog('Prep build error: ' + e, 'err');
+    return;
+  }
+  if (data.error) { addLog('Prep build error: ' + data.error, 'err'); return; }
+
+  const n = (data.files || []).length;
+  if (n === 0) {
+    addLog('Prep: nothing to queue \u2014 all folders either already seeded or all low-savings.', 'warn');
+    return;
+  }
+
+  // Replace the table with the selected representative files
+  _files = data.files.map(f => Object.assign({}, f));
+  _fileIndexByPath = {};
+  _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });
+  populateTable(_files);
+  updateStats(_files);
+
+  const parts = [n + ' file' + (n === 1 ? '' : 's') + ' queued across ' + data.folders_seeded + ' folder' + (data.folders_seeded === 1 ? '' : 's')];
+  if (data.folders_already_seeded > 0) parts.push(data.folders_already_seeded + ' already seeded');
+  if (data.folders_no_candidates  > 0) parts.push(data.folders_no_candidates  + ' all low-savings');
+  addLog('Prep complete: ' + parts.join(', ') + '. Press Start to convert.', 'ok');
 }

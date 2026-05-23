@@ -145,7 +145,8 @@
             <option value="duration">⇅ Duration</option>
             <option value="name">⇅ Filename</option>
             <option value="path">⇅ Path</option>
-            <option value="est_saving">⇅ Est. Savings</option>
+            <option value="est_saving">⇅ Est. Savings %</option>
+            <option value="est_saving_mb">⇅ Est. Savings MB</option>
           </select>
           <button class="btn btn-sm btn-outline-secondary" id="sortDirBtn" onclick="toggleSortDir()" title="Descending — click for ascending">
             <i class="bi bi-sort-down"></i>
@@ -178,6 +179,9 @@
           <input type="number" min="0" class="form-control form-control-sm filter-input" id="fDurMin" placeholder="Min" oninput="onFilterChange()">
           <span class="filter-sep">–</span>
           <input type="number" min="0" class="form-control form-control-sm filter-input" id="fDurMax" placeholder="Max" oninput="onFilterChange()">
+          <div class="vr mx-1"></div>
+          <span class="filter-label">Codec</span>
+          <input type="text" class="form-control form-control-sm filter-input" id="fCodec" placeholder="e.g. HEVC" oninput="onFilterChange()" style="width:7rem">
           <button class="btn btn-sm btn-link text-secondary p-0 ms-auto" onclick="clearRangeFilters()" title="Clear all range filters">
             <i class="bi bi-x-circle me-1"></i>Clear
           </button>
@@ -231,6 +235,9 @@
         <div class="card-body d-grid gap-2">
           <button class="btn btn-start text-white" id="startBtn" onclick="startConversion()" disabled>
             <i class="bi bi-play-fill me-2"></i>Start Conversion
+          </button>
+          <button class="btn btn-outline-secondary" id="estimateBtn" onclick="estimateAll()" disabled title="Run the 10-second test-encode on all pending files to fill in estimated savings, without converting">
+            <i class="bi bi-calculator me-2"></i>Estimate All
           </button>
           <div class="row g-2">
             <div class="col-6">
@@ -354,6 +361,75 @@
 
 <!-- Shared row action menu (body-level to avoid table overflow clipping) -->
 <div id="rowMenu" style="position:fixed;z-index:9999;display:none;min-width:190px;" class="dropdown-menu shadow"></div>
+
+<!-- Folder Analysis Modal -->
+<div class="modal fade" id="folderAnalysisModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-bar-chart text-primary me-2"></i>Folder Analysis</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0">
+        <!-- filter bar -->
+        <div class="d-flex flex-wrap align-items-center gap-2 px-3 py-2 border-bottom">
+          <span class="text-secondary small">Root</span>
+          <input type="text" class="form-control form-control-sm font-monospace" id="faRoot" style="min-width:220px;max-width:340px" placeholder="e.g. F:\Videos">
+          <button class="btn btn-sm btn-outline-secondary" onclick="openBrowserForAnalysis()" title="Browse for folder">
+            <i class="bi bi-folder2-open"></i>
+          </button>
+          <span class="text-secondary small ms-1">Min done</span>
+          <input type="number" class="form-control form-control-sm" id="faMinDone" value="1" min="0" style="width:4.5rem">
+          <span class="text-secondary small">Min pending</span>
+          <input type="number" class="form-control form-control-sm" id="faMinPending" value="1" min="0" style="width:4.5rem">
+          <span class="text-secondary small">Top</span>
+          <input type="number" class="form-control form-control-sm" id="faTop" value="50" min="1" style="width:4.5rem">
+          <span class="text-secondary small">Sort</span>
+          <select class="form-select form-select-sm" id="faSort" style="width:8rem">
+            <option value="score" selected>Score</option>
+            <option value="savings">Savings %</option>
+            <option value="speed">Speed</option>
+            <option value="pending">Pending</option>
+          </select>
+          <button class="btn btn-sm btn-primary ms-auto" onclick="runFolderAnalysis()">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+          </button>
+        </div>
+        <!-- spinner -->
+        <div id="faSpinner" class="text-center text-secondary py-5">
+          <div class="spinner-border"></div>
+          <div class="mt-2 small">Analysing&hellip;</div>
+        </div>
+        <!-- table -->
+        <div id="faTableWrap" style="display:none;overflow-x:auto">
+          <table class="table table-sm table-hover mb-0" id="faTable">
+            <thead class="table-light sticky-top">
+              <tr>
+                <th>Folder</th>
+                <th class="text-end">Done</th>
+                <th class="text-end">Pending</th>
+                <th class="text-end">Avg Save%</th>
+                <th class="text-end">Speed</th>
+                <th class="text-end">Saved So Far</th>
+                <th class="text-end">Est. Additional</th>
+                <th class="text-end">Score</th>
+              </tr>
+            </thead>
+            <tbody id="faBody"></tbody>
+            <tfoot id="faFoot"></tfoot>
+          </table>
+        </div>
+        <!-- empty / error states -->
+        <div id="faEmpty" class="text-center text-secondary py-5" style="display:none">No folders matched the criteria.</div>
+        <div id="faError" class="text-center text-danger py-5 px-3" style="display:none"></div>
+      </div>
+      <div class="modal-footer">
+        <small class="text-secondary flex-grow-1" id="faSummary"></small>
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Cleanup Progress Modal -->
 <div class="modal fade" id="cleanupModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
@@ -490,6 +566,8 @@
             <option value="size">File size — largest first</option>
             <option value="duration">Duration — longest first</option>
             <option value="name">Filename — alphabetical</option>
+            <option value="est_saving">Est. Savings % — highest first</option>
+            <option value="est_saving_mb">Est. Savings MB — highest first</option>
           </select>
         </div>
         <div class="mb-4">
@@ -540,11 +618,23 @@
           </div>
         </div>
       </div>
-      <div class="modal-footer d-flex align-items-center">
+      <div class="modal-footer d-flex align-items-center gap-1">
         <div class="flex-grow-1 text-secondary small" id="selectedPathDisplay">No folder selected</div>
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-primary" id="confirmFolderBtn" onclick="confirmFolder()" disabled>
-          Select This Folder
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="modalCleanupBtn" onclick="modalActionCleanup()" disabled title="Move files out of hevc/converted subfolders">
+          <i class="bi bi-folder-symlink me-1"></i>Clean up
+        </button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="modalAnalyseBtn" onclick="modalActionAnalyse()" disabled title="Analyse folder conversion savings by subfolder">
+          <i class="bi bi-bar-chart me-1"></i>Analyse
+        </button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="modalPrepBtn" onclick="modalActionPrep()" disabled title="Estimate all pending files and queue one representative per folder">
+          <i class="bi bi-lightning-charge me-1"></i>Prep
+        </button>
+        <button type="button" class="btn btn-outline-info btn-sm" id="modalLoadBtn" onclick="modalActionLoad()" disabled title="Load existing records from database instantly (no filesystem scan)">
+          <i class="bi bi-database me-1"></i>Load
+        </button>
+        <button type="button" class="btn btn-primary btn-sm" id="confirmFolderBtn" onclick="confirmFolder()" disabled>
+          <i class="bi bi-folder-check me-1"></i>Scan
         </button>
       </div>
     </div>

@@ -512,11 +512,13 @@ def save_probe_result(
     codec: str | None,
     bitrate_kbps: int | None,
     duration_secs: float | None,
+    source_size_bytes: int | None = None,
+    source_size_mb: float | None = None,
 ) -> None:
     """
     Upsert probe data for a file so subsequent scans can skip ffprobe.
     Creates a minimal pending record if none exists; otherwise updates
-    bitrate/duration and preserves existing codec if already set.
+    bitrate/duration/size and preserves existing codec if already set.
     """
     source_path = _norm(source_path)
     with _connect() as conn:
@@ -524,12 +526,36 @@ def save_probe_result(
             """
             INSERT INTO conversions
                 (source_path, source_mtime, source_codec,
-                 source_bitrate_kbps, source_duration_secs, status)
-            VALUES (?, ?, ?, ?, ?, 'pending')
+                 source_bitrate_kbps, source_duration_secs,
+                 source_size_bytes, source_size_mb, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
             ON CONFLICT (source_path, source_mtime) DO UPDATE SET
-                source_codec         = COALESCE(conversions.source_codec, excluded.source_codec),
+                source_codec         = COALESCE(conversions.source_codec,         excluded.source_codec),
                 source_bitrate_kbps  = excluded.source_bitrate_kbps,
-                source_duration_secs = excluded.source_duration_secs
+                source_duration_secs = excluded.source_duration_secs,
+                source_size_bytes    = COALESCE(conversions.source_size_bytes,    excluded.source_size_bytes),
+                source_size_mb       = COALESCE(conversions.source_size_mb,       excluded.source_size_mb)
             """,
-            (source_path, source_mtime, codec, bitrate_kbps, duration_secs),
+            (source_path, source_mtime, codec, bitrate_kbps, duration_secs,
+             source_size_bytes, source_size_mb),
+        )
+
+
+def batch_update_sizes(items: list) -> None:
+    """
+    Fill in missing source_size_bytes / source_size_mb for a list of records.
+    items: [(record_id, size_bytes, size_mb), ...]
+    Only updates rows where the value is currently NULL.
+    """
+    if not items:
+        return
+    with _connect() as conn:
+        conn.executemany(
+            """
+            UPDATE conversions
+               SET source_size_bytes = COALESCE(source_size_bytes, ?),
+                   source_size_mb    = COALESCE(source_size_mb,    ?)
+             WHERE id = ?
+            """,
+            [(size_bytes, size_mb, record_id) for record_id, size_bytes, size_mb in items],
         )

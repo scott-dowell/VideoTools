@@ -476,7 +476,8 @@ def compress_simple(
     duration   = _ffprobe_duration(input_path)
 
     suffix   = Path(input_path).suffix.lower()
-    out_ext  = suffix if suffix in (".mp4", ".mkv", ".m4v") else ".mkv"
+    # .m4v uses the ipod muxer which doesn't support HEVC — treat as .mp4
+    out_ext  = ".mp4" if suffix in (".mp4", ".m4v") else (".mkv" if suffix == ".mkv" else ".mkv")
     out_name = Path(input_path).stem + out_ext
 
     _local_temp = _temp_dir_for(output_dir)
@@ -2089,7 +2090,8 @@ def compress_and_remux(
         return False, encoder_used
 
     suffix   = Path(input_path).suffix.lower()
-    out_ext  = suffix if suffix in (".mp4", ".mkv", ".m4v") else ".mkv"
+    # .m4v uses the ipod muxer which doesn't support HEVC — treat as .mp4
+    out_ext  = ".mp4" if suffix in (".mp4", ".m4v") else (".mkv" if suffix == ".mkv" else ".mkv")
     intermediate = os.path.join(compress_dir, Path(input_path).stem + out_ext)
 
     if not os.path.exists(intermediate):
@@ -2263,7 +2265,8 @@ def convert_video(
 
     # Locate output file
     suffix   = Path(input_path).suffix.lower()
-    out_ext  = suffix if suffix in (".mp4", ".mkv", ".m4v") else ".mkv"
+    # .m4v uses the ipod muxer which doesn't support HEVC — treat as .mp4
+    out_ext  = ".mp4" if suffix in (".mp4", ".m4v") else (".mkv" if suffix == ".mkv" else ".mkv")
     out_name = Path(input_path).stem + out_ext
     output_path = os.path.join(output_dir, out_name)
 

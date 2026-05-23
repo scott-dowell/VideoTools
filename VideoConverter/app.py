@@ -6,6 +6,7 @@ import ctypes
 import json
 import os
 import shutil
+import sqlite3
 import string
 import sys
 import threading
@@ -246,7 +247,7 @@ def _is_fatal_device_error(exc: BaseException) -> bool:
     return False
 
 
-def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings_threshold_pct: int = 5) -> None:
+def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings_threshold_pct: int = 5, estimate_only: bool = False) -> None:
     """Runs in a daemon thread; processes the file queue sequentially."""
     total_saved = 0.0
 
@@ -658,6 +659,39 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                 # savings estimate is meaningless.  Skip it unconditionally.
                 _step("estimate", "skipped", "sidecar merge — no re-encode")
             else:
+                # Fast-skip heuristic: HEVC sources already at low bitrate
+                # are extremely unlikely to compress further — skip the 10s
+                # test encode and mark low_savings immediately.
+                # Threshold is 1500 kbps normalised to 1080p @ 25fps so that
+                # 4K/60fps sources are treated fairly.  A 4K 50fps file at
+                # 4446 kbps normalises to ~556 kbps — correctly fast-skipped.
+                _HEVC_FASTSKIP_KBPS = 1500
+                _src_codec   = (db_rec.get("codec") or "").upper()
+                _src_bitrate = db_rec.get("bitrate_kbps")
+                if (_src_codec == "HEVC"
+                        and _src_bitrate is not None):
+                    # Normalise bitrate to 1920×1080 @ 25fps reference
+                    _vid_info    = (file_info.get("streams") or {}).get("video") or {}
+                    _res_str     = (_vid_info.get("resolution") or "")
+                    _fps_str     = (_vid_info.get("fps") or "")
+                    try:
+                        _w, _h   = (int(x) for x in _res_str.split("x"))
+                        _fps_val = float(_fps_str)
+                        _pixels  = _w * _h
+                    except (ValueError, AttributeError):
+                        _pixels  = 1920 * 1080
+                        _fps_val = 25.0
+                    _ref_pixels  = 1920 * 1080
+                    _ref_fps     = 25.0
+                    _norm_bitrate = _src_bitrate * (_ref_pixels / _pixels) * (_ref_fps / max(_fps_val, 1.0))
+                    if _norm_bitrate < _HEVC_FASTSKIP_KBPS:
+                        _step("estimate", "done", f"HEVC {_src_bitrate}\u202fkbps (norm {round(_norm_bitrate)}\u202fkbps) \u2014 fast skip")
+                        _job_log(f"HEVC source at {_src_bitrate} kbps (normalised {round(_norm_bitrate)} kbps < {_HEVC_FASTSKIP_KBPS} kbps) — skipping estimate, marking low_savings.")
+                        db.save_estimate(rec_id, 0, 0.0)
+                        db.mark_low_savings(rec_id, 0, low_savings_threshold_pct, _utcnow())
+                        with _job_lock:
+                            _job["files"][idx]["status"] = "low_savings"
+                        continue
                 # Use cached estimate from DB if available — avoids the 10s test-encode
                 # on re-runs (e.g. queue re-started after threshold change).
                 _cached_pct = db_rec.get("est_saving_pct")
@@ -689,6 +723,14 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                         continue
                     else:
                         _step("estimate", "done", f"~{_est_pct}% \u00b7 {_est_mb}\u202fMB")
+                        if estimate_only:
+                            # Estimate-only pass: don't compress, leave file pending
+                            # so the normal convert queue picks it up later.
+                            _step("compress", "skipped", "estimate-only mode")
+                            db.reset_done_to_pending(rec_id)  # revert running → pending
+                            with _job_lock:
+                                _job["files"][idx]["status"] = "pending"
+                            continue
 
         _conv_start = time.time()
         try:
@@ -1138,6 +1180,7 @@ def api_start():
     data      = request.get_json(force=True, silent=True) or {}
     files     = data.get("files", [])
     anime     = bool(data.get("anime_mode", False))
+    estimate_only = bool(data.get("estimate_only", False))
     settings  = _load_settings()
     quality   = int(settings.get("qsv_quality", config.QSV_QUALITY))
     threshold = int(settings.get("low_savings_threshold_pct", 5))
@@ -1174,7 +1217,7 @@ def api_start():
 
     def _worker_safe():
         try:
-            _queue_worker(list(files), anime, quality, threshold)
+            _queue_worker(list(files), anime, quality, threshold, estimate_only)
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
@@ -1335,6 +1378,30 @@ def api_open():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/trash", methods=["POST"])
+def api_trash():
+    """Move a source file to the Recycle Bin and remove its DB record."""
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    try:
+        import send2trash
+        send2trash.send2trash(path)
+    except Exception as e:
+        return jsonify({"error": f"Recycle bin error: {e}"}), 500
+
+    # Remove DB record so the file won't reappear on next scan
+    db.delete_records_by_path(path.replace("\\", "/"))
+
+    return jsonify({"ok": True})
 
 
 @app.route("/api/update_status", methods=["POST"])
@@ -1592,6 +1659,405 @@ def api_diagnose():
     _section("Conversion notes", recs if recs else ["  (nothing unusual)"])
 
     return jsonify(report)
+
+
+@app.route("/api/analyse_folders")
+def api_analyse_folders():
+    """Analyse conversion opportunity grouped by folder."""
+    import posixpath as _pp
+    from datetime import datetime as _dt
+
+    root = request.args.get("root", "").strip().rstrip("\\/")
+    if not root:
+        return jsonify({"error": "root parameter required"}), 400
+
+    try:
+        min_done    = max(0, int(request.args.get("min_done",    1)))
+        min_pending = max(0, int(request.args.get("min_pending", 1)))
+        top         = max(1, int(request.args.get("top",        50)))
+    except ValueError:
+        return jsonify({"error": "Invalid numeric parameter"}), 400
+    sort_by = request.args.get("sort", "score")
+    if sort_by not in ("score", "savings", "speed", "pending"):
+        sort_by = "score"
+
+    def _norm(p):
+        return p.replace("\\", "/").lower()
+
+    root_norm = _norm(root)
+    prefix    = root_norm + "/"
+
+    settings  = _load_settings()
+    threshold = int(settings.get("low_savings_threshold_pct", 5))
+
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        """
+        SELECT c.id, c.source_path, c.status, c.saved_mb, c.saved_pct, c.source_size_mb,
+               c.source_duration_secs, c.started_at, c.completed_at, c.est_saving_pct
+        FROM conversions c
+        INNER JOIN (
+            SELECT source_path, MAX(id) AS max_id
+            FROM conversions
+            GROUP BY source_path
+        ) latest ON c.id = latest.max_id
+        """
+    ).fetchall()
+    con.close()
+
+    _DONE    = "done"
+    _PENDING = {"pending", "failed"}
+
+    # Collect pending rows first so we can existence-check them in one pass
+    # and purge stale records for files that no longer exist on disk.
+    pending_under_root: list = []
+    groups: dict = {}
+    all_folders: set = set()
+
+    for row in rows:
+        path = row["source_path"]
+        if not path:
+            continue
+        np = _norm(path)
+        if not np.startswith(prefix):
+            continue
+        fld = _norm(os.path.dirname(path))
+        all_folders.add(fld)
+        if fld not in groups:
+            groups[fld] = {"done": [], "pending": []}
+        status = (row["status"] or "").lower()
+        if status == _DONE:
+            groups[fld]["done"].append(row)
+        elif status in _PENDING:
+            pending_under_root.append((fld, row))
+
+    # Purge pending records for files that no longer exist on disk
+    stale_ids: list[int] = []
+    for fld, row in pending_under_root:
+        native = row["source_path"].replace("/", os.sep)
+        if not os.path.exists(native):
+            stale_ids.append(row["id"])
+            continue
+        # Also exclude files already estimated below threshold
+        est = row["est_saving_pct"]
+        if est is None or est >= threshold:
+            groups[fld]["pending"].append(row)
+
+    if stale_ids:
+        con2 = sqlite3.connect(DB_PATH)
+        placeholders = ",".join("?" * len(stale_ids))
+        con2.execute(f"DELETE FROM conversions WHERE id IN ({placeholders})", stale_ids)
+        con2.commit()
+        con2.close()
+
+    results = []
+    for fld, data in groups.items():
+        done_rows    = data["done"]
+        pending_rows = data["pending"]
+        if len(done_rows) < min_done or len(pending_rows) < min_pending:
+            continue
+        done_with_pct = [r for r in done_rows if r["saved_pct"] is not None]
+        if not done_with_pct:
+            continue
+        avg_savings_pct = sum(r["saved_pct"] for r in done_with_pct) / len(done_with_pct)
+        total_saved_mb  = sum(r["saved_mb"] or 0.0 for r in done_rows)
+
+        speed_vals = []
+        for r in done_rows:
+            dur, sa, ca = r["source_duration_secs"], r["started_at"], r["completed_at"]
+            if dur and sa and ca:
+                try:
+                    wall = (_dt.fromisoformat(ca) - _dt.fromisoformat(sa)).total_seconds()
+                    if wall > 0:
+                        speed_vals.append(dur / wall)
+                except (ValueError, TypeError):
+                    pass
+        avg_speed = sum(speed_vals) / len(speed_vals) if speed_vals else None
+
+        pending_source_mb  = sum(r["source_size_mb"] or 0.0 for r in pending_rows)
+        pending_no_size    = sum(1 for r in pending_rows if not r["source_size_mb"])
+        est_add = sum(
+            ((r["est_saving_pct"] if r["est_saving_pct"] is not None else avg_savings_pct) / 100.0)
+            * (r["source_size_mb"] or 0.0)
+            for r in pending_rows
+        )
+
+        speed_factor = 1.0
+        if avg_speed is not None:
+            speed_factor = max(0.5, min(3.0, avg_speed / 2.0))
+        priority_score = est_add * speed_factor
+
+        results.append({
+            "folder":            fld,
+            "done_count":        len(done_rows),
+            "pending_count":     len(pending_rows),
+            "pending_no_size":   pending_no_size,
+            "avg_savings_pct":   round(avg_savings_pct, 1),
+            "avg_speed":         round(avg_speed, 2) if avg_speed is not None else None,
+            "total_saved_mb":    round(total_saved_mb, 1),
+            "pending_source_mb": round(pending_source_mb, 1),
+            "est_additional_mb": round(est_add, 1),
+            "priority_score":    round(priority_score, 1),
+        })
+
+    sort_keys = {
+        "score":   lambda r: r["priority_score"],
+        "savings": lambda r: r["avg_savings_pct"],
+        "speed":   lambda r: r["avg_speed"] or 0.0,
+        "pending": lambda r: r["pending_count"],
+    }
+    results.sort(key=sort_keys[sort_by], reverse=True)
+    shown = results[:top]
+
+    total_pending = sum(r["pending_count"] for r in results)
+    total_est_mb  = sum(r["est_additional_mb"] for r in results)
+
+    return jsonify({
+        "rows":              shown,
+        "total_analysed":    len(all_folders),
+        "opportunity_count": len(results),
+        "total_pending":     total_pending,
+        "total_est_mb":      round(total_est_mb, 1),
+        "stale_removed":     len(stale_ids),
+    })
+
+
+def _fmt_duration_secs(secs: float | None) -> str:
+    """Format a duration in seconds as H:MM:SS."""
+    if not secs:
+        return ""
+    h = int(secs // 3600)
+    m = int((secs % 3600) // 60)
+    s = int(secs % 60)
+    return f"{h}:{m:02}:{s:02}"
+
+
+def _prep_file_dict(row, root_fwd: str = "") -> dict:
+    """Convert a DB row to a file dict compatible with populateTable and _queue_worker."""
+    p = row["source_path"]
+    size_mb = row["source_size_mb"] or 0.0
+    # Compute folder path relative to the prep root (mirrors scanner rel_folder)
+    if root_fwd and p.startswith(root_fwd + "/"):
+        rel = p[len(root_fwd) + 1:]
+        folder = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    else:
+        folder = os.path.dirname(p).replace("\\", "/")
+    return {
+        "full_path":    p,
+        "name":         os.path.basename(p),
+        "folder":       folder,
+        "size":         f"{size_mb:.1f}",
+        "bitrate_kbps": row["source_bitrate_kbps"],
+        "codec":        row["source_codec"] or "",
+        "duration":     _fmt_duration_secs(row["source_duration_secs"]),
+        "is_hi10":      False,
+        "streams":      None,
+        "status":       "pending",
+    }
+
+
+def _load_db_file_dict(row, root_fwd: str = "") -> dict:
+    """Full file dict for all statuses — used by Load from DB."""
+    import json as _json
+    p       = row["source_path"]
+    size_mb = row["source_size_mb"] or 0.0
+    if root_fwd and p.startswith(root_fwd + "/"):
+        rel    = p[len(root_fwd) + 1:]
+        folder = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    else:
+        folder = os.path.dirname(p).replace("\\", "/")
+    status       = (row["status"] or "pending").lower()
+    out_mb       = row["output_size_mb"]
+    saved_mb_val = row["saved_mb"]
+    saved_pct    = row["saved_pct"]
+    dropped_raw  = row["dropped_streams"]
+    dropped      = (_json.loads(dropped_raw) if dropped_raw else [])
+    d = {
+        "full_path":       p,
+        "name":            os.path.basename(p),
+        "folder":          folder,
+        "size":            f"{size_mb:,.1f}",
+        "bitrate_kbps":    row["source_bitrate_kbps"],
+        "codec":           row["source_codec"] or "",
+        "duration":        _fmt_duration_secs(row["source_duration_secs"]),
+        "is_hi10":         False,
+        "streams":         None,
+        "status":          status,
+        "force_sw":        bool(row["force_sw"]),
+        "dropped_streams": dropped,
+        "est_pct":         row["est_saving_pct"],
+        "est_mb":          row["est_saving_mb"],
+    }
+    if status == "done":
+        d["output"] = str(round(out_mb, 1))       if out_mb       is not None else None
+        d["saved"]  = str(round(saved_mb_val, 1)) if saved_mb_val is not None else None
+        d["pct"]    = str(saved_pct)              if saved_pct    is not None else None
+    return d
+
+
+@app.route("/api/load_from_db")
+def api_load_from_db():
+    """Return all latest records per source_path under root — fast alternative to a filesystem scan."""
+    root = request.args.get("root", "").strip()
+    if not root:
+        return jsonify({"error": "No root provided"}), 400
+    root = os.path.normpath(root)
+    if not os.path.isdir(root):
+        return jsonify({"error": "Not a directory"}), 400
+
+    root_fwd = root.replace("\\", "/").rstrip("/")
+
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        """
+        SELECT c.source_path, c.status, c.source_size_mb, c.source_bitrate_kbps,
+               c.source_codec, c.source_duration_secs,
+               c.output_size_mb, c.saved_mb, c.saved_pct,
+               c.est_saving_pct, c.est_saving_mb,
+               c.force_sw, c.dropped_streams
+        FROM conversions c
+        INNER JOIN (
+            SELECT source_path, MAX(id) AS max_id
+            FROM conversions
+            WHERE source_path LIKE ?
+            GROUP BY source_path
+        ) latest ON c.id = latest.max_id
+        ORDER BY c.source_path
+        """,
+        (root_fwd + "/%",),
+    ).fetchall()
+    con.close()
+
+    files = [_load_db_file_dict(r, root_fwd) for r in rows]
+    return jsonify({"files": files, "total": len(files)})
+
+
+@app.route("/api/prep_scan")
+def api_prep_scan():
+    """Return all pending files under root so the client can start an estimate-only pass."""
+    root = request.args.get("root", "").strip()
+    if not root:
+        return jsonify({"error": "No root provided"}), 400
+    root = os.path.normpath(root)
+    if not os.path.isdir(root):
+        return jsonify({"error": "Not a directory"}), 400
+
+    root_fwd = root.replace("\\", "/").rstrip("/")
+
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        """
+        SELECT c.source_path, c.source_size_mb, c.source_bitrate_kbps,
+               c.source_codec, c.source_duration_secs
+        FROM conversions c
+        INNER JOIN (
+            SELECT source_path, MAX(id) AS max_id
+            FROM conversions
+            WHERE status = 'pending' AND source_path LIKE ?
+            GROUP BY source_path
+        ) latest ON c.id = latest.max_id
+        WHERE c.status = 'pending'
+        ORDER BY c.source_path
+        """,
+        (root_fwd + "/%",),
+    ).fetchall()
+    con.close()
+
+    files = [_prep_file_dict(r, root_fwd) for r in rows]
+    return jsonify({"files": files, "total": len(files)})
+
+
+@app.route("/api/build_prep_queue")
+def api_build_prep_queue():
+    """After an estimate-only pass, select one representative file per unsampled folder."""
+    root = request.args.get("root", "").strip()
+    if not root:
+        return jsonify({"error": "No root provided"}), 400
+    root = os.path.normpath(root)
+
+    root_fwd = root.replace("\\", "/").rstrip("/")
+    settings  = _load_settings()
+    threshold = int(settings.get("low_savings_threshold_pct", 5))
+
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+
+    # Pending files with estimates under root
+    pending_rows = con.execute(
+        """
+        SELECT c.source_path, c.source_size_mb, c.source_bitrate_kbps,
+               c.source_codec, c.source_duration_secs,
+               c.est_saving_pct, c.est_saving_mb
+        FROM conversions c
+        INNER JOIN (
+            SELECT source_path, MAX(id) AS max_id
+            FROM conversions
+            WHERE status = 'pending' AND source_path LIKE ?
+            GROUP BY source_path
+        ) latest ON c.id = latest.max_id
+        WHERE c.status = 'pending'
+        ORDER BY c.source_path
+        """,
+        (root_fwd + "/%",),
+    ).fetchall()
+
+    # Folders that already have at least one done conversion
+    done_rows = con.execute(
+        "SELECT DISTINCT source_path FROM conversions"
+        " WHERE status = 'done' AND source_path LIKE ?",
+        (root_fwd + "/%",),
+    ).fetchall()
+    con.close()
+
+    seeded_folders: set[str] = {
+        os.path.dirname(r["source_path"]).replace("\\", "/")
+        for r in done_rows
+    }
+
+    # Group pending files by their immediate folder
+    by_folder: dict[str, list] = {}
+    for row in pending_rows:
+        folder = os.path.dirname(row["source_path"]).replace("\\", "/")
+        by_folder.setdefault(folder, []).append(row)
+
+    files: list[dict] = []
+    folders_seeded         = 0
+    folders_already_seeded = 0
+    folders_no_candidates  = 0
+
+    for folder, candidates in sorted(by_folder.items()):
+        if folder in seeded_folders:
+            folders_already_seeded += 1
+            continue
+        # Keep only files that passed estimation (or haven't been estimated yet)
+        good = [
+            c for c in candidates
+            if c["est_saving_pct"] is None or c["est_saving_pct"] >= threshold
+        ]
+        if not good:
+            folders_no_candidates += 1
+            continue
+        # Pick the median-bitrate file as the most representative candidate
+        sortable = sorted(
+            good,
+            key=lambda c: c["source_bitrate_kbps"] or c["source_size_mb"] or 0,
+        )
+        chosen = sortable[len(sortable) // 2]
+        d = _prep_file_dict(chosen, root_fwd)
+        d["est_pct"] = chosen["est_saving_pct"]
+        d["est_mb"]  = chosen["est_saving_mb"]
+        files.append(d)
+        folders_seeded += 1
+
+    return jsonify({
+        "files":                  files,
+        "folders_seeded":         folders_seeded,
+        "folders_already_seeded": folders_already_seeded,
+        "folders_no_candidates":  folders_no_candidates,
+    })
 
 
 # ---------------------------------------------------------------------------

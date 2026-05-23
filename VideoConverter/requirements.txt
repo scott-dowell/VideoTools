@@ -10,3 +10,9 @@ Werkzeug==3.1.8
 pytesseract
 Pillow
 pysubs2
+
+# Recycle bin support
+send2trash
+
+# Terminal table output (analyse_folders.py)
+rich

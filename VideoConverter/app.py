@@ -992,7 +992,23 @@ def _cleanup_legacy_folders(root_path: str) -> dict:
         except Exception:
             pass
 
-    return {"moved": moved, "skipped": skipped, "errors": errors}
+    # Rename partial-download files (.!qB suffix left by qBittorrent)
+    for dirpath, _dns, filenames in os.walk(root_path):
+        for filename in filenames:
+            if not filename.lower().endswith(".!qb"):
+                continue
+            src = os.path.join(dirpath, filename)
+            dest = os.path.join(dirpath, filename[:-4])
+            if os.path.exists(dest):
+                skipped.append({"path": src.replace("\\", "/"), "reason": "destination already exists"})
+                continue
+            try:
+                os.rename(src, dest)
+                renamed.append({"from": src.replace("\\", "/"), "to": dest.replace("\\", "/")})
+            except Exception as exc:
+                errors.append({"path": src.replace("\\", "/"), "reason": str(exc)})
+
+    return {"moved": moved, "skipped": skipped, "errors": errors, "renamed": renamed}
 
 
 def _cleanup_legacy_folders_stream(root_path: str):
@@ -1004,7 +1020,8 @@ def _cleanup_legacy_folders_stream(root_path: str):
       {"type": "done",      "moved": N, "skipped": N, "errors": N}
     """
     # Phase 1: fast walk to collect all candidates first (gives us a total)
-    candidates: list[tuple[str, str]] = []
+    # Each entry is (src, dest, is_rename) where is_rename=True for .!qB strips.
+    candidates: list[tuple[str, str, bool]] = []
     legacy_dirs: list[str] = []
     for dirpath, _dirnames, filenames in os.walk(root_path, topdown=False):
         if os.path.basename(dirpath).lower() not in _LEGACY_FOLDERS:
@@ -1014,24 +1031,35 @@ def _cleanup_legacy_folders_stream(root_path: str):
             src = os.path.join(dirpath, filename)
             dest = _resolve_cleanup_dest(src)
             if dest is not None:
-                candidates.append((src, dest))
+                candidates.append((src, dest, False))
+
+    # Collect .!qB partial-download renames
+    for dirpath, _dirnames, filenames in os.walk(root_path):
+        for filename in filenames:
+            if filename.lower().endswith(".!qb"):
+                src = os.path.join(dirpath, filename)
+                dest = os.path.join(dirpath, filename[:-4])
+                candidates.append((src, dest, True))
 
     total = len(candidates)
     yield {"type": "scan_done", "total": total}
 
-    # Phase 2: move files one by one, yielding progress before each
-    moved_n = skipped_n = errors_n = 0
-    for i, (src, dest) in enumerate(candidates):
+    # Phase 2: move/rename files one by one, yielding progress before each
+    moved_n = skipped_n = errors_n = renamed_n = 0
+    for i, (src, dest, is_rename) in enumerate(candidates):
         yield {"type": "progress", "done": i, "total": total, "name": os.path.basename(src)}
         if os.path.exists(dest):
             skipped_n += 1
             continue
         try:
             shutil.move(src, dest)
-            moved_n += 1
-            if os.path.basename(os.path.dirname(src)).lower() == "failed":
-                db.delete_records_by_path(src)
-                db.delete_records_by_path(dest)
+            if is_rename:
+                renamed_n += 1
+            else:
+                moved_n += 1
+                if os.path.basename(os.path.dirname(src)).lower() == "failed":
+                    db.delete_records_by_path(src)
+                    db.delete_records_by_path(dest)
         except Exception:
             errors_n += 1
 
@@ -1043,7 +1071,7 @@ def _cleanup_legacy_folders_stream(root_path: str):
         except Exception:
             pass
 
-    yield {"type": "done", "moved": moved_n, "skipped": skipped_n, "errors": errors_n}
+    yield {"type": "done", "moved": moved_n, "skipped": skipped_n, "errors": errors_n, "renamed": renamed_n}
 
 
 def _volume_label(drive: str) -> str:

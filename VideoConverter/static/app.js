@@ -18,6 +18,7 @@ let _dragSrcIndex = null;
 let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'duration' | 'est_saving' | 'est_saving_mb'
 let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
+let _lastAutoScrollPath = null; // path of row last auto-scrolled to; prevents re-scroll on every poll
 let _sessionSavedMB = null;   // null = no run this session, number = MB saved this run
 let _sessionProcessed = 0;    // files completed (done/failed/no_saving) this run
 let _sessionStartedAt = 0;        // unix epoch (s) when current session started; 0 = not started
@@ -126,6 +127,11 @@ function toggleSortDir() {
   setSortBy(_sortBy);
 }
 
+function jumpToActive() {
+  const row = document.querySelector('#queueBody tr.tr-converting');
+  if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
 function setSortBy(val) {
   _sortBy = val;
   _updateSortDirBtn();
@@ -173,6 +179,9 @@ function setButtonStates(state) {
   if (rescanBtn) rescanBtn.disabled = !_currentScanPath || state === 'running';
   const cleanupBtn = document.getElementById('cleanupBtn');
   if (cleanupBtn) cleanupBtn.disabled = !_currentScanPath || state === 'running';
+  const jumpBtn = document.getElementById('jumpToActiveBtn');
+  if (jumpBtn) jumpBtn.classList.toggle('d-none', state !== 'running');
+  if (state !== 'running') _lastAutoScrollPath = null;
   // Modal action buttons — disable Prep and Cleanup when a job is running
   const modalPrepBtn    = document.getElementById('modalPrepBtn');
   const modalCleanupBtn = document.getElementById('modalCleanupBtn');
@@ -1158,8 +1167,9 @@ function _pollStatus() {
             row.classList.toggle('tr-low-savings', sf.status === 'low_savings');
             row.classList.toggle('tr-skipped',     sf.status === 'skipped');
             row.classList.toggle('tr-converting',  sf.status === 'converting');
-            // Auto-scroll the active row into view when it starts converting
-            if (sf.status === 'converting') {
+            // Auto-scroll the active row into view — only when the converting file changes
+            if (sf.status === 'converting' && f.full_path !== _lastAutoScrollPath) {
+              _lastAutoScrollPath = f.full_path;
               row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
             }
           }
@@ -2259,6 +2269,7 @@ async function cleanupLegacyFolders(path = _currentScanPath) {
         document.getElementById('cleanupBar').style.width      = '100%';
         document.getElementById('cleanupCountLabel').textContent = ev.total !== undefined ? ev.total + ' / ' + ev.total : 'Done';
         let lbl = ev.moved + ' moved';
+        if (ev.renamed) lbl += ', ' + ev.renamed + ' renamed';
         if (ev.skipped) lbl += ', ' + ev.skipped + ' skipped';
         if (ev.errors)  lbl += ', ' + ev.errors  + ' errors';
         document.getElementById('cleanupMovedLabel').textContent  = lbl;

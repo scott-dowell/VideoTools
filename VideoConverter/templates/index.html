@@ -154,6 +154,9 @@
           <button class="btn btn-sm btn-outline-secondary" id="filterToggleBtn" onclick="toggleFilterBar()" title="Range filters">
             <i class="bi bi-funnel me-1"></i>Filters
           </button>
+          <button class="btn btn-sm btn-outline-warning d-none" id="jumpToActiveBtn" onclick="jumpToActive()" title="Scroll to the currently converting row">
+            <i class="bi bi-arrow-down-circle me-1"></i>Jump to active
+          </button>
           <div class="ms-auto d-flex gap-1 flex-wrap">
             <button class="chip chip-pending active" id="chip-pending" onclick="toggleStatus('pending')">Pending <span class="chip-count" id="chipCount-pending">—</span></button>
             <button class="chip chip-done active" id="chip-done" onclick="toggleStatus('done')">Done <span class="chip-count" id="chipCount-done">—</span></button>

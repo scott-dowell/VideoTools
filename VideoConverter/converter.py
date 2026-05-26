@@ -152,9 +152,25 @@ _QSV_DECODERS: dict[str, str] = {
     "mjpeg":       "mjpeg_qsv",
 }
 
+# Codec fourCCs found in non-standard containers (e.g. HEVC in ASF/WMV) where
+# the demuxer does not map the tag to a codec_name.  Key: codec_tag_string from
+# ffprobe; Value: ffmpeg SW decoder name to force before -i.
+_TAG_CODEC_MAP: dict[str, str] = {
+    "hvc1": "hevc", "hev1": "hevc",
+    "HVC1": "hevc", "HEV1": "hevc",
+    "avc1": "h264", "avc3": "h264",
+    "AVC1": "h264", "AVC3": "h264",
+}
 
-def _ffprobe_vcodec(input_path: str) -> str:
-    """Return the codec_name of the first video stream, or '' on failure."""
+
+def _ffprobe_vcodec(input_path: str) -> tuple[str, str]:
+    """Return (codec_name, input_decoder).
+
+    codec_name:    identified codec (empty string if unrecognisable).
+    input_decoder: non-empty when the container demuxer cannot auto-detect the
+                   codec (e.g. hvc1 tag in an ASF/WMV file) and ffmpeg needs an
+                   explicit SW decoder forced before -i.
+    """
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json",
@@ -162,33 +178,46 @@ def _ffprobe_vcodec(input_path: str) -> str:
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
         )
         streams = json.loads(result.stdout).get("streams", [])
-        return (streams[0].get("codec_name") or "").lower() if streams else ""
+        if not streams:
+            return "", ""
+        s = streams[0]
+        codec_name = (s.get("codec_name") or "").lower()
+        if codec_name and codec_name != "none":
+            return codec_name, ""   # normal path — demuxer identified the codec
+        # Demuxer reported null/none — check codec_tag_string for a known fourCC.
+        tag = s.get("codec_tag_string") or ""
+        mapped = _TAG_CODEC_MAP.get(tag, "")
+        if mapped:
+            return mapped, mapped   # codec known via tag; must force SW decoder
+        return "", ""
     except Exception:
-        return ""
+        return "", ""
 
 
 def _qsv_cmd(input_path: str, output_path: str, quality: int,
              dropped_streams: list[int] | None = None,
-             v_codec: str = "") -> list[str]:
-    # Use QSV hardware decode when a QSV decoder exists for the source codec.
-    # This keeps decoded frames on the GPU surface, avoiding a CPU↔GPU copy
-    # and dramatically reducing CPU load during encode.
-    qsv_dec = _QSV_DECODERS.get(v_codec or "")
-    if qsv_dec:
-        hw_args = ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", qsv_dec]
+             v_codec: str = "",
+             input_decoder: str = "",
+             transcode_audio: bool = False) -> list[str]:
+    # When input_decoder is set, the container demuxer cannot identify the
+    # codec (e.g. hvc1-in-ASF); force SW decode — QSV hw decode won't work.
+    # Otherwise use QSV hw decode when a suitable decoder exists.
+    if input_decoder:
+        pre_input = ["-c:v", input_decoder]
     else:
-        hw_args = []
+        qsv_dec = _QSV_DECODERS.get(v_codec or "")
+        pre_input = ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", qsv_dec] if qsv_dec else []
     cmd = [
         "ffmpeg", "-y",
         "-stats_period", "1",
         "-fflags", "+discardcorrupt",
         "-probesize", "100M",
         "-analyzeduration", "100M",
-    ] + hw_args + [
+    ] + pre_input + [
         "-i", input_path,
         "-c:v", "hevc_qsv",
         "-global_quality", str(quality),
-        "-c:a", "copy",
+        "-c:a", "aac" if transcode_audio else "copy",
         "-c:s", "copy",
         "-map", "0:v:0",
         "-map", "0:a?",
@@ -200,18 +229,23 @@ def _qsv_cmd(input_path: str, output_path: str, quality: int,
     return cmd
 
 
-def _sw_cmd(input_path: str, output_path: str, quality: int, dropped_streams: list[int] | None = None) -> list[str]:
+def _sw_cmd(input_path: str, output_path: str, quality: int,
+            dropped_streams: list[int] | None = None,
+            input_decoder: str = "",
+            transcode_audio: bool = False) -> list[str]:
+    pre_input = ["-c:v", input_decoder] if input_decoder else []
     cmd = [
         "ffmpeg", "-y",
         "-stats_period", "1",
         "-fflags", "+discardcorrupt",
         "-probesize", "100M",
         "-analyzeduration", "100M",
+    ] + pre_input + [
         "-i", input_path,
         "-c:v", "libx265",
         "-crf", str(quality),
         "-preset", "medium",
-        "-c:a", "copy",
+        "-c:a", "aac" if transcode_audio else "copy",
         "-c:s", "copy",
         "-map", "0:v:0",
         "-map", "0:a?",
@@ -488,7 +522,19 @@ def compress_simple(
         tmp_holder[0] = tmp_path
 
     # Probe source video codec once — used to enable QSV hardware decoding.
-    v_codec = _ffprobe_vcodec(input_path)
+    v_codec, input_decoder = _ffprobe_vcodec(input_path)
+    if not v_codec:
+        # ffprobe could not identify the video codec — common with DRM-protected WMV
+        # files or containers with a non-standard/unrecognised fourCC.  ffmpeg will
+        # also fail (error: "no decoder found for: none"), so skip all three retry
+        # attempts and fail immediately with a meaningful message.
+        log("Video codec unrecognisable (ffprobe returned no codec name). "
+            "File may be DRM-protected or use an unsupported codec. Cannot convert.")
+        return False, ""
+    if input_decoder:
+        log(f"Codec identified via container tag (not demuxer): forcing SW -{input_decoder} decoder. "
+            "Audio will be transcoded to AAC for container compatibility.")
+    transcode_audio = bool(input_decoder)
 
     encoder_used = ""
     try:
@@ -498,11 +544,18 @@ def compress_simple(
             success = False  # fall straight through to SW block below
         else:
             encoder_used = "hevc_qsv"
-            dec_note = f" (hw decode via {_QSV_DECODERS[v_codec]})" if v_codec in _QSV_DECODERS else " (sw decode)"
+            if input_decoder:
+                dec_note = f" (sw decode via -{input_decoder}, hw encode)"
+            elif v_codec in _QSV_DECODERS:
+                dec_note = f" (hw decode via {_QSV_DECODERS[v_codec]})"
+            else:
+                dec_note = " (sw decode)"
             log(f"Compressing with hevc_qsv{dec_note}...")
             qsv_log = conv_logger.tee(log, "compress_qsv") if conv_logger else log
             success = _run_ffmpeg(
-                _qsv_cmd(input_path, tmp_path, quality, dropped_streams, v_codec=v_codec), qsv_log, stop_event,
+                _qsv_cmd(input_path, tmp_path, quality, dropped_streams, v_codec=v_codec,
+                         input_decoder=input_decoder, transcode_audio=transcode_audio),
+                qsv_log, stop_event,
                 duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
                 output_path=tmp_path,
             )
@@ -516,7 +569,9 @@ def compress_simple(
             sw_quality = quality if quality <= 51 else config.SW_HEVC_CRF
             sw_log = conv_logger.tee(log, "compress_sw") if conv_logger else log
             success = _run_ffmpeg(
-                _sw_cmd(input_path, tmp_path, sw_quality, dropped_streams), sw_log, stop_event,
+                _sw_cmd(input_path, tmp_path, sw_quality, dropped_streams,
+                        input_decoder=input_decoder, transcode_audio=transcode_audio),
+                sw_log, stop_event,
                 duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
                 output_path=tmp_path,
             )
@@ -537,11 +592,15 @@ def compress_simple(
                 "-err_detect", "ignore_err",
                 "-probesize", "100M",
                 "-analyzeduration", "100M",
+            ]
+            if input_decoder:
+                corrupt_cmd += ["-c:v", input_decoder]
+            corrupt_cmd += [
                 "-i", input_path,
                 "-c:v", "libx265",
                 "-crf", str(sw_quality),
                 "-preset", "medium",
-                "-c:a", "copy",
+                "-c:a", "aac" if transcode_audio else "copy",
                 "-c:s", "copy",
                 "-map", "0:v:0",
                 "-map", "0:a?",
@@ -725,7 +784,7 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
         f"_est_{Path(input_path).stem}.mkv",
     )
 
-    v_codec = _ffprobe_vcodec(input_path)
+    v_codec, _ = _ffprobe_vcodec(input_path)
     qsv_dec = _QSV_DECODERS.get(v_codec or "")
     hw_args = ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", qsv_dec] if qsv_dec else []
 

@@ -131,6 +131,47 @@ def test_browse_nonexistent_path_walks_up(client):
     assert "error" not in data
 
 
+def test_browse_disconnected_remembered_path_returns_json(client):
+    """If os.path.isdir raises OSError for a remembered path, endpoint must still return JSON."""
+    real_isdir = os.path.isdir
+
+    def fake_isdir(path):
+        p = str(path).replace("\\", "/").upper()
+        if p.startswith("Z:/"):
+            raise OSError("device not ready")
+        return real_isdir(path)
+
+    with patch("app.os.path.isdir", side_effect=fake_isdir):
+        r = client.get("/api/browse?path=Z:/Last/Open/Folder")
+
+    assert r.status_code == 200
+    assert r.is_json
+    data = r.get_json()
+    assert data["path"] == ""
+    assert data["parent"] is None
+    assert isinstance(data["dirs"], list)
+
+
+def test_browse_root_ignores_drive_exists_oserror(client):
+    """Drive probing errors must be ignored so root browsing still succeeds."""
+    real_exists = os.path.exists
+
+    def fake_exists(path):
+        if str(path).upper() == "Z:/":
+            raise OSError("device not ready")
+        return real_exists(path)
+
+    with patch("app.os.path.exists", side_effect=fake_exists):
+        r = client.get("/api/browse?path=")
+
+    assert r.status_code == 200
+    assert r.is_json
+    data = r.get_json()
+    assert data["path"] == ""
+    assert data["parent"] is None
+    assert isinstance(data["dirs"], list)
+
+
 # ---------------------------------------------------------------------------
 # /api/settings — GET
 # ---------------------------------------------------------------------------

@@ -949,7 +949,7 @@ def _cleanup_legacy_folders(root_path: str) -> dict:
 
     Returns {"moved": [...], "skipped": [...], "errors": [...]}
     """
-    moved, skipped, errors = [], [], []
+    moved, skipped, errors, renamed = [], [], [], []
     legacy_dirs: list[str] = []
 
     for dirpath, dirnames, filenames in os.walk(root_path, topdown=False):
@@ -973,6 +973,8 @@ def _cleanup_legacy_folders(root_path: str) -> dict:
                     "from": src.replace("\\", "/"),
                     "to":   dest.replace("\\", "/"),
                 })
+                # Keep DB paths aligned with filesystem after cleanup moves.
+                db.move_path(src, dest)
                 # Files rescued from a failed/ folder need their DB record cleared
                 # so the next scan treats them as fresh candidates.
                 if os.path.basename(os.path.dirname(src)).lower() == "failed":
@@ -1054,8 +1056,10 @@ def _cleanup_legacy_folders_stream(root_path: str):
         try:
             shutil.move(src, dest)
             if is_rename:
+                db.move_path(src, dest)
                 renamed_n += 1
             else:
+                db.move_path(src, dest)
                 moved_n += 1
                 if os.path.basename(os.path.dirname(src)).lower() == "failed":
                     db.delete_records_by_path(src)
@@ -1101,10 +1105,22 @@ def index():
 def api_browse():
     req_path = request.args.get("path", "").strip()
 
+    def _safe_isdir(path: str) -> bool:
+        try:
+            return os.path.isdir(path)
+        except OSError:
+            return False
+
+    def _safe_exists(path: str) -> bool:
+        try:
+            return os.path.exists(path)
+        except OSError:
+            return False
+
     if req_path:
         req_path = os.path.normpath(req_path)
         # Walk up the tree until we find an existing directory (handles deleted remembered paths)
-        while req_path and not os.path.isdir(req_path):
+        while req_path and not _safe_isdir(req_path):
             parent = os.path.dirname(req_path)
             if parent == req_path:
                 req_path = ""  # drive root doesn't exist — fall back to drive listing
@@ -1116,7 +1132,7 @@ def api_browse():
         drives = []
         for letter in string.ascii_uppercase:
             drive = letter + ":/"
-            if os.path.exists(drive):
+            if _safe_exists(drive):
                 drives.append({
                     "name": _volume_label(drive),
                     "full_path": drive,
@@ -1155,7 +1171,7 @@ def api_browse():
                 "full_path": entry.path.replace("\\", "/"),
                 "has_children": has_children,
             })
-    except PermissionError:
+    except (PermissionError, OSError):
         pass
 
     return jsonify({

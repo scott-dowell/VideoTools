@@ -340,6 +340,22 @@ def update_source_path(record_id: int, new_source_path: str) -> None:
         )
 
 
+def move_path(old_path: str, new_path: str) -> dict:
+    """Update any source_path/output_path references from old_path to new_path."""
+    old_norm = _norm(old_path)
+    new_norm = _norm(new_path)
+    with _connect() as conn:
+        cur_src = conn.execute(
+            "UPDATE conversions SET source_path = ? WHERE source_path = ?",
+            (new_norm, old_norm),
+        )
+        cur_out = conn.execute(
+            "UPDATE conversions SET output_path = ? WHERE output_path = ?",
+            (new_norm, old_norm),
+        )
+        return {"source_updated": cur_src.rowcount, "output_updated": cur_out.rowcount}
+
+
 def set_force_sw(source_path: str, value: bool) -> int:
     """Set or clear the force_sw flag on all records for a given source path."""
     with _connect() as conn:

@@ -6,8 +6,10 @@ let _fileIndexByPath = {}; // full_path → _files index for O(1) probe/remove l
 let _scanEs       = null; // active EventSource for /api/scan
 let _probeTotal   = 0;    // files queued for phase-2 probe
 let _probeDone    = 0;    // probe events received so far
+let _hashTotal    = 0;    // files queued for hash-check phase
 const _ALL_STATUSES = ['pending', 'done', 'failed', 'no_saving', 'skipped', 'low_savings'];
-let _activeStatuses = new Set(_ALL_STATUSES);
+const _DEFAULT_ACTIVE_STATUSES = ['pending'];
+let _activeStatuses = new Set(_DEFAULT_ACTIVE_STATUSES);
 let _searchQuery  = '';
 let _filterSizeMin = ''; let _filterSizeMax = '';
 let _filterBrMin   = ''; let _filterBrMax   = '';
@@ -489,8 +491,10 @@ function toggleStatus(s) {
 }
 
 function resetStatusFilter() {
-  _ALL_STATUSES.forEach(s => _activeStatuses.add(s));
-  _ALL_STATUSES.forEach(s => document.getElementById('chip-' + s).classList.add('active'));
+  _activeStatuses = new Set(_DEFAULT_ACTIVE_STATUSES);
+  _ALL_STATUSES.forEach(s => {
+    document.getElementById('chip-' + s).classList.toggle('active', _activeStatuses.has(s));
+  });
   applyFilter();
 }
 
@@ -700,6 +704,7 @@ function scanFolder(path) {
   _fileIndexByPath = {};
   _probeTotal = 0;
   _probeDone  = 0;
+  _hashTotal  = 0;
   _sessionSavedMB = null;
   _sessionProcessed = 0;
   _updateSessionCard();
@@ -744,7 +749,7 @@ function scanFolder(path) {
     } else if (msg.type === 'probe') {
       if (_probeDone === 0) _scanStripPhase2();
       const idx = _fileIndexByPath[msg.full_path];
-      if (idx === undefined) { _probeDone++; _scanStripProbeProgress(); return; }
+      if (idx === undefined) { _probeDone++; _scanStripProbeProgress('Probing'); return; }
       const f = _files[idx];
       f.codec        = msg.codec;
       f.duration     = msg.duration;
@@ -754,7 +759,10 @@ function scanFolder(path) {
         ? Math.round((msg.streams.video.bitrate || 0) / 1000) : 0);
       _updateRowProbe(idx, f);
       _probeDone++;
-      _scanStripProbeProgress();
+      _scanStripProbeProgress('Probing');
+    } else if (msg.type === 'hash_progress') {
+      _probeDone = msg.done || 0;
+      _scanStripProbeProgress('Hashing');
     } else if (msg.type === 'remove') {
       const idx = _fileIndexByPath[msg.full_path];
       if (idx === undefined) return;
@@ -777,6 +785,7 @@ function scanFolder(path) {
       const totalGB = (msg.total_mb / 1024).toFixed(1);
       document.getElementById('totalSizeLabel').textContent = totalGB + ' GB total';
       _probeTotal = msg.total_files;  // only files actually needing Phase 2/3 probe
+      _hashTotal  = msg.hash_files || 0;
       const pendingCount = _files.filter(f => f.status === 'pending' || f.status === 'failed' || !f.status).length;
       if (_files.length === 0) {
         document.getElementById('queueBody').innerHTML =
@@ -795,7 +804,7 @@ function scanFolder(path) {
         const cached = _files.length - _probeTotal;
         const cacheNote = cached > 0 ? ' (\u202f' + cached + ' cached)' : '';
         if (_probeTotal > 0) {
-          addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB' + cacheNote + ' \u2014 probing\u2026', 'ok');
+          addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB' + cacheNote + ' \u2014 hashing/probing\u2026', 'ok');
           _scanStripPhase2();
         } else {
           addLog('Found ' + _files.length + ' files \u2014 ' + totalGB + ' GB \u2014 all probe data cached.', 'ok');
@@ -854,23 +863,24 @@ function _scanStripPhase2() {
   if (!strip) return;
   strip.classList.add('scan-probing');
   icon.className = 'bi bi-cpu est-strip-icon';
-  // Looping indeterminate bar until the first probe result arrives
+  // Looping indeterminate bar until the first hash/probe progress result arrives
   const label = document.getElementById('scanStripLabel');
   const bar   = document.getElementById('scanBar');
-  if (label) label.textContent = 'Analysing\u2026';
+  if (label) label.textContent = _hashTotal > 0 ? 'Hashing\u2026' : 'Probing\u2026';
   if (bar) bar.classList.add('scan-bar-indeterminate');
 }
-function _scanStripProbeProgress() {
+function _scanStripProbeProgress(phaseLabel) {
   const label = document.getElementById('scanStripLabel');
   const bar   = document.getElementById('scanBar');
   if (!label || !bar) return;
-  if (_probeDone === 0) return;  // still in hash-check phase — leave indeterminate
-  // First real probe — stop the looping animation
+  if (_probeDone === 0) return;  // no granular progress yet
+  // First real progress event — stop the looping animation
   bar.classList.remove('scan-bar-indeterminate');
   const pct = _probeTotal > 0 ? Math.round(_probeDone / _probeTotal * 100) : 0;
   bar.style.transition = 'width .3s ease';
   bar.style.width = pct + '%';
-  label.textContent = 'Probing ' + _probeDone + '\u202f/\u202f' + _probeTotal + '\u2026';
+  const _phase = phaseLabel || ((_hashTotal > 0 && _probeDone <= _hashTotal) ? 'Hashing' : 'Probing');
+  label.textContent = _phase + ' ' + _probeDone + '\u202f/\u202f' + _probeTotal + '\u2026';
 }
 function _scanStripHide() {
   const strip = document.getElementById('scanStrip');
@@ -2330,7 +2340,20 @@ function browseTo(path) {
   listing.innerHTML = '<div class="text-center text-secondary py-5"><div class="spinner-border spinner-border-sm"></div> Loading\u2026</div>';
 
   fetch('/api/browse?path=' + encodeURIComponent(path))
-    .then(r => r.json())
+    .then(async r => {
+      const contentType = (r.headers.get('content-type') || '').toLowerCase();
+      if (!r.ok) {
+        const body = await r.text();
+        const details = body ? body.slice(0, 120).replace(/\s+/g, ' ').trim() : ('HTTP ' + r.status);
+        throw new Error(details);
+      }
+      if (!contentType.includes('application/json')) {
+        const body = await r.text();
+        const details = body ? body.slice(0, 120).replace(/\s+/g, ' ').trim() : 'Non-JSON response';
+        throw new Error(details);
+      }
+      return r.json();
+    })
     .then(data => {
       if (data.error) {
         listing.innerHTML = '<div class="p-3 text-danger">' + data.error + '</div>';
@@ -2340,7 +2363,8 @@ function browseTo(path) {
       renderListing(data.dirs, data.path, data.parent);
     })
     .catch(e => {
-      listing.innerHTML = '<div class="p-3 text-danger">Error: ' + e + '</div>';
+      const message = (e && e.message) ? e.message : String(e);
+      listing.innerHTML = '<div class="p-3 text-danger">Unable to load folders. ' + message + '</div>';
     });
 }
 

@@ -484,9 +484,12 @@ def walk(root: str) -> Generator[dict, None, None]:
     yield {
         "type":        "scan_done",
         "total_files": len(to_hash_check) + len(to_probe) + len(to_probe_done),
+        "hash_files":  len(to_hash_check),
         "total_mb":    total_bytes / (1024 * 1024),
     }
 
+    hash_total = len(to_hash_check)
+    hash_done = 0
     for entry in to_hash_check:
         fp    = entry["full_path"]
         mtime = entry["mtime"]
@@ -497,9 +500,19 @@ def walk(root: str) -> Generator[dict, None, None]:
             if hash_rec and hash_rec["status"] == "done":
                 db.update_source_path(hash_rec["id"], fp)
                 yield {"type": "remove", "full_path": fp, "reason": "already converted (hash match)"}
-                continue
-        # No hash match — forward to Phase 3 for ffprobe
-        to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
+            else:
+                # No hash match — forward to Phase 3 for ffprobe
+                to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
+        else:
+            # No hash available — forward to Phase 3 for ffprobe
+            to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
+
+        hash_done += 1
+        yield {
+            "type":  "hash_progress",
+            "done":  hash_done,
+            "total": hash_total,
+        }
 
     # ----------------------------------------------------------------
     # Phase 3 — ffprobe each file, emit probe / remove events

@@ -181,6 +181,30 @@ def test_cleanup_returns_from_and_to_keys(tmp_path):
     assert "to" in entry
 
 
+def test_cleanup_updates_db_paths_on_move(tmp_path, monkeypatch):
+    """Cleanup should rewrite DB path references after a file move."""
+    conv = tmp_path / "converted"
+    conv.mkdir()
+    src = conv / "dbmove.mkv"
+    src.write_bytes(b"\x00")
+
+    calls = []
+
+    def _fake_move_path(old_path, new_path):
+        calls.append((old_path.replace("\\", "/"), new_path.replace("\\", "/")))
+        return {"source_updated": 0, "output_updated": 0}
+
+    monkeypatch.setattr(flask_app.db, "move_path", _fake_move_path)
+
+    result = _cleanup_legacy_folders(str(tmp_path))
+
+    assert len(result["moved"]) == 1
+    assert len(calls) == 1
+    old_path, new_path = calls[0]
+    assert old_path.endswith("/converted/dbmove.mkv")
+    assert new_path.endswith("/dbmove.mkv")
+
+
 def test_cleanup_empty_dir_returns_zero_moved(tmp_path):
     """Running cleanup on a dir with no legacy folders is a no-op."""
     result = _cleanup_legacy_folders(str(tmp_path))

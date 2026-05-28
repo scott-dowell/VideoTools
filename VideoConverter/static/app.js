@@ -1185,12 +1185,14 @@ function _pollStatus() {
       // s.files only contains the SUBMITTED (pending/failed) subset — match by
       // full_path so we never clobber done/skipped rows that weren't submitted.
       if (s.files) {
+        let _statusChanged = false;
         const statusByPath = {};
         s.files.forEach(sf => { if (sf.full_path) statusByPath[sf.full_path] = sf; });
 
         _files.forEach((f, idx) => {
           const sf = statusByPath[f.full_path];
           if (!sf) return;
+          if ((f.status || '') !== (sf.status || '')) _statusChanged = true;
           // Sync into _files so local state matches
           f.status = sf.status;
           if (sf.force_sw !== undefined) f.force_sw = sf.force_sw;
@@ -1241,6 +1243,7 @@ function _pollStatus() {
           }
         });
         updateStats(_files);
+        if (_statusChanged) applyFilter();
       }
 
       // Render new backend log lines (filter out verbose ffmpeg internals)

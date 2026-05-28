@@ -7,6 +7,10 @@ let _scanEs       = null; // active EventSource for /api/scan
 let _probeTotal   = 0;    // files queued for phase-2 probe
 let _probeDone    = 0;    // probe events received so far
 let _hashTotal    = 0;    // files queued for hash-check phase
+let _hashDone     = 0;    // hash events received so far
+let _hashRemoved  = 0;    // files removed during hash-check (won't reach probe)
+let _probePhaseTotal = 0; // files expected in probe phase only
+let _probePhaseDone  = 0; // probe progress counter (resets after hashing)
 const _ALL_STATUSES = ['pending', 'done', 'failed', 'no_saving', 'skipped', 'low_savings'];
 const _DEFAULT_ACTIVE_STATUSES = ['pending'];
 let _activeStatuses = new Set(_DEFAULT_ACTIVE_STATUSES);
@@ -705,6 +709,10 @@ function scanFolder(path) {
   _probeTotal = 0;
   _probeDone  = 0;
   _hashTotal  = 0;
+  _hashDone   = 0;
+  _hashRemoved = 0;
+  _probePhaseTotal = 0;
+  _probePhaseDone  = 0;
   _sessionSavedMB = null;
   _sessionProcessed = 0;
   _updateSessionCard();
@@ -747,9 +755,18 @@ function scanFolder(path) {
       updateStats(_files);
       _scanStripPhase1(_files.length);
     } else if (msg.type === 'probe') {
-      if (_probeDone === 0) _scanStripPhase2();
+      if (_probePhaseTotal === 0) {
+        _scanStripPhase2();
+        // Probe denominator excludes the hashing stage and files removed there.
+        _probePhaseTotal = Math.max(0, _probeTotal - _hashTotal - _hashRemoved);
+      }
       const idx = _fileIndexByPath[msg.full_path];
-      if (idx === undefined) { _probeDone++; _scanStripProbeProgress('Probing'); return; }
+      if (idx === undefined) {
+        _probeDone++;
+        _probePhaseDone++;
+        _scanStripProbeProgress('Probing');
+        return;
+      }
       const f = _files[idx];
       f.codec        = msg.codec;
       f.duration     = msg.duration;
@@ -759,11 +776,14 @@ function scanFolder(path) {
         ? Math.round((msg.streams.video.bitrate || 0) / 1000) : 0);
       _updateRowProbe(idx, f);
       _probeDone++;
+      _probePhaseDone++;
       _scanStripProbeProgress('Probing');
     } else if (msg.type === 'hash_progress') {
       _probeDone = msg.done || 0;
-      _scanStripProbeProgress('Hashing');
+      _hashDone = msg.done || 0;
+      _scanStripHashProgress();
     } else if (msg.type === 'remove') {
+      const _inHashPhase = _hashTotal > 0 && _hashDone < _hashTotal;
       const idx = _fileIndexByPath[msg.full_path];
       if (idx === undefined) return;
       _files.splice(idx, 1);
@@ -776,8 +796,13 @@ function scanFolder(path) {
       document.querySelectorAll('#queueBody tr[id^="row-"]').forEach((row, i) => {
         row.id = 'row-' + i;
       });
-      _probeTotal--;  // removed files don't count toward probe total
-      _scanStripProbeProgress();
+      if (_inHashPhase) {
+        _hashRemoved++;
+        _scanStripHashProgress();
+      } else {
+        if (_probePhaseTotal > 0) _probePhaseTotal--;
+        _scanStripProbeProgress('Probing');
+      }
       updateStats(_files);
     } else if (msg.type === 'scan_done') {
       // Phase 1 complete — grid may have buffered files still awaiting probe.
@@ -786,6 +811,10 @@ function scanFolder(path) {
       document.getElementById('totalSizeLabel').textContent = totalGB + ' GB total';
       _probeTotal = msg.total_files;  // only files actually needing Phase 2/3 probe
       _hashTotal  = msg.hash_files || 0;
+      _hashDone = 0;
+      _hashRemoved = 0;
+      _probePhaseTotal = 0;
+      _probePhaseDone = 0;
       const pendingCount = _files.filter(f => f.status === 'pending' || f.status === 'failed' || !f.status).length;
       if (_files.length === 0) {
         document.getElementById('queueBody').innerHTML =
@@ -869,18 +898,30 @@ function _scanStripPhase2() {
   if (label) label.textContent = _hashTotal > 0 ? 'Hashing\u2026' : 'Probing\u2026';
   if (bar) bar.classList.add('scan-bar-indeterminate');
 }
+function _scanStripHashProgress() {
+  const label = document.getElementById('scanStripLabel');
+  const bar   = document.getElementById('scanBar');
+  if (!label || !bar) return;
+  if (_hashDone === 0 || _hashTotal === 0) return;
+  bar.classList.remove('scan-bar-indeterminate');
+  const pct = Math.round((_hashDone / _hashTotal) * 100);
+  bar.style.transition = 'width .3s ease';
+  bar.style.width = pct + '%';
+  label.textContent = 'Hashing ' + _hashDone + '\u202f/\u202f' + _hashTotal + '\u2026';
+}
 function _scanStripProbeProgress(phaseLabel) {
   const label = document.getElementById('scanStripLabel');
   const bar   = document.getElementById('scanBar');
   if (!label || !bar) return;
-  if (_probeDone === 0) return;  // no granular progress yet
+  if (_probePhaseDone === 0) return;  // no granular probe progress yet
   // First real progress event — stop the looping animation
   bar.classList.remove('scan-bar-indeterminate');
-  const pct = _probeTotal > 0 ? Math.round(_probeDone / _probeTotal * 100) : 0;
+  const total = _probePhaseTotal > 0 ? _probePhaseTotal : _probeTotal;
+  const pct = total > 0 ? Math.round(_probePhaseDone / total * 100) : 0;
   bar.style.transition = 'width .3s ease';
   bar.style.width = pct + '%';
-  const _phase = phaseLabel || ((_hashTotal > 0 && _probeDone <= _hashTotal) ? 'Hashing' : 'Probing');
-  label.textContent = _phase + ' ' + _probeDone + '\u202f/\u202f' + _probeTotal + '\u2026';
+  const _phase = phaseLabel || 'Probing';
+  label.textContent = _phase + ' ' + _probePhaseDone + '\u202f/\u202f' + total + '\u2026';
 }
 function _scanStripHide() {
   const strip = document.getElementById('scanStrip');

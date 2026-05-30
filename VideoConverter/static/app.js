@@ -11,8 +11,8 @@ let _hashDone     = 0;    // hash events received so far
 let _hashRemoved  = 0;    // files removed during hash-check (won't reach probe)
 let _probePhaseTotal = 0; // files expected in probe phase only
 let _probePhaseDone  = 0; // probe progress counter (resets after hashing)
-const _ALL_STATUSES = ['pending', 'done', 'failed', 'no_saving', 'skipped', 'low_savings'];
-const _DEFAULT_ACTIVE_STATUSES = ['pending'];
+const _ALL_STATUSES = ['pending', 'done_session', 'done', 'failed', 'no_saving', 'skipped', 'low_savings'];
+const _DEFAULT_ACTIVE_STATUSES = ['pending', 'done_session'];
 let _activeStatuses = new Set(_DEFAULT_ACTIVE_STATUSES);
 let _searchQuery  = '';
 let _filterSizeMin = ''; let _filterSizeMax = '';
@@ -431,7 +431,9 @@ function populateTable(files) {
 
 function updateStats(files) {
   const totalMB  = files.reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
-  const done      = files.filter(f => f.status === 'done').length;
+  const doneAll   = files.filter(f => f.status === 'done').length;
+  const doneSession = files.filter(f => f.status === 'done' && f.session_done).length;
+  const done      = doneAll - doneSession;
   const failed    = files.filter(f => f.status === 'failed').length;
   const noSaving  = files.filter(f => f.status === 'no_saving').length;
   const skipped    = files.filter(f => f.status === 'skipped').length;
@@ -439,14 +441,14 @@ function updateStats(files) {
   const savedMB  = files.reduce((s, f) => s + (f.saved  ? parseFloat(f.saved.replace(/,/g, ''))  || 0 : 0), 0);
   const origMB   = files.filter(f => f.status === 'done')
                         .reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
-  const donePct  = files.length ? Math.round(done   / files.length * 100) : 0;
+  const donePct  = files.length ? Math.round(doneAll / files.length * 100) : 0;
   const failPct  = files.length ? Math.round(failed / files.length * 100) : 0;
   const origTotalMB = origMB + savedMB; // output size + saved = original size
   const avgRatio = origTotalMB > 0 ? Math.round(savedMB / origTotalMB * 100) : 0;
 
   // Values
   document.getElementById('statTotal').textContent  = files.length;
-  document.getElementById('statDone').textContent   = done;
+  document.getElementById('statDone').textContent   = doneAll;
   document.getElementById('statFailed').textContent = failed;
   document.getElementById('statSaved').textContent  = savedMB > 0 ? (savedMB / 1024).toFixed(1) + ' GB' : '—';
 
@@ -464,13 +466,15 @@ function updateStats(files) {
 
   // Right panel
   document.getElementById('savedVal').textContent   = savedMB > 0 ? (savedMB / 1024).toFixed(1) + ' GB' : '—';
-  const overallPct = files.length ? Math.round((done + failed) / files.length * 100) : 0;
+  const overallPct = files.length ? Math.round((doneAll + failed) / files.length * 100) : 0;
   document.getElementById('overallPct').textContent = overallPct + '%';
   document.getElementById('overallBar').style.width = overallPct + '%';
   document.getElementById('totalSizeLabel').textContent = (totalMB / 1024).toFixed(1) + ' GB total';
   const lowSavings = files.filter(f => f.status === 'low_savings').length;
   // Filter chip counts
   document.getElementById('chipCount-pending').textContent      = pending;
+  const dseEl = document.getElementById('chipCount-done_session');
+  if (dseEl) dseEl.textContent = doneSession;
   document.getElementById('chipCount-done').textContent         = done;
   document.getElementById('chipCount-failed').textContent       = failed;
   const nsEl = document.getElementById('chipCount-no-saving');
@@ -509,7 +513,12 @@ function onSearchInput(val) {
 
 function _fileMatchesFilter(f) {
   const _eff = (f.status === 'ocr' || f.status === 'converting') ? 'pending' : f.status;
-  const matchStatus = _activeStatuses.has(_eff);
+  let matchStatus;
+  if (_eff === 'done' && f.session_done) {
+    matchStatus = _activeStatuses.has('done') || _activeStatuses.has('done_session');
+  } else {
+    matchStatus = _activeStatuses.has(_eff);
+  }
   const matchSearch = !_searchQuery ||
     f.name.toLowerCase().includes(_searchQuery) ||
     (f.folder || '').toLowerCase().includes(_searchQuery);
@@ -1192,9 +1201,11 @@ function _pollStatus() {
         _files.forEach((f, idx) => {
           const sf = statusByPath[f.full_path];
           if (!sf) return;
+          const _prevStatus = f.status || '';
           if ((f.status || '') !== (sf.status || '')) _statusChanged = true;
           // Sync into _files so local state matches
           f.status = sf.status;
+          if (_prevStatus !== 'done' && sf.status === 'done') f.session_done = true;
           if (sf.force_sw !== undefined) f.force_sw = sf.force_sw;
           if (sf.output)      f.output      = sf.output;
           if (sf.saved)       f.saved       = sf.saved;

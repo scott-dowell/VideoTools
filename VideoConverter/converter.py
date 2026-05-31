@@ -20,6 +20,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -136,6 +137,61 @@ def _run_with_pcores_only(cmd: list[str], **kwargs) -> subprocess.CompletedProce
 # ---------------------------------------------------------------------------
 LogFn      = Callable[[str], None]
 ProgressCb = Callable[[float, float, int], None]   # pct, fps, eta_secs
+
+
+def _should_keep_failed_intermediates() -> bool:
+    return bool(getattr(config, "KEEP_FAILED_INTERMEDIATES", False))
+
+
+def _preserve_failed_artifacts(paths: list[str], input_path: str, log: LogFn) -> str:
+    """Move failed temp artifacts into a timestamped review directory."""
+    keep_root = os.path.join(config.LOCAL_TEMP_DIR, "_failed_intermediates")
+    stem = Path(input_path).stem
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    base_dir = os.path.join(keep_root, f"{stem}_{stamp}")
+    keep_dir = base_dir
+    suffix = 1
+    while os.path.exists(keep_dir):
+        suffix += 1
+        keep_dir = f"{base_dir}_{suffix}"
+
+    os.makedirs(keep_dir, exist_ok=True)
+
+    kept = 0
+    for src in paths:
+        if not src or not os.path.exists(src):
+            continue
+        name = os.path.basename(os.path.normpath(src))
+        dst = os.path.join(keep_dir, name)
+
+        try:
+            if os.path.isdir(src):
+                if os.path.exists(dst):
+                    shutil.rmtree(dst, ignore_errors=True)
+                shutil.move(src, dst)
+            else:
+                # Avoid collisions if two artifacts share the same basename.
+                if os.path.exists(dst):
+                    root, ext = os.path.splitext(name)
+                    i = 2
+                    while os.path.exists(dst):
+                        dst = os.path.join(keep_dir, f"{root}_{i}{ext}")
+                        i += 1
+                shutil.move(src, dst)
+            kept += 1
+        except Exception as exc:
+            log(f"WARNING: could not preserve artifact {src}: {exc}")
+
+    if kept:
+        log(f"Preserved failed intermediates in: {keep_dir}")
+        return keep_dir
+
+    # Remove the empty directory if nothing could be preserved.
+    try:
+        os.rmdir(keep_dir)
+    except OSError:
+        pass
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -904,14 +960,85 @@ def _verify_tracks_preserved(
     return True, ""
 
 
-def _verify_output(output_path: str, src_duration: float) -> tuple[bool, str]:
+def _parse_duration_seconds(value: str | float | int | None) -> float:
+    """Parse ffprobe duration values or HH:MM:SS.mmm strings into seconds."""
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    if ":" not in text:
+        return 0.0
+    try:
+        hh, mm, ss = text.split(":")
+        return int(hh) * 3600 + int(mm) * 60 + float(ss)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _effective_av_duration_from_probe(data: dict) -> float:
+    """Return max video/audio stream duration, falling back to container duration."""
+    streams = data.get("streams", []) or []
+    av_durations: list[float] = []
+    for s in streams:
+        if s.get("codec_type") not in ("video", "audio"):
+            continue
+        d = _parse_duration_seconds(s.get("duration"))
+        if d <= 0:
+            tags = s.get("tags") or {}
+            d = _parse_duration_seconds(tags.get("DURATION") or tags.get("DURATION-eng"))
+        if d > 0:
+            av_durations.append(d)
+
+    if av_durations:
+        return max(av_durations)
+
+    return _parse_duration_seconds((data.get("format") or {}).get("duration"))
+
+
+def _probe_duration_for_compare(path: str) -> float:
+    """Probe a file and return its effective A/V duration for integrity checks."""
+    for attempt in range(3):
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_streams",
+                    "-show_format",
+                    path,
+                ],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            )
+            if not result.stdout.strip():
+                raise ValueError(f"ffprobe returned empty output (rc={result.returncode})")
+            data = json.loads(result.stdout)
+            return _effective_av_duration_from_probe(data)
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.5)
+    return 0.0
+
+
+def _verify_output(
+    output_path: str,
+    src_duration: float,
+    src_path: str | None = None,
+    log: Callable[[str], None] | None = None,
+) -> tuple[bool, str]:
     """
     Sanity-check the encoded output via ffprobe.
 
-    Checks:
+        Checks:
       1. File exists and size > 0
       2. At least one video stream present
-      3. Duration within 5% of src_duration (when src_duration > 0)
+            3. Effective A/V duration within 5% of source duration (subtitle-only tails ignored)
 
     Returns (True, "") on pass, (False, reason) on fail.
     """
@@ -949,18 +1076,31 @@ def _verify_output(output_path: str, src_duration: float) -> tuple[bool, str]:
     if not has_video:
         return False, "no video stream"
 
-    if src_duration > 0:
-        try:
-            out_duration = float(data["format"]["duration"])
-        except (KeyError, ValueError, TypeError):
-            out_duration = 0.0
-        if out_duration > 0:
-            diff_pct = abs(out_duration - src_duration) / src_duration
-            if diff_pct > 0.05:
-                return False, (
-                    f"duration mismatch: src={src_duration:.1f}s "
-                    f"out={out_duration:.1f}s ({diff_pct*100:.1f}% off)"
-                )
+    src_compare = src_duration
+    if src_path:
+        probed_src = _probe_duration_for_compare(src_path)
+        if probed_src > 0:
+            src_compare = probed_src
+
+    out_duration = _effective_av_duration_from_probe(data)
+    if src_compare > 0 and out_duration > 0:
+        diff_pct = abs(out_duration - src_compare) / src_compare
+        if log is not None:
+            log(
+                "Integrity duration check (A/V): "
+                f"src={src_compare:.1f}s out={out_duration:.1f}s "
+                f"diff={diff_pct*100:.2f}% threshold=5.00%"
+            )
+        if diff_pct > 0.05:
+            return False, (
+                f"duration mismatch: src={src_compare:.1f}s "
+                f"out={out_duration:.1f}s ({diff_pct*100:.1f}% off)"
+            )
+    elif log is not None:
+        log(
+            "Integrity duration check (A/V): duration unavailable "
+            f"src={src_compare:.1f}s out={out_duration:.1f}s"
+        )
 
     return True, ""
 
@@ -1485,6 +1625,9 @@ def remux_to_mp4(
     tmp_path   = os.path.join(config.LOCAL_TEMP_DIR, out_name)
 
     aac = _aac_encoder()
+    _pre_audio: list[str | None] | None = None
+    _extracted_text_srts: list[str] | None = None
+    _remux_ok = False
 
     def _preencode_audio_to_aac() -> list[str | None] | None:
         """
@@ -1763,8 +1906,6 @@ def remux_to_mp4(
     # ------------------------------------------------------------------
     try:
         encoder_used = ""
-        _pre_audio: list[str | None] | None = None       # populated on pre-encode attempts
-        _extracted_text_srts: list[str] | None = None   # populated on sub-extraction attempt
         _skip_to_srt_extract = False  # set True when DTS loop kills attempt → jump to SRT path
 
         for attempt, (inc_subs, extra, use_preenc, use_extracted_subs) in enumerate([
@@ -2000,37 +2141,49 @@ def remux_to_mp4(
                 raise
         saved = max(0, src_size - enc_size)
         log(f"Done. Saved {saved/1024/1024:.1f} MB → {final_path}")
+        _remux_ok = True
         return True, encoder_used
 
     finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-        # Clean up any temp SRT files we created
-        for srt in srt_paths:
-            if os.path.exists(srt):
+        _preserved = False
+        if not _remux_ok and _should_keep_failed_intermediates():
+            _keep_paths = [tmp_path]
+            _keep_paths.extend(srt_paths)
+            if _pre_audio:
+                _keep_paths.extend([af for af in _pre_audio if af])
+            if _extracted_text_srts:
+                _keep_paths.extend([s for s in _extracted_text_srts if s])
+            _preserved = bool(_preserve_failed_artifacts(_keep_paths, input_path, log))
+
+        if not _preserved:
+            if os.path.exists(tmp_path):
                 try:
-                    os.remove(srt)
+                    os.remove(tmp_path)
                 except OSError:
                     pass
-        # Clean up any pre-encoded audio files
-        if _pre_audio:
-            for af in _pre_audio:
-                if af and os.path.exists(af):
-                    try:
-                        os.remove(af)
-                    except OSError:
-                        pass
-        # Clean up any pre-extracted text sub SRT files
-        if _extracted_text_srts:
-            for srt in _extracted_text_srts:
-                if srt and os.path.exists(srt):
+            # Clean up any temp SRT files we created
+            for srt in srt_paths:
+                if os.path.exists(srt):
                     try:
                         os.remove(srt)
                     except OSError:
                         pass
+            # Clean up any pre-encoded audio files
+            if _pre_audio:
+                for af in _pre_audio:
+                    if af and os.path.exists(af):
+                        try:
+                            os.remove(af)
+                        except OSError:
+                            pass
+            # Clean up any pre-extracted text sub SRT files
+            if _extracted_text_srts:
+                for srt in _extracted_text_srts:
+                    if srt and os.path.exists(srt):
+                        try:
+                            os.remove(srt)
+                        except OSError:
+                            pass
 
 
 def compress_and_remux(
@@ -2043,6 +2196,7 @@ def compress_and_remux(
     pid_holder: list[int] | None = None,
     conv_logger: "_conv_log.ConversionLogger | None" = None,
     tmp_holder: list[str] | None = None,
+    artifact_holder: list[str] | None = None,
     dropped_streams: list[int] | None = None,
 ) -> tuple[bool, str]:
     """
@@ -2112,6 +2266,8 @@ def compress_and_remux(
     _local_temp = _temp_dir_for(output_dir)
     os.makedirs(_local_temp, exist_ok=True)
     compress_dir = tempfile.mkdtemp(dir=_local_temp, prefix="_cr_")
+    if artifact_holder is not None:
+        artifact_holder[0] = compress_dir
 
     # Phase 1 reports 0→92%; phase 2 (stream-copy remux) reports 92→100%.
     # This prevents the progress bar from sitting frozen at ~100% while the
@@ -2140,12 +2296,16 @@ def compress_and_remux(
     )
 
     if not ok:
-        # Clean up the temp dir
-        try:
-            import shutil
-            shutil.rmtree(compress_dir, ignore_errors=True)
-        except Exception:
-            pass
+        if _should_keep_failed_intermediates():
+            _preserve_failed_artifacts([compress_dir], input_path, log)
+        else:
+            # Clean up the temp dir
+            try:
+                shutil.rmtree(compress_dir, ignore_errors=True)
+            except Exception:
+                pass
+        if artifact_holder is not None:
+            artifact_holder[0] = ""
         return False, encoder_used
 
     suffix   = Path(input_path).suffix.lower()
@@ -2155,6 +2315,12 @@ def compress_and_remux(
 
     if not os.path.exists(intermediate):
         log("ERROR: intermediate file missing after compress_simple")
+        if _should_keep_failed_intermediates():
+            _preserve_failed_artifacts([compress_dir], input_path, log)
+        else:
+            shutil.rmtree(compress_dir, ignore_errors=True)
+        if artifact_holder is not None:
+            artifact_holder[0] = ""
         return False, encoder_used
 
     # Step 2: remux the compressed MKV to MP4.
@@ -2176,12 +2342,27 @@ def compress_and_remux(
         dropped_streams=dropped_streams,
     )
 
-    # Clean up intermediate and its temp dir
-    try:
-        import shutil
-        shutil.rmtree(compress_dir, ignore_errors=True)
-    except Exception:
-        pass
+    # Keep the intermediate workspace alive until the caller finishes the
+    # final integrity check. False positives happen after remux succeeds.
+    if ok2:
+        if artifact_holder is not None:
+            artifact_holder[0] = compress_dir
+        else:
+            try:
+                shutil.rmtree(compress_dir, ignore_errors=True)
+            except Exception:
+                pass
+    elif _should_keep_failed_intermediates():
+        _preserve_failed_artifacts([compress_dir], input_path, log)
+        if artifact_holder is not None:
+            artifact_holder[0] = ""
+    else:
+        try:
+            shutil.rmtree(compress_dir, ignore_errors=True)
+        except Exception:
+            pass
+        if artifact_holder is not None:
+            artifact_holder[0] = ""
 
     if not ok2:
         return False, encoder_used
@@ -2229,6 +2410,7 @@ def convert_video(
     clog = _conv_log.ConversionLogger(input_path)
 
     if anime_mode:
+        _artifact_holder: list[str] = [""]
         if is_hi10(input_path):
             log("Hi10 H.264 detected — QSV unsupported, will use libx265 software encoder.")
         log("Anime mode: compressing then remuxing to MP4.")
@@ -2242,6 +2424,7 @@ def convert_video(
             pid_holder=pid_holder,
             conv_logger=clog,
             tmp_holder=tmp_holder,
+            artifact_holder=_artifact_holder,
             dropped_streams=dropped_streams,
         )
 
@@ -2260,10 +2443,17 @@ def convert_video(
 
         out_name     = Path(input_path).stem + ".mp4"
         output_path  = os.path.join(output_dir, out_name)
-        ok_verify, reason = _verify_output(output_path, duration)
+        ok_verify, reason = _verify_output(output_path, duration, src_path=input_path, log=log)
         if not ok_verify:
             log(f"Integrity check failed: {reason}")
             clog.mark_fail_at(f"integrity check: {reason}")
+            if _should_keep_failed_intermediates():
+                _keep_paths = [output_path]
+                if _artifact_holder[0]:
+                    _keep_paths.append(_artifact_holder[0])
+                _preserve_failed_artifacts(_keep_paths, input_path, log)
+            elif _artifact_holder[0] and os.path.exists(_artifact_holder[0]):
+                shutil.rmtree(_artifact_holder[0], ignore_errors=True)
             clog.failure()
             return {
                 "ok":             False,
@@ -2276,6 +2466,8 @@ def convert_video(
                 "conv_logger":    clog,
             }
         log("Integrity check passed.")
+        if _artifact_holder[0] and os.path.exists(_artifact_holder[0]):
+            shutil.rmtree(_artifact_holder[0], ignore_errors=True)
 
         out_size  = os.path.getsize(output_path)
         out_mb    = out_size / (1024 * 1024)
@@ -2330,7 +2522,7 @@ def convert_video(
     output_path = os.path.join(output_dir, out_name)
 
     # Integrity check
-    ok_verify, reason = _verify_output(output_path, duration)
+    ok_verify, reason = _verify_output(output_path, duration, src_path=input_path, log=log)
     if not ok_verify:
         log(f"Integrity check failed: {reason}")
         clog.mark_fail_at(f"integrity check: {reason}")

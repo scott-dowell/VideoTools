@@ -252,6 +252,39 @@ def _ffprobe_vcodec(input_path: str) -> tuple[str, str]:
         return "", ""
 
 
+def _ffprobe_source_fps(input_path: str) -> float:
+    """Return source video FPS from ffprobe, or 0.0 if unknown."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-select_streams", "v:0", input_path],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+        )
+        streams = json.loads(result.stdout or "{}").get("streams", [])
+        if not streams:
+            return 0.0
+        s = streams[0]
+        for key in ("avg_frame_rate", "r_frame_rate"):
+            raw = (s.get(key) or "").strip()
+            if not raw or raw in ("N/A", "0/0"):
+                continue
+            if "/" in raw:
+                num_s, den_s = raw.split("/", 1)
+                num = float(num_s)
+                den = float(den_s)
+                if den > 0:
+                    fps = num / den
+                    if fps > 0:
+                        return fps
+            else:
+                fps = float(raw)
+                if fps > 0:
+                    return fps
+    except Exception:
+        pass
+    return 0.0
+
+
 def _qsv_cmd(input_path: str, output_path: str, quality: int,
              dropped_streams: list[int] | None = None,
              v_codec: str = "",
@@ -324,6 +357,9 @@ def _sw_cmd(input_path: str, output_path: str, quality: int,
 _PROGRESS_RE = re.compile(
     r"frame=\s*(?P<frame>\d+)\s+fps=\s*(?P<fps>[\d.]+).*?time=(?P<time>[\d:.]+).*?speed=\s*(?P<speed>[\d.]+)x"
 )
+_PROGRESS_FRAME_ONLY_RE = re.compile(
+    r"frame=\s*(?P<frame>\d+)\s+fps=\s*(?P<fps>[\d.]+)"
+)
 
 _PROGRESS_KV_KEYS = {
     "frame", "fps", "stream_0_0_q", "bitrate", "total_size",
@@ -350,6 +386,7 @@ def _run_ffmpeg(
     log: LogFn,
     stop_event: threading.Event,
     duration_secs: float = 0.0,
+    source_fps: float = 0.0,
     progress_cb: ProgressCb | None = None,
     pid_holder: list[int] | None = None,   # pid_holder[0] = pid, caller clears
     output_path: str | None = None,        # when set, validate output on non-zero exit
@@ -361,6 +398,8 @@ def _run_ffmpeg(
         log:           Callable for log lines.
         stop_event:    Set this to abort the encode.
         duration_secs: Total source duration; enables progress calculation.
+        source_fps:    Source stream FPS for frame-based fallback progress
+                   when ffmpeg does not provide a usable timestamp.
         progress_cb:   Called with (pct, fps, eta_secs) on each stats line.
         pid_holder:    If provided, pid_holder[0] is set to the child PID so
                        the caller can NtSuspend/NtResume it.
@@ -519,6 +558,23 @@ def _run_ffmpeg(
                         pass
                     continue   # progress line — don't clutter log
 
+                # Fallback for lines like "time=N/A bitrate=N/A speed=N/A"
+                # where ffmpeg still reports frame/fps and encoding is active.
+                if source_fps > 0:
+                    mf = _PROGRESS_FRAME_ONLY_RE.search(line_s)
+                    if mf:
+                        try:
+                            frame_n = float(mf.group("frame") or 0)
+                            fps_now = float(mf.group("fps") or 0)
+                            elapsed = frame_n / source_fps if frame_n > 0 else 0.0
+                            pct = min(100.0, elapsed / duration_secs * 100.0)
+                            speed = (fps_now / source_fps) if fps_now > 0 else 0.0
+                            eta_secs = max(0, int((duration_secs - elapsed) / speed)) if speed > 0 else 0
+                            progress_cb(pct, fps_now, eta_secs)
+                            continue
+                        except Exception:
+                            pass
+
             # Log all non-progress, non-empty lines so errors are visible
             if line_s:
                 log(line_s)
@@ -669,6 +725,7 @@ def compress_simple(
     input_path = os.path.normpath(input_path)
     src_size   = os.path.getsize(input_path)
     duration   = _ffprobe_duration(input_path)
+    source_fps = _ffprobe_source_fps(input_path)
 
     suffix   = Path(input_path).suffix.lower()
     # .m4v uses the ipod muxer which doesn't support HEVC — treat as .mp4
@@ -717,7 +774,8 @@ def compress_simple(
                 _qsv_cmd(input_path, tmp_path, quality, dropped_streams, v_codec=v_codec,
                          input_decoder=input_decoder, transcode_audio=transcode_audio),
                 qsv_log, stop_event,
-                duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
+                duration_secs=duration, source_fps=source_fps,
+                progress_cb=progress_cb, pid_holder=pid_holder,
                 output_path=tmp_path,
             )
         if not success:
@@ -733,7 +791,8 @@ def compress_simple(
                 _sw_cmd(input_path, tmp_path, sw_quality, dropped_streams,
                         input_decoder=input_decoder, transcode_audio=transcode_audio),
                 sw_log, stop_event,
-                duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
+                duration_secs=duration, source_fps=source_fps,
+                progress_cb=progress_cb, pid_holder=pid_holder,
                 output_path=tmp_path,
             )
 
@@ -773,7 +832,8 @@ def compress_simple(
             corrupt_cmd.append(tmp_path)
             success = _run_ffmpeg(
                 corrupt_cmd, sw_log2, stop_event,
-                duration_secs=duration, progress_cb=progress_cb, pid_holder=pid_holder,
+                duration_secs=duration, source_fps=source_fps,
+                progress_cb=progress_cb, pid_holder=pid_holder,
                 output_path=tmp_path,
             )
 

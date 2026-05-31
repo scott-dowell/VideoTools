@@ -95,3 +95,29 @@ def test_run_ffmpeg_progress_from_key_value_events():
     assert len(callbacks) >= 2
     assert callbacks[0][0] > 0
     assert callbacks[-1][0] >= callbacks[0][0]
+
+
+def test_run_ffmpeg_progress_from_frame_only_lines_with_na_time_speed():
+    callbacks = []
+    logs = []
+    stop = threading.Event()
+
+    out = (
+        "frame= 2796 fps=77 q=34.7 size=33792KiB time=N/A bitrate=N/A speed=N/A\r"
+        "frame= 3796 fps=78 q=34.7 size=44792KiB time=N/A bitrate=N/A speed=N/A\r"
+    )
+
+    with patch("converter.subprocess.Popen", return_value=_FakeProc(out, returncode=0)):
+        ok = converter._run_ffmpeg(
+            ["ffmpeg", "-y", "-i", "in.mkv", "out.mkv"],
+            logs.append,
+            stop,
+            duration_secs=300.0,
+            source_fps=24.0,
+            progress_cb=lambda pct, fps, eta: callbacks.append((pct, fps, eta)),
+        )
+
+    assert ok is True
+    assert len(callbacks) >= 2
+    assert callbacks[0][0] > 0
+    assert callbacks[-1][0] > callbacks[0][0]

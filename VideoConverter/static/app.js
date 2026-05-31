@@ -1241,24 +1241,27 @@ function _pollStatus() {
           // Status badge (col index 7)
           const badgeCell = row.cells[7];
           if (badgeCell) {
-            badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw) + _ocrBadgeHtml(f);
+            badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
             row.classList.toggle('tr-done',        sf.status === 'done');
-            _renderRowStatusCell(fileIndex);
+            row.classList.toggle('tr-failed',      sf.status === 'failed');
             row.classList.toggle('tr-low-savings', sf.status === 'low_savings');
             row.classList.toggle('tr-skipped',     sf.status === 'skipped');
             row.classList.toggle('tr-converting',  sf.status === 'converting');
             // Auto-scroll the active row into view — only when the converting file changes
             if (sf.status === 'converting' && f.full_path !== _lastAutoScrollPath) {
-            _renderRowStatusCell(index);
+              row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+              _lastAutoScrollPath = f.full_path;
             }
           }
           // Output/Saved/% cells (cols 9, 10, 11)
           if (sf.status === 'done') {
-            _renderRowStatusCell(i);
+            if (row.cells[9])  row.cells[9].textContent  = sf.output ? sf.output + ' MB' : '';
+            if (row.cells[10]) row.cells[10].textContent = sf.saved  ? sf.saved  + ' MB' : '';
             if (row.cells[11]) row.cells[11].innerHTML   = sf.pct     ? '<strong>' + sf.pct + '%</strong>' : '';
           }
-          if (sf.conv_secs !== undefined && row.cells[12])
-            _renderRowStatusCell(index);
+          if (sf.conv_secs !== undefined && row.cells[12]) {
+            row.cells[12].textContent = sf.conv_secs ? _fmtDuration(sf.conv_secs) : '';
+          }
           const estCell = document.getElementById('est-' + idx);
           if (estCell && sf.est_pct != null) {
             estCell.innerHTML =

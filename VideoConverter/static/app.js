@@ -30,6 +30,10 @@ let _sessionProcessed = 0;    // files completed (done/failed/no_saving) this ru
 let _sessionStartedAt = 0;        // unix epoch (s) when current session started; 0 = not started
 let _sessionElapsedTimer = null;  // setInterval ID for the live session elapsed clock
 let _fileElapsedTimer    = null;  // setInterval ID for the live per-file elapsed clock
+let _detailsFileIndex = null;     // index currently shown in Video Details modal
+let _detailsPreviewPath = '';      // preview copy path for details modal file
+let _detailsBusy = false;          // prevent duplicate stream-edit actions
+let _streamReplaceConfirmModal = null;
 
 // Estimation background task state
 let _estUserPaused  = false;  // user clicked the strip
@@ -93,6 +97,11 @@ function _fmtDuration(secs) {
   if (h > 0) return h + 'h ' + String(m).padStart(2, '0') + 'm ' + String(s).padStart(2, '0') + 's';
   if (m > 0) return m + 'm ' + String(s).padStart(2, '0') + 's';
   return s + 's';
+}
+
+function _fmtMbVal(mb) {
+  const n = Number(mb || 0);
+  return n.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
 // Compute bitrate in kbps from file object
@@ -193,6 +202,14 @@ function setButtonStates(state) {
   const modalCleanupBtn = document.getElementById('modalCleanupBtn');
   if (modalPrepBtn    && _selectedPath) modalPrepBtn.disabled    = state === 'running';
   if (modalCleanupBtn && _selectedPath) modalCleanupBtn.disabled = state === 'running';
+  const detailsCreateBtn = document.getElementById('detailsPreviewCreateBtn');
+  const detailsPlayBtn = document.getElementById('detailsPreviewPlayBtn');
+  const detailsDiscardBtn = document.getElementById('detailsPreviewDiscardBtn');
+  const detailsCommitBtn = document.getElementById('detailsPreviewCommitBtn');
+  if (detailsCreateBtn) detailsCreateBtn.disabled = state === 'running' || _detailsBusy;
+  if (detailsPlayBtn) detailsPlayBtn.disabled = state === 'running' || _detailsBusy || !_detailsPreviewPath;
+  if (detailsDiscardBtn) detailsDiscardBtn.disabled = state === 'running' || _detailsBusy || !_detailsPreviewPath;
+  if (detailsCommitBtn) detailsCommitBtn.disabled = state === 'running' || _detailsBusy || !_detailsPreviewPath;
   // Enable drag handles only when queue is ready and not running
   const canDrag = (state === 'ready');
   document.querySelectorAll('#queueBody tr[id^="row-"]').forEach(tr => {
@@ -1226,26 +1243,22 @@ function _pollStatus() {
           if (badgeCell) {
             badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw) + _ocrBadgeHtml(f);
             row.classList.toggle('tr-done',        sf.status === 'done');
-            row.classList.toggle('tr-failed',      sf.status === 'failed');
-            row.classList.toggle('tr-no-saving',   sf.status === 'no_saving');
+            _renderRowStatusCell(fileIndex);
             row.classList.toggle('tr-low-savings', sf.status === 'low_savings');
             row.classList.toggle('tr-skipped',     sf.status === 'skipped');
             row.classList.toggle('tr-converting',  sf.status === 'converting');
             // Auto-scroll the active row into view — only when the converting file changes
             if (sf.status === 'converting' && f.full_path !== _lastAutoScrollPath) {
-              _lastAutoScrollPath = f.full_path;
-              row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            _renderRowStatusCell(index);
             }
           }
           // Output/Saved/% cells (cols 9, 10, 11)
           if (sf.status === 'done') {
-            if (row.cells[9])  row.cells[9].textContent  = sf.output  ? sf.output  + ' MB' : '';
-            if (row.cells[10]) row.cells[10].textContent = sf.saved   ? sf.saved   + ' MB' : '';
+            _renderRowStatusCell(i);
             if (row.cells[11]) row.cells[11].innerHTML   = sf.pct     ? '<strong>' + sf.pct + '%</strong>' : '';
           }
           if (sf.conv_secs !== undefined && row.cells[12])
-            row.cells[12].textContent = sf.conv_secs > 0 ? _fmtDuration(sf.conv_secs) : '';
-          // Update est. savings cell live when the estimate step completes
+            _renderRowStatusCell(index);
           const estCell = document.getElementById('est-' + idx);
           if (estCell && sf.est_pct != null) {
             estCell.innerHTML =
@@ -1645,6 +1658,7 @@ function viewErrorLog(index) {
 
 function viewDetails(index) {
   const f = _files[index];
+  _detailsFileIndex = index;
   const body = document.getElementById('detailsModalBody');
   const titleEl = document.getElementById('detailsModalTitle');
   if (titleEl) titleEl.textContent = f.name;
@@ -1686,7 +1700,7 @@ function viewDetails(index) {
   if (!s) {
     html += `<p class="text-secondary small mb-3">Stream data not loaded. <button class="btn btn-sm btn-outline-secondary py-0" onclick="probeStreams(${index})"><i class="bi bi-search me-1"></i>Probe</button></p>`;
   } else if (audioTracks.length) {
-    html += '<table class="table table-sm details-table mb-3"><thead><tr><th>#</th><th>Codec</th><th>Channels</th><th>Language</th><th>Bitrate</th><th>Title</th><th></th></tr></thead><tbody>';
+    html += '<table class="table table-sm details-table mb-3"><thead><tr><th>#</th><th>Codec</th><th>Channels</th><th>Language</th><th>Bitrate</th><th>Title</th><th class="text-end"><button class="btn btn-link btn-sm p-0 me-2" onclick="setAllStreamsDropped(' + index + ',\'audio\',true)">Drop all</button><button class="btn btn-link btn-sm p-0" onclick="setAllStreamsDropped(' + index + ',\'audio\',false)">Restore all</button></th></tr></thead><tbody>';
     audioTracks.forEach(a => {
       const streamIdx = a.index != null ? a.index : null;
       const isDrop = streamIdx != null && dropped.has(streamIdx);
@@ -1707,7 +1721,7 @@ function viewDetails(index) {
   if (!s) {
     html += '<p class="text-secondary small mb-0">Click Probe above to load track info.</p>';
   } else if (subTracks.length) {
-    html += '<table class="table table-sm details-table mb-0"><thead><tr><th>#</th><th>Format</th><th>Language</th><th>Title</th><th></th></tr></thead><tbody>';
+    html += '<table class="table table-sm details-table mb-0"><thead><tr><th>#</th><th>Format</th><th>Language</th><th>Title</th><th class="text-end"><button class="btn btn-link btn-sm p-0 me-2" onclick="setAllStreamsDropped(' + index + ',\'subs\',true)">Drop all</button><button class="btn btn-link btn-sm p-0" onclick="setAllStreamsDropped(' + index + ',\'subs\',false)">Restore all</button></th></tr></thead><tbody>';
     subTracks.forEach(sub => {
       const streamIdx = sub.index != null ? sub.index : null;
       const isDrop = streamIdx != null && dropped.has(streamIdx);
@@ -1736,6 +1750,240 @@ function viewDetails(index) {
     existing = new bootstrap.Modal(modalEl);
   }
   existing.show();
+  refreshStreamEditStatus();
+}
+
+function _setDetailsButtonsDisabled(disabled) {
+  const createBtn = document.getElementById('detailsPreviewCreateBtn');
+  const playBtn = document.getElementById('detailsPreviewPlayBtn');
+  const discardBtn = document.getElementById('detailsPreviewDiscardBtn');
+  const commitBtn = document.getElementById('detailsPreviewCommitBtn');
+  if (createBtn) createBtn.disabled = disabled;
+  if (playBtn) playBtn.disabled = disabled || !_detailsPreviewPath;
+  if (discardBtn) discardBtn.disabled = disabled || !_detailsPreviewPath;
+  if (commitBtn) commitBtn.disabled = disabled || !_detailsPreviewPath;
+}
+
+function _setDetailsStatusText(text) {
+  const statusEl = document.getElementById('detailsStreamEditStatus');
+  if (statusEl) statusEl.textContent = text || '';
+}
+
+function _renderRowStatusCell(fileIndex) {
+  const f = _files[fileIndex];
+  const row = document.getElementById('row-' + fileIndex);
+  if (!row || !f) return;
+  row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
+}
+
+function refreshStreamEditStatus() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f) return;
+
+  fetch('/api/stream_edit_status?path=' + encodeURIComponent(f.full_path))
+    .then(r => r.json())
+    .then(data => {
+      _detailsPreviewPath = data.preview_exists ? (data.preview_path || '') : '';
+      _setDetailsButtonsDisabled(_detailsBusy || _appState === 'running');
+      if (data.preview_exists) {
+        _setDetailsStatusText('Preview ready: ' + (data.preview_size_mb || 0).toFixed(1) + ' MB');
+      } else {
+        _setDetailsStatusText('No preview copy yet');
+      }
+    })
+    .catch(() => {
+      _detailsPreviewPath = '';
+      _setDetailsButtonsDisabled(true);
+      _setDetailsStatusText('Could not read preview status');
+    });
+}
+
+function createStreamEditPreview() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f) return;
+  const dropped = f.dropped_streams || [];
+  if (!dropped.length) {
+    addLog('No dropped streams selected for ' + f.name + '.', 'warn');
+    return;
+  }
+
+  _detailsBusy = true;
+  _setDetailsButtonsDisabled(true);
+  _setDetailsStatusText('Building preview copy...');
+
+  fetch('/api/stream_edit_preview', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path, dropped}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    if (data.ok) {
+      _detailsPreviewPath = data.preview_path || '';
+      _setDetailsButtonsDisabled(false);
+      _setDetailsStatusText('Preview ready: ' + (data.preview_size_mb || 0).toFixed(1) + ' MB');
+      addLog('Created stream-edit preview: ' + f.name, 'ok');
+    } else {
+      _detailsPreviewPath = '';
+      _setDetailsButtonsDisabled(false);
+      _setDetailsStatusText('Preview failed');
+      addLog('Stream-edit preview failed: ' + (data.error || 'unknown error'), 'err');
+    }
+  }).catch(err => {
+    _detailsBusy = false;
+    _detailsPreviewPath = '';
+    _setDetailsButtonsDisabled(false);
+    _setDetailsStatusText('Preview failed');
+    addLog('Stream-edit preview failed: ' + err, 'err');
+  });
+}
+
+function playStreamEditPreview() {
+  if (!_detailsPreviewPath) return;
+  apiOpen(_detailsPreviewPath, 'play');
+}
+
+function _persistDroppedStreams(fileIndex, newDropped, opts) {
+  const f = _files[fileIndex];
+  if (!f) return;
+  const options = opts || {};
+  fetch('/api/drop_streams', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path, dropped: newDropped}),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      f.dropped_streams = newDropped;
+      _renderRowStatusCell(fileIndex);
+      if (options.refreshDetails) viewDetails(fileIndex);
+      if (options.logText) addLog(options.logText, 'info');
+    } else {
+      addLog('drop_streams error: ' + (data.error || 'unknown'), 'err');
+    }
+  }).catch(err => addLog('drop_streams fetch error: ' + err, 'err'));
+}
+
+function setAllStreamsDropped(fileIndex, kind, dropAll) {
+  const f = _files[fileIndex];
+  if (!f || !f.streams) return;
+  const source = kind === 'audio' ? (f.streams.audio || []) : (f.streams.subs || []);
+  const indices = source.map(t => t.index).filter(i => i != null);
+  if (!indices.length) return;
+
+  const dropped = new Set(f.dropped_streams || []);
+  indices.forEach(i => {
+    if (dropAll) dropped.add(i);
+    else dropped.delete(i);
+  });
+  const newDropped = [...dropped].sort((a, b) => a - b);
+  const label = kind === 'audio' ? 'audio' : 'subtitle';
+  _persistDroppedStreams(fileIndex, newDropped, {
+    refreshDetails: true,
+    logText: (dropAll ? 'Dropped all ' : 'Restored all ') + label + ' streams for ' + f.name,
+  });
+}
+
+function discardStreamEditPreview() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f || !_detailsPreviewPath) return;
+
+  _detailsBusy = true;
+  _setDetailsButtonsDisabled(true);
+  fetch('/api/stream_edit_discard', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    if (data.ok) {
+      _detailsPreviewPath = '';
+      _setDetailsButtonsDisabled(false);
+      _setDetailsStatusText('Preview discarded');
+      addLog('Discarded stream-edit preview for ' + f.name, 'info');
+    } else {
+      _setDetailsButtonsDisabled(false);
+      addLog('Discard preview failed: ' + (data.error || 'unknown error'), 'err');
+    }
+  }).catch(err => {
+    _detailsBusy = false;
+    _setDetailsButtonsDisabled(false);
+    addLog('Discard preview failed: ' + err, 'err');
+  });
+}
+
+function commitStreamEditPreview() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f || !_detailsPreviewPath) return;
+
+  _detailsBusy = true;
+  _setDetailsButtonsDisabled(true);
+  _setDetailsStatusText('Replacing original...');
+  fetch('/api/stream_edit_commit', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    if (!data.ok) {
+      _setDetailsButtonsDisabled(false);
+      _setDetailsStatusText('Replace failed');
+      addLog('Replace original failed: ' + (data.error || 'unknown error'), 'err');
+      return;
+    }
+
+    _detailsPreviewPath = '';
+    f.dropped_streams = [];
+    f.status = data.status || 'pending';
+    f.output = null;
+    f.saved = null;
+    f.pct = null;
+    if (data.new_size_mb != null) {
+      f.size = _fmtMbVal(data.new_size_mb);
+    }
+    if (data.streams) {
+      f.streams = data.streams;
+      const v = data.streams.video || {};
+      const codec = (v.codec || '').toUpperCase();
+      if (codec) f.codec = codec;
+    }
+    _renderRowStatusCell(_detailsFileIndex);
+    const row = document.getElementById('row-' + _detailsFileIndex);
+    if (row) {
+      row.classList.remove('tr-done', 'tr-failed');
+      row.cells[3].textContent = (f.size || '0') + ' MB';
+      _updateRowProbe(_detailsFileIndex, f);
+    }
+    updateStats(_files);
+    _setDetailsButtonsDisabled(false);
+    _setDetailsStatusText('Original replaced. Preview cleared.');
+    addLog('Stream edit accepted for ' + f.name + ' - original replaced.', 'ok');
+    viewDetails(_detailsFileIndex);
+  }).catch(err => {
+    _detailsBusy = false;
+    _setDetailsButtonsDisabled(false);
+    _setDetailsStatusText('Replace failed');
+    addLog('Replace original failed: ' + err, 'err');
+  });
+}
+
+function openCommitStreamEditModal() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f || !_detailsPreviewPath) return;
+  const label = document.getElementById('streamReplaceFileLabel');
+  if (label) label.textContent = f.name;
+  if (!_streamReplaceConfirmModal) {
+    _streamReplaceConfirmModal = new bootstrap.Modal(document.getElementById('streamReplaceConfirmModal'));
+  }
+  _streamReplaceConfirmModal.show();
+}
+
+function confirmCommitStreamEditPreview() {
+  if (_streamReplaceConfirmModal) _streamReplaceConfirmModal.hide();
+  commitStreamEditPreview();
 }
 
 function toggleDropStream(fileIndex, streamIdx, btn) {
@@ -1747,23 +1995,8 @@ function toggleDropStream(fileIndex, streamIdx, btn) {
   } else {
     dropped.add(streamIdx);
   }
-  const newDropped = [...dropped];
-  fetch('/api/drop_streams', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({path: f.full_path, dropped: newDropped}),
-  }).then(r => r.json()).then(data => {
-    if (data.ok) {
-      f.dropped_streams = newDropped;
-      // Update table row badge
-      const row = document.getElementById('row-' + fileIndex);
-      if (row) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f);
-      // Re-render the modal body in place
-      viewDetails(fileIndex);
-    } else {
-      addLog('drop_streams error: ' + (data.error || 'unknown'), 'error');
-    }
-  }).catch(err => addLog('drop_streams fetch error: ' + err, 'error'));
+  const newDropped = [...dropped].sort((a, b) => a - b);
+  _persistDroppedStreams(fileIndex, newDropped, {refreshDetails: true});
 }
 
 // Returns the ffprobe stream indices of PGS subtitle tracks for a file object
@@ -1785,39 +2018,17 @@ function dropPgsFile(index) {
   }
   const existing = new Set(f.dropped_streams || []);
   pgsIdx.forEach(i => existing.add(i));
-  const newDropped = [...existing];
-  fetch('/api/drop_streams', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({path: f.full_path, dropped: newDropped}),
-  }).then(r => r.json()).then(d => {
-    if (d.ok) {
-      f.dropped_streams = newDropped;
-      const row = document.getElementById('row-' + index);
-      if (row) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f);
-      addLog('Dropped ' + pgsIdx.length + ' PGS stream(s) for ' + f.name, 'info');
-    } else {
-      addLog('drop_streams error: ' + (d.error || 'unknown'), 'error');
-    }
-  }).catch(err => addLog('drop_streams fetch error: ' + err, 'error'));
+  const newDropped = [...existing].sort((a, b) => a - b);
+  _persistDroppedStreams(index, newDropped, {
+    logText: 'Dropped ' + pgsIdx.length + ' PGS stream(s) for ' + f.name,
+  });
 }
 
 function restoreStreams(index) {
   const f = _files[index];
-  fetch('/api/drop_streams', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({path: f.full_path, dropped: []}),
-  }).then(r => r.json()).then(d => {
-    if (d.ok) {
-      f.dropped_streams = [];
-      const row = document.getElementById('row-' + index);
-      if (row) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw);
-      addLog('Restored all dropped tracks for ' + f.name, 'info');
-    } else {
-      addLog('restore error: ' + (d.error || 'unknown'), 'error');
-    }
-  }).catch(err => addLog('restore fetch error: ' + err, 'error'));
+  _persistDroppedStreams(index, [], {
+    logText: 'Restored all dropped tracks for ' + f.name,
+  });
 }
 
 async function dropPgsFolder(folder) {
@@ -2166,6 +2377,7 @@ function openSettings() {
       document.getElementById('swCrf').value         = s.sw_hevc_crf;
       document.getElementById('swCrfVal').textContent = s.sw_hevc_crf;
       document.getElementById('settingsTempDir').value      = s.local_temp_dir;
+      document.getElementById('settingsKeepFailedIntermediates').checked = !!s.keep_failed_intermediates;
       document.getElementById('settingsDefaultSort').value  = s.default_sort || 'bitrate';
       const thr = s.low_savings_threshold_pct !== undefined ? s.low_savings_threshold_pct : 5;
       document.getElementById('settingsLowSavingsThreshold').value = thr;
@@ -2181,6 +2393,7 @@ function saveSettings() {
     qsv_quality:               parseInt(document.getElementById('qsvQuality').value, 10),
     sw_hevc_crf:               parseInt(document.getElementById('swCrf').value, 10),
     local_temp_dir:            document.getElementById('settingsTempDir').value.trim(),
+    keep_failed_intermediates: !!document.getElementById('settingsKeepFailedIntermediates').checked,
     default_sort:              document.getElementById('settingsDefaultSort').value,
     low_savings_threshold_pct: parseInt(document.getElementById('settingsLowSavingsThreshold').value, 10),
   };

@@ -522,6 +522,92 @@ def set_dropped_streams(source_path: str, indices: list[int]) -> None:
         )
 
 
+def sync_after_stream_edit(
+    source_path: str,
+    source_mtime: float,
+    source_size_bytes: int,
+    source_size_mb: float,
+    source_codec: str | None,
+    source_bitrate_kbps: int | None,
+    source_duration_secs: float | None,
+    content_hash: str | None,
+    completed_at: str,
+) -> str:
+    """Persist file metadata after in-place stream-edit replacement.
+
+    If the latest record for this path was already 'done', keep it done so the
+    scanner doesn't re-queue the edited file as pending. Otherwise keep pending.
+    Returns the status that was written.
+    """
+    source_path = _norm(source_path)
+    with _connect() as conn:
+        prev = conn.execute(
+            "SELECT status, anime_mode, force_sw FROM conversions "
+            "WHERE source_path = ? ORDER BY id DESC LIMIT 1",
+            (source_path,),
+        ).fetchone()
+        done_exists = conn.execute(
+            "SELECT 1 FROM conversions WHERE source_path = ? AND status = 'done' LIMIT 1",
+            (source_path,),
+        ).fetchone() is not None
+        new_status = "done" if done_exists else "pending"
+        anime_mode = int(prev["anime_mode"]) if prev else 0
+        force_sw = int(prev["force_sw"]) if prev else 0
+
+        conn.execute(
+            """
+            INSERT INTO conversions (
+                source_path, source_mtime, source_size_bytes, source_size_mb,
+                source_codec, source_hash, source_bitrate_kbps, source_duration_secs,
+                status, anime_mode, force_sw,
+                output_path, output_size_mb, output_hash, output_bitrate_kbps,
+                encoder_used, completed_at, dropped_streams, error_tail, started_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            ON CONFLICT(source_path, source_mtime) DO UPDATE SET
+                source_size_bytes    = excluded.source_size_bytes,
+                source_size_mb       = excluded.source_size_mb,
+                source_codec         = excluded.source_codec,
+                source_hash          = excluded.source_hash,
+                source_bitrate_kbps  = excluded.source_bitrate_kbps,
+                source_duration_secs = excluded.source_duration_secs,
+                status               = excluded.status,
+                anime_mode           = excluded.anime_mode,
+                force_sw             = excluded.force_sw,
+                output_path          = excluded.output_path,
+                output_size_mb       = excluded.output_size_mb,
+                output_hash          = excluded.output_hash,
+                output_bitrate_kbps  = excluded.output_bitrate_kbps,
+                encoder_used         = excluded.encoder_used,
+                completed_at         = excluded.completed_at,
+                dropped_streams      = excluded.dropped_streams,
+                error_tail           = NULL,
+                started_at           = NULL
+            """,
+            (
+                source_path,
+                source_mtime,
+                source_size_bytes,
+                source_size_mb,
+                source_codec,
+                content_hash,
+                source_bitrate_kbps,
+                source_duration_secs,
+                new_status,
+                anime_mode,
+                force_sw,
+                source_path,
+                source_size_mb,
+                content_hash,
+                source_bitrate_kbps,
+                "stream_edit_copy",
+                completed_at,
+                _json.dumps([]),
+            ),
+        )
+    return new_status
+
+
 def save_probe_result(
     source_path: str,
     source_mtime: float,

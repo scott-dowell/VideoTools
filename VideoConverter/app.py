@@ -220,6 +220,17 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _stream_preview_path(source_path: str) -> str:
+    """Deterministic preview path used by stream-edit workflow."""
+    root, ext = os.path.splitext(source_path)
+    return f"{root}.__stream_preview__{ext}"
+
+
+def _is_job_running() -> bool:
+    with _job_lock:
+        return _job.get("state") == "running"
+
+
 # Windows error codes that indicate unrecoverable hardware / device failure.
 # When any of these are detected the entire queue is halted immediately.
 _FATAL_WINERRORS = {
@@ -1551,6 +1562,183 @@ def api_probe_streams():
         return jsonify({"error": "ffprobe failed"}), 500
     parsed = scanner._parse_probe(probe)
     return jsonify({"ok": True, "streams": parsed["streams"]})
+
+
+@app.route("/api/stream_edit_status")
+def api_stream_edit_status():
+    """Return whether a stream-edit preview exists for the given source file."""
+    path = request.args.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    preview = _stream_preview_path(path)
+    exists = os.path.isfile(preview)
+    size_mb = round(os.path.getsize(preview) / (1024 * 1024), 2) if exists else 0.0
+    return jsonify({
+        "ok": True,
+        "path": path,
+        "preview_path": preview if exists else "",
+        "preview_exists": exists,
+        "preview_size_mb": size_mb,
+    })
+
+
+@app.route("/api/stream_edit_preview", methods=["POST"])
+def api_stream_edit_preview():
+    """Create/overwrite a stream-copy preview that excludes selected stream indices."""
+    if _is_job_running():
+        return jsonify({"error": "Cannot edit streams while conversion is running"}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or "").strip()
+    dropped = data.get("dropped", None)
+
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    if dropped is None:
+        dropped_indices = db.get_dropped_streams(path)
+    elif isinstance(dropped, list):
+        try:
+            dropped_indices = sorted(set(int(i) for i in dropped))
+        except Exception:
+            return jsonify({"error": "dropped must be a list of integers"}), 400
+    else:
+        return jsonify({"error": "dropped must be a list of integers"}), 400
+
+    preview = _stream_preview_path(path)
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-i", path,
+        "-map", "0",
+    ]
+    for idx in dropped_indices:
+        cmd += ["-map", f"-0:{idx}"]
+    cmd += ["-c", "copy", preview]
+
+    try:
+        proc = _sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60 * 60,
+        )
+    except Exception as exc:
+        return jsonify({"error": f"ffmpeg launch failed: {exc}"}), 500
+
+    if proc.returncode != 0 or not os.path.isfile(preview):
+        err = (proc.stderr or "").strip()
+        tail = "\n".join(err.splitlines()[-25:]) if err else "stream-copy failed"
+        return jsonify({"error": tail}), 500
+
+    # Persist latest dropped-stream selection to DB for consistency.
+    db.set_dropped_streams(path, dropped_indices)
+
+    return jsonify({
+        "ok": True,
+        "path": path,
+        "preview_path": preview,
+        "preview_size_mb": round(os.path.getsize(preview) / (1024 * 1024), 2),
+        "dropped": dropped_indices,
+    })
+
+
+@app.route("/api/stream_edit_commit", methods=["POST"])
+def api_stream_edit_commit():
+    """Replace source file with accepted stream-edit preview and remove the original."""
+    if _is_job_running():
+        return jsonify({"error": "Cannot edit streams while conversion is running"}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    preview = _stream_preview_path(path)
+    if not os.path.isfile(preview):
+        return jsonify({"error": "No preview copy exists for this file"}), 404
+
+    try:
+        os.replace(preview, path)
+    except Exception as exc:
+        return jsonify({"error": f"replace failed: {exc}"}), 500
+
+    # Dropped streams are now baked into the source; clear the override list.
+    db.set_dropped_streams(path, [])
+
+    try:
+        stat = os.stat(path)
+        size_mb = round(stat.st_size / (1024 * 1024), 2)
+        size_bytes = int(stat.st_size)
+        mtime = stat.st_mtime
+    except Exception:
+        size_mb = 0.0
+        size_bytes = 0
+        mtime = time.time()
+
+    # Sync DB metadata for the new file bytes. Preserve done status when the
+    # previous record was already done so edited files don't re-queue as pending.
+    status = "pending"
+    try:
+        probe = scanner._ffprobe(path)
+        parsed = scanner._parse_probe(probe) if probe else {}
+        codec = (parsed.get("codec") or "").upper() if parsed else ""
+        bitrate = int(((parsed.get("streams") or {}).get("video") or {}).get("bitrate", 0) / 1000) if parsed else 0
+        duration = float(parsed.get("duration_secs", 0.0)) if parsed else 0.0
+        file_hash = db.hash_file_head(path)
+        status = db.sync_after_stream_edit(
+            source_path=path,
+            source_mtime=mtime,
+            source_size_bytes=size_bytes,
+            source_size_mb=size_mb,
+            source_codec=codec or None,
+            source_bitrate_kbps=bitrate or None,
+            source_duration_secs=duration or None,
+            content_hash=file_hash,
+            completed_at=_utcnow(),
+        )
+        streams = (parsed.get("streams") or None) if parsed else None
+    except Exception:
+        streams = None
+
+    return jsonify({
+        "ok": True,
+        "path": path,
+        "new_size_mb": size_mb,
+        "status": status,
+        "streams": streams,
+    })
+
+
+@app.route("/api/stream_edit_discard", methods=["POST"])
+def api_stream_edit_discard():
+    """Delete a previously created stream-edit preview copy for a file."""
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    path = os.path.normpath(path)
+    preview = _stream_preview_path(path)
+    if os.path.isfile(preview):
+        try:
+            os.remove(preview)
+        except Exception as exc:
+            return jsonify({"error": f"Could not remove preview: {exc}"}), 500
+
+    return jsonify({"ok": True, "path": path})
 
 
 @app.route("/api/diagnose")

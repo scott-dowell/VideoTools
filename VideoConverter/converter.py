@@ -2238,26 +2238,34 @@ def compress_and_remux(
                 dropped_streams=dropped_streams,
             )
 
-    # Fast-exit: if source video is AV1, skip compression entirely —
-    # stream-copy the video directly into MP4 with AAC audio and subs.
-    # hi10=True reuses the same "copy video" branch in remux_to_mp4 and
-    # disables the output-size-vs-source check (there are no savings to
-    # measure when the video isn't being re-encoded).
+    # AV1 handling:
+    # - legacy behavior: stream-copy AV1 into MP4 (no video re-encode)
+    # - default behavior: re-encode AV1 to HEVC at AV1_QSV_QUALITY for
+    #   meaningful size savings
     if _is_av1(input_path):
-        log("AV1 source — stream-copying video into MP4 (no re-encode).")
-        return remux_to_mp4(
-            input_path=input_path,
-            output_dir=output_dir,
-            log=log,
-            stop_event=stop_event,
-            quality=quality,
-            progress_cb=progress_cb,
-            pid_holder=pid_holder,
-            hi10=True,
-            conv_logger=conv_logger,
-            tmp_holder=tmp_holder,
-            dropped_streams=dropped_streams,
-        )
+        if not bool(getattr(config, "REENCODE_AV1", True)):
+            log("AV1 source — stream-copying video into MP4 (no re-encode).")
+            return remux_to_mp4(
+                input_path=input_path,
+                output_dir=output_dir,
+                log=log,
+                stop_event=stop_event,
+                quality=quality,
+                progress_cb=progress_cb,
+                pid_holder=pid_holder,
+                hi10=True,
+                conv_logger=conv_logger,
+                tmp_holder=tmp_holder,
+                dropped_streams=dropped_streams,
+            )
+
+        av1_quality = int(getattr(config, "AV1_QSV_QUALITY", 27))
+        av1_quality = max(1, min(51, av1_quality))
+        if quality is not None and quality != av1_quality:
+            log(f"AV1 policy override: using quality {av1_quality} (instead of {quality}).")
+        else:
+            log(f"AV1 source — re-encoding for savings at quality {av1_quality}.")
+        quality = av1_quality
 
     # Step 1: compress to a unique temp subdir so the path never collides
     # with compress_simple's own internal tmp_path (which also lives in

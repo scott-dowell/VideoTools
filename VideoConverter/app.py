@@ -146,7 +146,7 @@ def _build_steps(file_info: dict, anime_mode: bool) -> list:
         ocr_state  = "waiting" if has_pgs else "skipped"
         ocr_detail = "" if has_pgs else "No PGS tracks"
         steps.append({"id": "ocr",   "label": "OCR",   "state": ocr_state,  "detail": ocr_detail, "attempt": 1})
-        if v_codec in ("av1", "av1_cuvid"):
+        if v_codec in ("av1", "av1_cuvid") and not bool(getattr(config, "REENCODE_AV1", True)):
             steps.append({"id": "remux", "label": "Remux", "state": "waiting", "detail": "AV1 stream-copy \u2192 MP4", "attempt": 1})
         elif v_codec in ("hevc", "hevc_cuvid", "hevc_qsv"):
             steps.append({"id": "remux", "label": "Remux", "state": "waiting", "detail": "HEVC stream-copy \u2192 MP4", "attempt": 1})
@@ -200,7 +200,7 @@ def _process_step_log(msg: str, attempt_counter: list) -> None:
     elif "Pre-encoding audio track" in m:
         detail = m.split("Pre-encoding audio track", 1)[1].strip().rstrip(".")
         _step("audio", "running", detail)
-    elif m.startswith("AV1 source"):
+    elif m.startswith("AV1 source") and "stream-copying" in m:
         if not attempt_counter[0]:
             attempt_counter[0] = 1
         _step("remux", "running", f"AV1 stream-copy \u00b7 attempt {attempt_counter[0]}/6")
@@ -888,6 +888,7 @@ _SETTINGS_DEFAULTS = {
     "qsv_quality":               config.QSV_QUALITY,
     "sw_hevc_crf":               config.SW_HEVC_CRF,
     "local_temp_dir":            config.LOCAL_TEMP_DIR,
+    "keep_failed_intermediates": config.KEEP_FAILED_INTERMEDIATES,
     "default_sort":              "bitrate",   # bitrate | size | name
     "anime_mode":                False,
     "low_savings_threshold_pct": 5,
@@ -1196,6 +1197,8 @@ def api_settings_post():
             data["sw_hevc_crf"] = max(0, min(51, int(data["sw_hevc_crf"])))
         if "low_savings_threshold_pct" in data:
             data["low_savings_threshold_pct"] = max(0, min(100, int(data["low_savings_threshold_pct"])))
+        if "keep_failed_intermediates" in data:
+            data["keep_failed_intermediates"] = bool(data["keep_failed_intermediates"])
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid numeric value"}), 400
     _save_settings({**_load_settings(), **data})
@@ -1232,6 +1235,7 @@ def api_start():
     temp_dir  = settings.get("local_temp_dir", "").strip()
     if temp_dir:
         config.LOCAL_TEMP_DIR = temp_dir
+    config.KEEP_FAILED_INTERMEDIATES = bool(settings.get("keep_failed_intermediates", config.KEEP_FAILED_INTERMEDIATES))
 
     if not files:
         return jsonify({"error": "No files provided"}), 400

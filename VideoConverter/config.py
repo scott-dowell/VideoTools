@@ -10,6 +10,16 @@ SW_HEVC_CRF = 28        # libx265 CRF fallback (lower = better quality)
 # Local staging directory — keeps FFmpeg off OneDrive/network paths during encode
 LOCAL_TEMP_DIR = r"C:\Temp\vc_working"
 
+# Keep failed intermediate artifacts for post-mortem review.
+# When enabled, failed remux/compress temp outputs are moved into
+# LOCAL_TEMP_DIR\_failed_intermediates\<file>_<timestamp>\
+KEEP_FAILED_INTERMEDIATES = False
+
+# AV1 policy (anime mode): re-encode for meaningful size savings instead of
+# stream-copying the AV1 video into MP4.
+REENCODE_AV1 = True
+AV1_QSV_QUALITY = 27
+
 # Flask
 FLASK_PORT = 5001
 FLASK_DEBUG = False

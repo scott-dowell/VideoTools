@@ -7,8 +7,9 @@ Two modes:
                        QSV, falls back to libx265. Discards output if not
                        smaller than source.
 
-  estimate()         — Quick savings estimator. Encodes 10 s from the middle
-                       of the file with QSV and extrapolates compression ratio.
+    estimate()         — Quick savings estimator. Encodes multiple short clips
+                                             spread across the file with QSV, then uses robust
+                                             aggregation to reduce outlier bias.
 
   convert_video()    — Dispatcher: normal mode (compress_simple) or anime
                        mode (Phase 3b). This is the function called by the
@@ -27,6 +28,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from statistics import mean, median, pstdev
 from typing import Callable
 
 import config
@@ -266,6 +268,7 @@ def _qsv_cmd(input_path: str, output_path: str, quality: int,
     cmd = [
         "ffmpeg", "-y",
         "-stats_period", "1",
+        "-progress", "pipe:1",
         "-fflags", "+discardcorrupt",
         "-probesize", "100M",
         "-analyzeduration", "100M",
@@ -293,6 +296,7 @@ def _sw_cmd(input_path: str, output_path: str, quality: int,
     cmd = [
         "ffmpeg", "-y",
         "-stats_period", "1",
+        "-progress", "pipe:1",
         "-fflags", "+discardcorrupt",
         "-probesize", "100M",
         "-analyzeduration", "100M",
@@ -320,6 +324,12 @@ def _sw_cmd(input_path: str, output_path: str, quality: int,
 _PROGRESS_RE = re.compile(
     r"frame=\s*(?P<frame>\d+)\s+fps=\s*(?P<fps>[\d.]+).*?time=(?P<time>[\d:.]+).*?speed=\s*(?P<speed>[\d.]+)x"
 )
+
+_PROGRESS_KV_KEYS = {
+    "frame", "fps", "stream_0_0_q", "bitrate", "total_size",
+    "out_time_us", "out_time_ms", "out_time", "dup_frames",
+    "drop_frames", "speed", "progress",
+}
 
 
 def _parse_time(ts: str) -> float:
@@ -383,8 +393,27 @@ def _run_ffmpeg(
 
         def _reader() -> None:
             try:
-                for line in proc.stdout:
-                    _line_queue.put(line)
+                # ffmpeg often emits live stats with carriage returns (\r)
+                # instead of newlines. Split on both CR and LF so progress
+                # callbacks continue to update even when no '\n' is emitted.
+                if hasattr(proc.stdout, "read"):
+                    buf = ""
+                    while True:
+                        ch = proc.stdout.read(1)
+                        if ch == "":
+                            if buf:
+                                _line_queue.put(buf)
+                            break
+                        if ch in ("\r", "\n"):
+                            if buf:
+                                _line_queue.put(buf)
+                                buf = ""
+                        else:
+                            buf += ch
+                else:
+                    # Test doubles may provide only an iterable stdout.
+                    for line in proc.stdout:
+                        _line_queue.put(line)
             finally:
                 _line_queue.put(None)  # sentinel — always signals completion
 
@@ -396,6 +425,9 @@ def _run_ffmpeg(
         # as hung (e.g. QSV driver freeze at startup) and kill it.
         _HUNG_TIMEOUT_SECS = 120
         _last_output_time  = time.monotonic()
+        _kv_elapsed = 0.0
+        _kv_fps = 0.0
+        _kv_speed = 0.0
 
         while True:
             try:
@@ -437,6 +469,42 @@ def _run_ffmpeg(
                 return False
 
             if progress_cb and duration_secs > 0:
+                # Prefer ffmpeg's machine-readable progress stream when present.
+                # This path is more robust than parsing human stats lines.
+                _is_single_kv_line = bool(re.match(r"^[a-z0-9_]+=[^\n\r]*$", line_s.strip())) and (
+                    not bool(re.search(r"\s+[A-Za-z0-9_]+=", line_s))
+                )
+                if _is_single_kv_line:
+                    k, v = line_s.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if k in _PROGRESS_KV_KEYS:
+                        if k in ("out_time_ms", "out_time_us"):
+                            try:
+                                _kv_elapsed = float(v) / 1_000_000.0
+                            except Exception:
+                                pass
+                        elif k == "out_time":
+                            _kv_elapsed = _parse_time(v)
+                        elif k == "fps":
+                            try:
+                                _kv_fps = float(v)
+                            except Exception:
+                                pass
+                        elif k == "speed":
+                            try:
+                                _kv_speed = float(v.rstrip("x"))
+                            except Exception:
+                                pass
+                        elif k == "progress":
+                            pct = min(100.0, (_kv_elapsed / duration_secs) * 100.0) if duration_secs > 0 else 0.0
+                            eta_secs = max(0, int((duration_secs - _kv_elapsed) / _kv_speed)) if _kv_speed > 0 else 0
+                            try:
+                                progress_cb(pct, _kv_fps, eta_secs)
+                            except Exception:
+                                pass
+                        continue
+
                 m = _PROGRESS_RE.search(line_s)
                 if m:
                     elapsed  = _parse_time(m.group("time"))
@@ -490,6 +558,43 @@ def _run_ffmpeg(
                         .split("=")[1]
                     )
                     if dur > 0:
+                        # Require a decodable video stream with packets before
+                        # accepting a non-zero ffmpeg exit as success. This
+                        # prevents audio-only artifacts (video:0KiB) from being
+                        # treated as valid outputs.
+                        _has_video_packets = False
+                        try:
+                            vprobe = subprocess.run(
+                                [
+                                    "ffprobe", "-v", "error",
+                                    "-select_streams", "v:0",
+                                    "-count_packets",
+                                    "-show_entries", "stream=nb_read_packets",
+                                    "-of", "json",
+                                    output_path,
+                                ],
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                                timeout=30,
+                            )
+                            if vprobe.returncode == 0:
+                                vj = json.loads(vprobe.stdout or "{}")
+                                streams = vj.get("streams") or []
+                                if streams:
+                                    packets = streams[0].get("nb_read_packets")
+                                    _has_video_packets = str(packets).isdigit() and int(packets) > 0
+                        except Exception:
+                            _has_video_packets = False
+
+                        if not _has_video_packets:
+                            log(
+                                f"NOTE: ffmpeg exited {proc.returncode} but output has no readable "
+                                "video packets — treating as failure."
+                            )
+                            return False
+
                         # If we know the source duration, verify the output covers
                         # at least 95% of it.  A truncated output (e.g. from a
                         # corrupt source that caused mid-encode errors) must not be
@@ -644,6 +749,7 @@ def compress_simple(
             corrupt_cmd = [
                 "ffmpeg", "-y",
                 "-stats_period", "1",
+                "-progress", "pipe:1",
                 "-fflags", "+discardcorrupt",
                 "-err_detect", "ignore_err",
                 "-probesize", "100M",
@@ -802,8 +908,11 @@ def _ffprobe_duration(input_path: str) -> float:
 
 def estimate(input_path: str, quality: int | None = None) -> dict:
     """
-    Encode a 10-second clip from the middle of input_path with hevc_qsv and
+    Encode multiple representative clips from input_path with hevc_qsv and
     extrapolate the compression ratio to the full file.
+
+    The sample points are spread across the file and aggregated with robust
+    statistics so one unusual section is less likely to dominate the estimate.
 
     Returns:
         {
@@ -831,46 +940,91 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
         # Too short to sample reliably — skip
         return {"error": "File too short to estimate"}
 
-    seek = max(duration / 2 - 5, 0)
-    clip_secs = min(10.0, duration - seek)
+    _SAMPLE_COUNT = 5
+    _CLIP_SECS = 10.0
+
+    clip_secs = min(_CLIP_SECS, duration / 3.0)
+    if clip_secs <= 0:
+        return {"error": "Duration calculation error"}
 
     os.makedirs(config.LOCAL_TEMP_DIR, exist_ok=True)
-    tmp_path = os.path.join(
-        config.LOCAL_TEMP_DIR,
-        f"_est_{Path(input_path).stem}.mkv",
-    )
 
     v_codec, _ = _ffprobe_vcodec(input_path)
     qsv_dec = _QSV_DECODERS.get(v_codec or "")
     hw_args = ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", qsv_dec] if qsv_dec else []
 
+    sample_centers = [duration * (i + 1) / (_SAMPLE_COUNT + 1) for i in range(_SAMPLE_COUNT)]
+    sample_specs: list[tuple[int, float]] = []
+    for idx, center in enumerate(sample_centers, start=1):
+        seek = max(center - (clip_secs / 2.0), 0.0)
+        sample_specs.append((idx, seek))
+
     try:
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(seek),
-            "-t",  str(clip_secs),
-        ] + hw_args + [
-            "-i",  input_path,
-            "-c:v", "hevc_qsv",
-            "-global_quality", str(quality),
-            "-c:a", "copy",  # passthrough audio so sample size includes audio bytes
-            "-f", "matroska",
-            tmp_path,
-        ]
-        result = subprocess.run(
-            cmd, capture_output=True, timeout=120,
-        )
-        if result.returncode != 0 or not os.path.exists(tmp_path):
-            return {"error": "ffmpeg encode failed"}
-
-        enc_size = os.path.getsize(tmp_path)
-
-        # Bytes of source data that correspond to the sampled clip
+        sample_ratios: list[float] = []
         src_clip_bytes = src_size * (clip_secs / duration)
-        if src_clip_bytes == 0:
+        if src_clip_bytes <= 0:
             return {"error": "Duration calculation error"}
 
-        ratio = enc_size / src_clip_bytes
+        for idx, seek in sample_specs:
+            tmp_path = os.path.join(
+                config.LOCAL_TEMP_DIR,
+                f"_est_{Path(input_path).stem}_{idx}.mkv",
+            )
+
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(seek),
+                "-t",  str(clip_secs),
+            ] + hw_args + [
+                "-i",  input_path,
+                "-c:v", "hevc_qsv",
+                "-global_quality", str(quality),
+                "-c:a", "copy",  # passthrough audio so sample size includes audio bytes
+                "-f", "matroska",
+                tmp_path,
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, timeout=120,
+            )
+            if result.returncode != 0 or not os.path.exists(tmp_path):
+                continue
+
+            enc_size = os.path.getsize(tmp_path)
+            sample_ratios.append(enc_size / src_clip_bytes)
+
+        if not sample_ratios:
+            return {"error": "ffmpeg encode failed"}
+
+        ratio_mean = mean(sample_ratios)
+        sample_cv_pct = 0.0
+        if len(sample_ratios) > 1 and ratio_mean > 0:
+            sample_cv_pct = (pstdev(sample_ratios) / ratio_mean) * 100.0
+
+        sorted_ratios = sorted(sample_ratios)
+        if len(sorted_ratios) >= 5:
+            trim_n = max(1, int(len(sorted_ratios) * 0.2))
+            core = sorted_ratios[trim_n: len(sorted_ratios) - trim_n]
+            if core:
+                ratio = mean(core)
+                aggregation = "trimmed_mean_20"
+            else:
+                ratio = median(sorted_ratios)
+                aggregation = "median"
+        elif len(sorted_ratios) >= 3:
+            ratio = median(sorted_ratios)
+            aggregation = "median"
+        else:
+            ratio = ratio_mean
+            aggregation = "mean"
+
+        high_variance = sample_cv_pct >= 45.0
+
         estimated_output_mb = src_mb * ratio
         estimated_saving_mb = src_mb - estimated_output_mb
         if estimated_saving_mb < 0:
@@ -881,6 +1035,10 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
             "estimated_output_mb":  round(estimated_output_mb, 1),
             "estimated_saving_mb":  round(estimated_saving_mb, 1),
             "estimated_saving_pct": estimated_saving_pct,
+            "sample_count": len(sample_ratios),
+            "sample_cv_pct": round(sample_cv_pct, 1),
+            "aggregation": aggregation,
+            "high_variance": high_variance,
             "error": None,
         }
 
@@ -889,11 +1047,16 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
     except Exception as e:
         return {"error": str(e)}
     finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+        for idx in range(1, _SAMPLE_COUNT + 1):
+            tmp_path = os.path.join(
+                config.LOCAL_TEMP_DIR,
+                f"_est_{Path(input_path).stem}_{idx}.mkv",
+            )
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -2197,6 +2360,7 @@ def compress_and_remux(
     conv_logger: "_conv_log.ConversionLogger | None" = None,
     tmp_holder: list[str] | None = None,
     artifact_holder: list[str] | None = None,
+    force_sw: bool = False,
     dropped_streams: list[int] | None = None,
 ) -> tuple[bool, str]:
     """
@@ -2300,6 +2464,7 @@ def compress_and_remux(
         pid_holder=pid_holder,
         conv_logger=conv_logger,
         tmp_holder=tmp_holder,
+        force_sw=force_sw,
         dropped_streams=dropped_streams,
     )
 
@@ -2419,8 +2584,10 @@ def convert_video(
 
     if anime_mode:
         _artifact_holder: list[str] = [""]
+        _anime_force_sw = force_sw
         if is_hi10(input_path):
             log("Hi10 H.264 detected — QSV unsupported, will use libx265 software encoder.")
+            _anime_force_sw = True
         log("Anime mode: compressing then remuxing to MP4.")
         ok, encoder_used = compress_and_remux(
             input_path=input_path,
@@ -2433,6 +2600,7 @@ def convert_video(
             conv_logger=clog,
             tmp_holder=tmp_holder,
             artifact_holder=_artifact_holder,
+            force_sw=_anime_force_sw,
             dropped_streams=dropped_streams,
         )
 
@@ -2495,6 +2663,10 @@ def convert_video(
         }
 
     # Normal mode
+    if not force_sw and is_hi10(input_path):
+        log("Hi10 H.264 detected — QSV unsupported, forcing libx265 software encoder.")
+        force_sw = True
+
     ok, encoder_used = compress_simple(
         input_path  = input_path,
         output_dir  = output_dir,

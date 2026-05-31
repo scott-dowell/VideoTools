@@ -46,7 +46,27 @@ def test_compress_start():
     _fire("Anime mode: compressing then remuxing to MP4.", cnt)
     s = _get("compress")
     assert s["state"] == "running"
-    assert s["detail"] == "hevc_qsv"
+    assert s["detail"] == "auto"
+
+
+def test_compress_switches_to_software_for_hi10():
+    _reset(_BASE_H264)
+    cnt = [0]
+    _fire("Anime mode: compressing then remuxing to MP4.", cnt)
+    _fire("Hi10 H.264 detected — QSV unsupported, will use libx265 software encoder.", cnt)
+    s = _get("compress")
+    assert s["state"] == "running"
+    assert s["detail"] == "libx265 (software)"
+
+
+def test_compress_switches_to_software_on_qsv_fallback():
+    _reset(_BASE_H264)
+    cnt = [0]
+    _fire("Anime mode: compressing then remuxing to MP4.", cnt)
+    _fire("QSV failed, trying software encoder...", cnt)
+    s = _get("compress")
+    assert s["state"] == "running"
+    assert s["detail"] == "libx265 (software fallback)"
 
 
 def test_remux_after_compress():

@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -202,6 +202,30 @@ def test_convert_video_returns_false_on_stop(tmp_path):
     assert not result["ok"]
 
 
+def test_convert_video_normal_mode_hi10_forces_sw(tmp_path):
+    """Normal-mode convert_video should force software encode for Hi10 H.264."""
+    out_dir = str(tmp_path / "out")
+    stop = threading.Event()
+    captured = {}
+
+    def _fake_compress_simple(*args, **kwargs):
+        captured["force_sw"] = kwargs.get("force_sw")
+        return False, ""
+
+    with patch.object(converter, "is_hi10", return_value=True), \
+         patch.object(converter, "compress_simple", side_effect=_fake_compress_simple):
+        _ = converter.convert_video(
+            input_path=str(FIXTURES / "h264_short.mkv"),
+            output_dir=out_dir,
+            anime_mode=False,
+            quality=None,
+            progress_cb=None,
+            stop_event=stop,
+        )
+
+    assert captured.get("force_sw") is True
+
+
 # ---------------------------------------------------------------------------
 # _verify_output
 # ---------------------------------------------------------------------------
@@ -308,6 +332,52 @@ def test_estimate_returns_expected_keys(tmp_path):
     # Regardless of ffmpeg outcome, the dict must have these keys
     assert isinstance(result, dict)
     assert "error" in result
+
+
+def test_estimate_uses_trimmed_mean_and_sets_variance_metadata(tmp_path):
+    """Robust estimator should trim outliers and expose variance metadata."""
+    fake = tmp_path / "video.mkv"
+    fake.write_bytes(b"x")
+
+    src_bytes = 100 * 1024 * 1024
+    sample_bytes = {
+        1: int(4.0 * 1024 * 1024),
+        2: int(4.1 * 1024 * 1024),
+        3: int(4.2 * 1024 * 1024),
+        4: int(4.3 * 1024 * 1024),
+        5: int(12.0 * 1024 * 1024),
+    }
+
+    def _fake_run(cmd, capture_output=True, timeout=120):
+        out_path = Path(cmd[-1])
+        idx = int(out_path.stem.rsplit("_", 1)[-1])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"\x00" * sample_bytes[idx])
+        return MagicMock(returncode=0)
+
+    orig_getsize = os.path.getsize
+
+    def _fake_getsize(p):
+        p = str(p)
+        if os.path.normpath(p) == os.path.normpath(str(fake)):
+            return src_bytes
+        return orig_getsize(p)
+
+    with patch.object(converter, "_ffprobe_duration", return_value=100.0), \
+         patch.object(converter.config, "LOCAL_TEMP_DIR", str(tmp_path)), \
+         patch("subprocess.run", side_effect=_fake_run), \
+         patch("os.path.getsize", side_effect=_fake_getsize):
+        result = converter.estimate(str(fake))
+
+    assert result["error"] is None
+    assert result["aggregation"] == "trimmed_mean_20"
+    assert result["sample_count"] == 5
+    assert result["high_variance"] is True
+    assert result["sample_cv_pct"] > 45.0
+    # Ratios are [0.40, 0.41, 0.42, 0.43, 1.20], trimmed mean is 0.42.
+    assert result["estimated_output_mb"] == 42.0
+    assert result["estimated_saving_mb"] == 58.0
+    assert result["estimated_saving_pct"] == 58
 
 
 # ---------------------------------------------------------------------------

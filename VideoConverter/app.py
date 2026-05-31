@@ -8,18 +8,17 @@ import os
 import shutil
 import sqlite3
 import string
+import subprocess as _sp
 import sys
 import threading
 import time
 from datetime import datetime, timezone
-
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
 import config
 import converter
 import db
 import scanner
-
 app = Flask(__name__)
 
 BASE_DIR    = os.path.dirname(__file__)
@@ -27,7 +26,6 @@ DB_PATH     = os.path.join(BASE_DIR, "conversions.db")
 db.init_db(DB_PATH)
 
 # Disable power-throttling for ffmpeg so E-cores don't cause FP overflows
-import subprocess as _sp
 try:
     ffmpeg_exe = _sp.check_output(["where", "ffmpeg"], text=True).split()[0].strip()
     _sp.run(
@@ -147,14 +145,14 @@ def _build_steps(file_info: dict, anime_mode: bool) -> list:
         ocr_detail = "" if has_pgs else "No PGS tracks"
         steps.append({"id": "ocr",   "label": "OCR",   "state": ocr_state,  "detail": ocr_detail, "attempt": 1})
         if v_codec in ("av1", "av1_cuvid") and not bool(getattr(config, "REENCODE_AV1", True)):
-            steps.append({"id": "remux", "label": "Remux", "state": "waiting", "detail": "AV1 stream-copy \u2192 MP4", "attempt": 1})
+            steps.append({"id": "remux", "label": "Remux", "state": "waiting", "detail": "AV1 stream-copy → MP4", "attempt": 1})
         elif v_codec in ("hevc", "hevc_cuvid", "hevc_qsv"):
-            steps.append({"id": "remux", "label": "Remux", "state": "waiting", "detail": "HEVC stream-copy \u2192 MP4", "attempt": 1})
+            steps.append({"id": "remux", "label": "Remux", "state": "waiting", "detail": "HEVC stream-copy → MP4", "attempt": 1})
         else:
             steps.append({"id": "estimate", "label": "Estimate", "state": "waiting", "detail": "", "attempt": 1})
             steps.append({"id": "compress", "label": "Compress", "state": "waiting", "detail": "",           "attempt": 1})
             steps.append({"id": "audio",    "label": "Audio",    "state": "waiting", "detail": "",           "attempt": 1})
-            steps.append({"id": "remux",    "label": "Remux",    "state": "waiting", "detail": "MKV \u2192 MP4", "attempt": 1})
+            steps.append({"id": "remux",    "label": "Remux",    "state": "waiting", "detail": "MKV → MP4", "attempt": 1})
         steps.append({"id": "verify", "label": "Verify", "state": "waiting", "detail": "", "attempt": 1})
     else:
         steps.append({"id": "estimate", "label": "Estimate", "state": "waiting", "detail": "", "attempt": 1})
@@ -167,7 +165,13 @@ def _process_step_log(msg: str, attempt_counter: list) -> None:
     """Match a converter log line and advance step states accordingly."""
     m = msg.strip()
     if m == "Anime mode: compressing then remuxing to MP4.":
-        _step("compress", "running", "hevc_qsv")
+        _step("compress", "running", "auto")
+    elif m.startswith("Hi10 H.264 detected") and "libx265 software encoder" in m:
+        _step("compress", "running", "libx265 (software)")
+    elif m == "Force SW mode: skipping hevc_qsv.":
+        _step("compress", "running", "libx265 (software)")
+    elif m == "QSV failed, trying software encoder...":
+        _step("compress", "running", "libx265 (software fallback)")
     elif m.startswith("Compressing with "):
         enc = m.split("Compressing with ", 1)[1].rstrip(".")
         _step("compress", "running", enc)
@@ -181,29 +185,29 @@ def _process_step_log(msg: str, attempt_counter: list) -> None:
         _step("remux", "running", f"attempt {attempt_counter[0]}/6")
     elif m.startswith("DTS overflow detected"):
         attempt_counter[0] += 1
-        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 DTS fix")
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 · DTS fix")
     elif m.startswith("DTS fix retry"):
         attempt_counter[0] += 1
-        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 genpts fix")
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 · genpts fix")
     elif m.startswith("AAC mux failed"):
         attempt_counter[0] += 1
         _step("audio", "running", "pre-encoding individually")
-        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 audio pre-enc")
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 · audio pre-enc")
     elif m.startswith("Subtitle DTS fix"):
         attempt_counter[0] += 1
-        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 SRT pre-extract")
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 · SRT pre-extract")
     elif m.startswith("Retrying with pre-extracted SRT"):
-        _step("remux", "running", f"attempt {attempt_counter[0]}/6 \u00b7 SRT subs")
+        _step("remux", "running", f"attempt {attempt_counter[0]}/6 · SRT subs")
     elif m.startswith("Retrying without subtitle"):
         attempt_counter[0] += 1
-        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 \u00b7 no subs")
+        _step("remux", "retry", f"attempt {attempt_counter[0]}/6 · no subs")
     elif "Pre-encoding audio track" in m:
         detail = m.split("Pre-encoding audio track", 1)[1].strip().rstrip(".")
         _step("audio", "running", detail)
     elif m.startswith("AV1 source") and "stream-copying" in m:
         if not attempt_counter[0]:
             attempt_counter[0] = 1
-        _step("remux", "running", f"AV1 stream-copy \u00b7 attempt {attempt_counter[0]}/6")
+        _step("remux", "running", f"AV1 stream-copy · attempt {attempt_counter[0]}/6")
     elif m.startswith("Integrity check failed"):
         _step("verify", "failed", m.split("Integrity check failed:", 1)[-1].strip())
     elif m.startswith("Done. Saved"):
@@ -212,7 +216,7 @@ def _process_step_log(msg: str, attempt_counter: list) -> None:
         _step("verify", "running")
     elif m == "Integrity check passed.":
         _step("verify", "done")
-    elif m.startswith("Skipped \u2013 output was not smaller"):
+    elif m.startswith("Skipped – output was not smaller"):
         _step("compress", "failed", "no savings")
 
 
@@ -224,6 +228,37 @@ def _stream_preview_path(source_path: str) -> str:
     """Deterministic preview path used by stream-edit workflow."""
     root, ext = os.path.splitext(source_path)
     return f"{root}.__stream_preview__{ext}"
+
+
+def _eng_stereo_preview_path(source_path: str) -> str:
+    """Deterministic preview path used by English-stereo test workflow."""
+    root, ext = os.path.splitext(source_path)
+    return f"{root}.__eng_stereo_preview__{ext}"
+
+
+def _original_backup_path(source_path: str) -> str:
+    """Default backup path for in-place replacement workflows."""
+    root, ext = os.path.splitext(source_path)
+    return f"{root}.original-backup{ext}"
+
+
+def _first_audio_stream_index_for_language(path: str, language: str = "eng") -> int | None:
+    """Return the first ffprobe absolute stream index for the requested audio language."""
+    probe = scanner._ffprobe(path)
+    if not probe:
+        return None
+    want = (language or "").strip().lower()
+    for stream in probe.get("streams", []):
+        if (stream.get("codec_type") or "").lower() != "audio":
+            continue
+        tags = stream.get("tags") or {}
+        lang = (tags.get("language") or "und").lower()
+        if lang == want:
+            try:
+                return int(stream.get("index"))
+            except Exception:
+                continue
+    return None
 
 
 def _is_job_running() -> bool:
@@ -323,7 +358,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                 if _job["ocr_batch"]["files"]:
                     _job["ocr_batch"]["files"][0]["state"] = "running"
 
-            while _remaining and not _stop_event.is_set():
+            while _remaining:
                 _ocr_bn_map: dict[str, str] = {os.path.basename(p): p for p in _remaining}
                 _current_ocr_path = _remaining[0]
                 crashed = False
@@ -331,8 +366,6 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                 _ocr_rsp_file = None
                 try:
                     _manifest_args = ["--skip-manifest", _manifest_path] if _manifest_path else []
-                    # Build base args; use a response file if the command line would
-                    # exceed Windows' ~32 KB limit to avoid [WinError 206].
                     _base_cmd = [sys.executable, _ocr_script] + _manifest_args
                     _cmdline_len = sum(len(p) + 3 for p in _base_cmd + _remaining)
                     if _cmdline_len > 28000:
@@ -698,7 +731,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                     if _norm_bitrate < _HEVC_FASTSKIP_KBPS:
                         _step("estimate", "done", f"HEVC {_src_bitrate}\u202fkbps (norm {round(_norm_bitrate)}\u202fkbps) \u2014 fast skip")
                         _job_log(f"HEVC source at {_src_bitrate} kbps (normalised {round(_norm_bitrate)} kbps < {_HEVC_FASTSKIP_KBPS} kbps) — skipping estimate, marking low_savings.")
-                        db.save_estimate(rec_id, 0, 0.0)
+                        db.save_estimate(rec_id, 0, 0.0, est_sample_cv_pct=0.0, est_high_variance=False, est_aggregation="fast_skip")
                         db.mark_low_savings(rec_id, 0, low_savings_threshold_pct, _utcnow())
                         with _job_lock:
                             _job["files"][idx]["status"] = "low_savings"
@@ -708,7 +741,14 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                 _cached_pct = db_rec.get("est_saving_pct")
                 _cached_mb  = db_rec.get("est_saving_mb")
                 if _cached_pct is not None and _cached_mb is not None:
-                    _est = {"estimated_saving_pct": _cached_pct, "estimated_saving_mb": _cached_mb, "error": None}
+                    _est = {
+                        "estimated_saving_pct": _cached_pct,
+                        "estimated_saving_mb": _cached_mb,
+                        "sample_cv_pct": db_rec.get("est_sample_cv_pct"),
+                        "high_variance": bool(db_rec.get("est_high_variance", False)),
+                        "aggregation": db_rec.get("est_aggregation"),
+                        "error": None,
+                    }
                     _step("estimate", "running", "cached")
                 else:
                     _step("estimate", "running", "sampling 10s clip\u2026")
@@ -719,13 +759,26 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                 else:
                     _est_pct = _est["estimated_saving_pct"]
                     _est_mb  = _est["estimated_saving_mb"]
+                    _est_high_variance = bool(_est.get("high_variance", False))
+                    _est_cv = _est.get("sample_cv_pct")
+                    _est_aggregation = _est.get("aggregation")
                     # Persist result so it is reused on any future run
-                    db.save_estimate(rec_id, _est_pct, _est_mb)
+                    db.save_estimate(
+                        rec_id,
+                        _est_pct,
+                        _est_mb,
+                        est_sample_cv_pct=_est_cv,
+                        est_high_variance=_est_high_variance,
+                        est_aggregation=_est_aggregation,
+                    )
                     with _job_lock:
                         _job["files"][idx]["est_pct"] = _est_pct
                         _job["files"][idx]["est_mb"]  = _est_mb
+                        _job["files"][idx]["est_cv"] = _est_cv
+                        _job["files"][idx]["est_high_variance"] = _est_high_variance
+                        _job["files"][idx]["est_aggregation"] = _est_aggregation
                     _threshold = low_savings_threshold_pct
-                    if _est_pct < _threshold:
+                    if _est_pct < _threshold and not _est_high_variance:
                         _step("estimate", "done", f"~{_est_pct}% \u2014 below {_threshold}% threshold")
                         _job_log(f"Estimated savings {_est_pct}% < {_threshold}% threshold \u2014 skipping encode.")
                         db.mark_low_savings(rec_id, _est_pct, _threshold, _utcnow())
@@ -1485,11 +1538,30 @@ def api_update_status():
         for path in paths:
             norm = path.replace("\\", "/")
             if new_status:
-                cur.execute(
-                    "UPDATE conversions SET status=?, started_at=NULL, completed_at=NULL, error_tail=NULL "
-                    "WHERE source_path=?",
-                    (new_status, norm),
-                )
+                if new_status == "pending":
+                    cur.execute(
+                        """
+                        UPDATE conversions
+                           SET status='pending',
+                               started_at=NULL,
+                               completed_at=NULL,
+                               error_tail=NULL,
+                               output_path=NULL,
+                               output_size_mb=NULL,
+                               output_hash=NULL,
+                               output_bitrate_kbps=NULL,
+                               saved_mb=NULL,
+                               saved_pct=NULL
+                         WHERE source_path=?
+                        """,
+                        (norm,),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE conversions SET status=?, started_at=NULL, completed_at=NULL, error_tail=NULL "
+                        "WHERE source_path=?",
+                        (new_status, norm),
+                    )
                 updated += cur.rowcount
             if force_sw is not None:
                 cur.execute(
@@ -1697,6 +1769,8 @@ def api_stream_edit_commit():
         codec = (parsed.get("codec") or "").upper() if parsed else ""
         bitrate = int(((parsed.get("streams") or {}).get("video") or {}).get("bitrate", 0) / 1000) if parsed else 0
         duration = float(parsed.get("duration_secs", 0.0)) if parsed else 0.0
+        video_track_count = int(parsed.get("video_track_count", 0)) if parsed else 0
+        audio_track_count = int(parsed.get("audio_track_count", 0)) if parsed else 0
         file_hash = db.hash_file_head(path)
         status = db.sync_after_stream_edit(
             source_path=path,
@@ -1706,6 +1780,8 @@ def api_stream_edit_commit():
             source_codec=codec or None,
             source_bitrate_kbps=bitrate or None,
             source_duration_secs=duration or None,
+            source_video_track_count=video_track_count,
+            source_audio_track_count=audio_track_count,
             content_hash=file_hash,
             completed_at=_utcnow(),
         )
@@ -1732,6 +1808,191 @@ def api_stream_edit_discard():
 
     path = os.path.normpath(path)
     preview = _stream_preview_path(path)
+    if os.path.isfile(preview):
+        try:
+            os.remove(preview)
+        except Exception as exc:
+            return jsonify({"error": f"Could not remove preview: {exc}"}), 500
+
+    return jsonify({"ok": True, "path": path})
+
+
+@app.route("/api/eng_stereo_status")
+def api_eng_stereo_status():
+    """Return whether an English-stereo preview exists for the given source file."""
+    path = request.args.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    preview = _eng_stereo_preview_path(path)
+    exists = os.path.isfile(preview)
+    size_mb = round(os.path.getsize(preview) / (1024 * 1024), 2) if exists else 0.0
+    return jsonify({
+        "ok": True,
+        "path": path,
+        "preview_path": preview if exists else "",
+        "preview_exists": exists,
+        "preview_size_mb": size_mb,
+    })
+
+
+@app.route("/api/eng_stereo_preview", methods=["POST"])
+def api_eng_stereo_preview():
+    """Create/overwrite an English-only AAC stereo preview copy for test playback."""
+    if _is_job_running():
+        return jsonify({"error": "Cannot create preview while conversion is running"}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    eng_index = _first_audio_stream_index_for_language(path, "eng")
+    if eng_index is None:
+        return jsonify({"error": "No English audio track found"}), 400
+
+    preview = _eng_stereo_preview_path(path)
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-i", path,
+        "-map", "0:v",
+        "-map", f"0:{eng_index}",
+        "-map", "0:s?",
+        "-map", "0:t?",
+        "-c:v", "copy",
+        "-c:s", "copy",
+        "-c:t", "copy",
+        "-c:a", "aac",
+        "-ac", "2",
+        "-b:a", "192k",
+        "-disposition:a:0", "default",
+        "-metadata:s:a:0", "language=eng",
+        preview,
+    ]
+
+    try:
+        proc = _sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60 * 60,
+        )
+    except Exception as exc:
+        return jsonify({"error": f"ffmpeg launch failed: {exc}"}), 500
+
+    if proc.returncode != 0 or not os.path.isfile(preview):
+        err = (proc.stderr or "").strip()
+        tail = "\n".join(err.splitlines()[-25:]) if err else "english stereo build failed"
+        return jsonify({"error": tail}), 500
+
+    return jsonify({
+        "ok": True,
+        "path": path,
+        "preview_path": preview,
+        "preview_size_mb": round(os.path.getsize(preview) / (1024 * 1024), 2),
+    })
+
+
+@app.route("/api/eng_stereo_commit", methods=["POST"])
+def api_eng_stereo_commit():
+    """Replace source file with accepted English-stereo preview, preserving a backup."""
+    if _is_job_running():
+        return jsonify({"error": "Cannot replace while conversion is running"}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    preview = _eng_stereo_preview_path(path)
+    if not os.path.isfile(preview):
+        return jsonify({"error": "No English-stereo preview exists for this file"}), 404
+
+    backup = _original_backup_path(path)
+    if os.path.exists(backup):
+        root, ext = os.path.splitext(path)
+        backup = f"{root}.original-backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+
+    try:
+        shutil.copy2(path, backup)
+    except Exception as exc:
+        return jsonify({"error": f"backup failed: {exc}"}), 500
+
+    try:
+        os.replace(preview, path)
+    except Exception as exc:
+        return jsonify({"error": f"replace failed: {exc}"}), 500
+
+    try:
+        stat = os.stat(path)
+        size_mb = round(stat.st_size / (1024 * 1024), 2)
+        size_bytes = int(stat.st_size)
+        mtime = stat.st_mtime
+    except Exception:
+        size_mb = 0.0
+        size_bytes = 0
+        mtime = time.time()
+
+    status = "pending"
+    try:
+        probe = scanner._ffprobe(path)
+        parsed = scanner._parse_probe(probe) if probe else {}
+        codec = (parsed.get("codec") or "").upper() if parsed else ""
+        bitrate = int(((parsed.get("streams") or {}).get("video") or {}).get("bitrate", 0) / 1000) if parsed else 0
+        duration = float(parsed.get("duration_secs", 0.0)) if parsed else 0.0
+        video_track_count = int(parsed.get("video_track_count", 0)) if parsed else 0
+        audio_track_count = int(parsed.get("audio_track_count", 0)) if parsed else 0
+        file_hash = db.hash_file_head(path)
+        status = db.sync_after_stream_edit(
+            source_path=path,
+            source_mtime=mtime,
+            source_size_bytes=size_bytes,
+            source_size_mb=size_mb,
+            source_codec=codec or None,
+            source_bitrate_kbps=bitrate or None,
+            source_duration_secs=duration or None,
+            source_video_track_count=video_track_count,
+            source_audio_track_count=audio_track_count,
+            content_hash=file_hash,
+            completed_at=_utcnow(),
+        )
+        streams = (parsed.get("streams") or None) if parsed else None
+    except Exception:
+        streams = None
+
+    return jsonify({
+        "ok": True,
+        "path": path,
+        "backup_path": backup,
+        "new_size_mb": size_mb,
+        "status": status,
+        "streams": streams,
+    })
+
+
+@app.route("/api/eng_stereo_discard", methods=["POST"])
+def api_eng_stereo_discard():
+    """Delete a previously created English-stereo preview copy for a file."""
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    path = os.path.normpath(path)
+    preview = _eng_stereo_preview_path(path)
     if os.path.isfile(preview):
         try:
             os.remove(preview)
@@ -2090,6 +2351,11 @@ def _prep_file_dict(row, root_fwd: str = "") -> dict:
         "is_hi10":      False,
         "streams":      None,
         "status":       "pending",
+        "est_pct":      row["est_saving_pct"] if "est_saving_pct" in row.keys() else None,
+        "est_mb":       row["est_saving_mb"] if "est_saving_mb" in row.keys() else None,
+        "est_cv":       row["est_sample_cv_pct"] if "est_sample_cv_pct" in row.keys() else None,
+        "est_high_variance": bool(row["est_high_variance"]) if "est_high_variance" in row.keys() and row["est_high_variance"] is not None else False,
+        "est_aggregation": row["est_aggregation"] if "est_aggregation" in row.keys() else None,
     }
 
 
@@ -2124,6 +2390,9 @@ def _load_db_file_dict(row, root_fwd: str = "") -> dict:
         "dropped_streams": dropped,
         "est_pct":         row["est_saving_pct"],
         "est_mb":          row["est_saving_mb"],
+        "est_cv":          row["est_sample_cv_pct"],
+        "est_high_variance": bool(row["est_high_variance"]),
+        "est_aggregation": row["est_aggregation"],
     }
     if status == "done":
         d["output"] = str(round(out_mb, 1))       if out_mb       is not None else None
@@ -2151,7 +2420,8 @@ def api_load_from_db():
         SELECT c.source_path, c.status, c.source_size_mb, c.source_bitrate_kbps,
                c.source_codec, c.source_duration_secs,
                c.output_size_mb, c.saved_mb, c.saved_pct,
-               c.est_saving_pct, c.est_saving_mb,
+             c.est_saving_pct, c.est_saving_mb,
+             c.est_sample_cv_pct, c.est_high_variance, c.est_aggregation,
                c.force_sw, c.dropped_streams
         FROM conversions c
         INNER JOIN (
@@ -2187,7 +2457,9 @@ def api_prep_scan():
     rows = con.execute(
         """
         SELECT c.source_path, c.source_size_mb, c.source_bitrate_kbps,
-               c.source_codec, c.source_duration_secs
+             c.source_codec, c.source_duration_secs,
+             c.est_saving_pct, c.est_saving_mb,
+             c.est_sample_cv_pct, c.est_high_variance, c.est_aggregation
         FROM conversions c
         INNER JOIN (
             SELECT source_path, MAX(id) AS max_id
@@ -2226,7 +2498,8 @@ def api_build_prep_queue():
         """
         SELECT c.source_path, c.source_size_mb, c.source_bitrate_kbps,
                c.source_codec, c.source_duration_secs,
-               c.est_saving_pct, c.est_saving_mb
+             c.est_saving_pct, c.est_saving_mb,
+             c.est_sample_cv_pct, c.est_high_variance, c.est_aggregation
         FROM conversions c
         INNER JOIN (
             SELECT source_path, MAX(id) AS max_id
@@ -2285,6 +2558,9 @@ def api_build_prep_queue():
         d = _prep_file_dict(chosen, root_fwd)
         d["est_pct"] = chosen["est_saving_pct"]
         d["est_mb"]  = chosen["est_saving_mb"]
+        d["est_cv"]  = chosen["est_sample_cv_pct"]
+        d["est_high_variance"] = bool(chosen["est_high_variance"])
+        d["est_aggregation"] = chosen["est_aggregation"]
         files.append(d)
         folders_seeded += 1
 

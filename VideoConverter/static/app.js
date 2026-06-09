@@ -25,15 +25,21 @@ let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'duration' | 'es
 let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
 let _lastAutoScrollPath = null; // path of row last auto-scrolled to; prevents re-scroll on every poll
-let _sessionSavedMB = null;   // null = no run this session, number = MB saved this run
+let _sessionSavedMB = null;   // null = no run this session, number = realized MB saved this run
+let _sessionEstimatedMB = 0;  // projected extra MB from currently executing file
 let _sessionProcessed = 0;    // files completed (done/failed/no_saving) this run
 let _sessionStartedAt = 0;        // unix epoch (s) when current session started; 0 = not started
 let _sessionElapsedTimer = null;  // setInterval ID for the live session elapsed clock
 let _fileElapsedTimer    = null;  // setInterval ID for the live per-file elapsed clock
 let _detailsFileIndex = null;     // index currently shown in Video Details modal
 let _detailsPreviewPath = '';      // preview copy path for details modal file
+let _detailsEngStereoPreviewPath = ''; // english-stereo preview path for details modal file
 let _detailsBusy = false;          // prevent duplicate stream-edit actions
 let _streamReplaceConfirmModal = null;
+let _engStereoReplaceConfirmModal = null;
+let _subtitleLikelyCache = {};     // key: "<full_path>|<stream_index>" -> detection payload
+let _subtitleLikelyPending = new Set();
+const _QUEUE_COL_COUNT = 17;
 
 // Estimation background task state
 let _estUserPaused  = false;  // user clicked the strip
@@ -44,8 +50,8 @@ let _estDone        = 0;
 let _estTotal       = 0;
 let _estLastFolder  = null;
 
-// Build status badge HTML (includes SW indicator when force_sw is true)
-function _badgeHtml(status, force_sw) {
+// Build status badge HTML (includes SW/FC indicators when enabled)
+function _badgeHtml(status, force_sw, force_convert) {
   const cls = status === 'done'         ? 'badge-done'
             : status === 'failed'       ? 'badge-failed'
             : status === 'no_saving'    ? 'badge-no-saving'
@@ -60,7 +66,8 @@ function _badgeHtml(status, force_sw) {
             : status === 'ocr'         ? 'OCR'
             : (status || 'pending');
   const sw  = force_sw ? ' <small style="font-size:.7em;opacity:.85" class="text-warning">SW</small>' : '';
-  return '<span class="badge ' + cls + '">' + lbl + sw + '</span>';
+  const fc  = force_convert ? ' <small style="font-size:.7em;opacity:.85" class="text-info">FC</small>' : '';
+  return '<span class="badge ' + cls + '">' + lbl + sw + fc + '</span>';
 }
 
 // Returns a small secondary badge showing OCR outcome, or '' if not yet known
@@ -79,6 +86,19 @@ function _droppedBadgeHtml(f) {
   return ' <span class="badge bg-warning text-dark ms-1" style="font-size:.65rem" title="' + n + ' stream(s) excluded from conversion"><i class="bi bi-slash-circle"></i>\u202f' + n + '</span>';
 }
 
+function _estimateHtml(f) {
+  if (f.est_pct == null) return '';
+  let html =
+    '<span class="text-success fw-semibold">' + f.est_pct + '%</span>' +
+    '<br><small class="text-secondary">' + (f.est_mb || 0) + '\u202fMB</small>';
+  if (f.est_high_variance) {
+    const cvText = f.est_cv != null ? ('cv ' + Number(f.est_cv).toFixed(1) + '%') : 'high variance';
+    const aggText = f.est_aggregation ? (' · ' + String(f.est_aggregation).replaceAll('_', ' ')) : '';
+    html += '<br><small class="text-warning" title="Estimate samples varied sharply across the file; low-savings auto-skip is bypassed for this estimate."><i class="bi bi-exclamation-triangle me-1"></i>' + cvText + aggText + '</small>';
+  }
+  return html;
+}
+
 // Parse "H:MM:SS" or "MM:SS" → seconds
 function _parseDuration(d) {
   if (!d) return 0;
@@ -86,6 +106,32 @@ function _parseDuration(d) {
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   return 0;
+}
+
+function _parseFpsVal(v) {
+  if (v == null) return 0;
+  if (typeof v === 'number') return v > 0 ? v : 0;
+  const s = String(v).trim();
+  if (!s) return 0;
+  if (s.includes('/')) {
+    const [n, d] = s.split('/').map(Number);
+    if (d && Number.isFinite(n) && Number.isFinite(d)) {
+      const r = n / d;
+      return r > 0 ? r : 0;
+    }
+  }
+  const f = Number(s);
+  return Number.isFinite(f) && f > 0 ? f : 0;
+}
+
+function _extractFrameFromStatus(statusText) {
+  if (!statusText) return 0;
+  const m = String(statusText).match(/frame=\s*(\d+)/i);
+  return m ? (parseInt(m[1], 10) || 0) : 0;
+}
+
+function _fmtInt(n) {
+  return Math.max(0, Math.floor(Number(n) || 0)).toLocaleString();
 }
 
 // Format elapsed seconds as "Xm Ys" or "Xh MMm SSs"
@@ -104,11 +150,45 @@ function _fmtMbVal(mb) {
   return n.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
+function _fmtSavedShort(mb) {
+  const n = Number(mb || 0);
+  return n / 1024 > 1 ? (n / 1024).toFixed(1) + ' GB' : n.toFixed(0) + ' MB';
+}
+
+function _savedMbFromFile(f) {
+  if (!f || !f.saved) return 0;
+  return parseFloat(String(f.saved).replace(/,/g, '')) || 0;
+}
+
+function _conversionSpeedX(durationSecs, convSecs) {
+  const d = Number(durationSecs || 0);
+  const c = Number(convSecs || 0);
+  if (d <= 0 || c <= 0) return 0;
+  return d / c;
+}
+
+function _formatSpeedX(x) {
+  const n = Number(x || 0);
+  if (n <= 0) return '—';
+  if (n >= 10) return n.toFixed(0) + 'x';
+  return n.toFixed(1) + 'x';
+}
+
 // Compute bitrate in kbps from file object
 function _fileBitrate(f) {
   const mb   = parseFloat((f.size || '0').replace(/,/g, '')) || 0;
   const secs = _parseDuration(f.duration);
   return secs > 0 ? Math.round(mb * 8192 / secs) : 0;
+}
+
+function _trackCountText(n) {
+  return (n === 0 || n) ? String(n) : '—';
+}
+
+function _syncTrackCountsFromStreams(f) {
+  if (!f || !f.streams) return;
+  f.video_track_count = f.streams.video ? 1 : 0;
+  f.audio_track_count = Array.isArray(f.streams.audio) ? f.streams.audio.length : 0;
 }
 
 function _sortFiles(files) {
@@ -206,10 +286,18 @@ function setButtonStates(state) {
   const detailsPlayBtn = document.getElementById('detailsPreviewPlayBtn');
   const detailsDiscardBtn = document.getElementById('detailsPreviewDiscardBtn');
   const detailsCommitBtn = document.getElementById('detailsPreviewCommitBtn');
+  const detailsEngCreateBtn = document.getElementById('detailsEngStereoCreateBtn');
+  const detailsEngPlayBtn = document.getElementById('detailsEngStereoPlayBtn');
+  const detailsEngDiscardBtn = document.getElementById('detailsEngStereoDiscardBtn');
+  const detailsEngCommitBtn = document.getElementById('detailsEngStereoCommitBtn');
   if (detailsCreateBtn) detailsCreateBtn.disabled = state === 'running' || _detailsBusy;
   if (detailsPlayBtn) detailsPlayBtn.disabled = state === 'running' || _detailsBusy || !_detailsPreviewPath;
   if (detailsDiscardBtn) detailsDiscardBtn.disabled = state === 'running' || _detailsBusy || !_detailsPreviewPath;
   if (detailsCommitBtn) detailsCommitBtn.disabled = state === 'running' || _detailsBusy || !_detailsPreviewPath;
+  if (detailsEngCreateBtn) detailsEngCreateBtn.disabled = state === 'running' || _detailsBusy;
+  if (detailsEngPlayBtn) detailsEngPlayBtn.disabled = state === 'running' || _detailsBusy || !_detailsEngStereoPreviewPath;
+  if (detailsEngDiscardBtn) detailsEngDiscardBtn.disabled = state === 'running' || _detailsBusy || !_detailsEngStereoPreviewPath;
+  if (detailsEngCommitBtn) detailsEngCommitBtn.disabled = state === 'running' || _detailsBusy || !_detailsEngStereoPreviewPath;
   // Enable drag handles only when queue is ready and not running
   const canDrag = (state === 'ready');
   document.querySelectorAll('#queueBody tr[id^="row-"]').forEach(tr => {
@@ -319,7 +407,7 @@ function buildRow(f, index) {
   tdCodec.appendChild(span);
   tr.appendChild(tdCodec);
 
-  // col 4 — Duration
+  // col 5 — Duration
   const tdDur = document.createElement('td');
   tdDur.className = 'text-secondary';
   tdDur.textContent = f.duration || '\u2014';
@@ -329,17 +417,28 @@ function buildRow(f, index) {
   const tdStatus = document.createElement('td');
   // Suppress the primary "OCR" badge once an OCR outcome badge is available
   const _ocrDone = f.status === 'ocr' && (f.ocr_status === 'done' || f.ocr_status === 'skipped');
-  tdStatus.innerHTML = (_ocrDone ? '' : _badgeHtml(f.status, f.force_sw)) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
+  tdStatus.innerHTML = (_ocrDone ? '' : _badgeHtml(f.status, f.force_sw, f.force_convert)) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
   tr.appendChild(tdStatus);
+
+  // col 6 — Video tracks
+  const tdVTracks = document.createElement('td');
+  tdVTracks.className = 'text-end text-secondary';
+  tdVTracks.textContent = _trackCountText(f.video_track_count);
+  tr.appendChild(tdVTracks);
+
+  // col 7 — Audio tracks
+  const tdATracks = document.createElement('td');
+  tdATracks.className = 'text-end text-secondary';
+  tdATracks.textContent = _trackCountText(f.audio_track_count);
+  tr.appendChild(tdATracks);
 
   // col 5b — Est. saving
   const tdEst = document.createElement('td');
   tdEst.className = 'text-end';
   tdEst.id = 'est-' + index;
-  if (f.est_pct != null) {
-    tdEst.innerHTML =
-      '<span class="text-success fw-semibold">' + f.est_pct + '%</span>' +
-      '<br><small class="text-secondary">' + (f.est_mb || 0) + '\u202fMB</small>';
+  const estHtml = _estimateHtml(f);
+  if (estHtml) {
+    tdEst.innerHTML = estHtml;
   } else if (f.status === 'done' || f.status === 'failed' || f.status === 'no_saving' || f.status === 'low_savings' || f.status === 'skipped') {
     tdEst.textContent = '\u2014';
   } else {
@@ -365,14 +464,21 @@ function buildRow(f, index) {
   if (f.pct) tdPct.innerHTML = '<strong>' + f.pct + '%</strong>';
   tr.appendChild(tdPct);
 
-  // col 12 — Conversion time
+  // col 12 — Conversion speed
+  const tdSpeed = document.createElement('td');
+  tdSpeed.className = 'text-end text-secondary';
+  const speedX = _conversionSpeedX(_parseDuration(f.duration), f.conv_secs || 0);
+  tdSpeed.textContent = speedX > 0 ? _formatSpeedX(speedX) : '';
+  tr.appendChild(tdSpeed);
+
+  // col 13 — Conversion time
   const tdTime = document.createElement('td');
   tdTime.className = 'text-end text-secondary';
   tdTime.style.whiteSpace = 'nowrap';
   tdTime.textContent = f.conv_secs ? _fmtDuration(f.conv_secs) : '';
   tr.appendChild(tdTime);
 
-  // col 13 — Actions
+  // col 14 — Actions
   const tdAct = document.createElement('td');
   tdAct.style.width = '32px';
   const btn = document.createElement('button');
@@ -403,16 +509,18 @@ function _appendRows(newFiles, startIndex) {
   applyFilter();
 }
 
-// Fill in codec / bitrate / duration cells once a probe result arrives.
+// Fill in codec / bitrate / duration / track-count cells once a probe result arrives.
 function _updateRowProbe(idx, f) {
   const tr = document.getElementById('row-' + idx);
   if (!tr) return;
   const cells = tr.querySelectorAll('td');
   // Column order matches buildRow:
-  // 0=handle 1=folder 2=name 3=size 4=bitrate 5=codec 6=duration 7=status 8=est …
+  // 0=handle 1=folder 2=name 3=size 4=bitrate 5=codec 6=duration 7=status 8=vtracks 9=atracks 10=est …
   const tdBr    = cells[4];
   const tdCodec = cells[5];
   const tdDur   = cells[6];
+  const tdVTracks = cells[8];
+  const tdATracks = cells[9];
   if (tdBr) {
     const br = f.bitrate_kbps || 0;
     tdBr.textContent = br > 0 ? (br >= 1000 ? (br/1000).toFixed(1)+' Mbps' : br+' kbps') : '—';
@@ -427,6 +535,12 @@ function _updateRowProbe(idx, f) {
   if (tdDur) {
     tdDur.textContent = f.duration || '—';
   }
+  if (tdVTracks) {
+    tdVTracks.textContent = _trackCountText(f.video_track_count);
+  }
+  if (tdATracks) {
+    tdATracks.textContent = _trackCountText(f.audio_track_count);
+  }
   // Scroll to keep the probed row visible (instant — no smooth-scroll jitter)
   if (_probeDone < _probeTotal) {
     tr.scrollIntoView({ block: 'nearest', behavior: 'instant' });
@@ -437,7 +551,7 @@ function populateTable(files) {
   const tbody = document.getElementById('queueBody');
   tbody.innerHTML = '';
   if (files.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="14" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="' + _QUEUE_COL_COUNT + '" class="text-center text-secondary py-4">No video files found in the selected folder.</td></tr>';
     return;
   }
   // Attach computed bitrate
@@ -482,10 +596,11 @@ function updateStats(files) {
   document.getElementById('statFailedBar').style.width = failPct  + '%';
 
   // Right panel
-  document.getElementById('savedVal').textContent   = savedMB > 0 ? (savedMB / 1024).toFixed(1) + ' GB' : '—';
   const overallPct = files.length ? Math.round((doneAll + failed) / files.length * 100) : 0;
-  document.getElementById('overallPct').textContent = overallPct + '%';
-  document.getElementById('overallBar').style.width = overallPct + '%';
+  const overallPctEl = document.getElementById('overallPct');
+  const overallBarEl = document.getElementById('overallBar');
+  if (overallPctEl) overallPctEl.textContent = overallPct + '%';
+  if (overallBarEl) overallBarEl.style.width = overallPct + '%';
   document.getElementById('totalSizeLabel').textContent = (totalMB / 1024).toFixed(1) + ' GB total';
   const lowSavings = files.filter(f => f.status === 'low_savings').length;
   // Filter chip counts
@@ -500,6 +615,17 @@ function updateStats(files) {
   if (skEl) skEl.textContent = skipped;
   const lsEl = document.getElementById('chipCount-low_savings');
   if (lsEl) lsEl.textContent = lowSavings;
+}
+
+function _refreshQueueStateFromFiles() {
+  const hasRunnable = _files.some(f => f.status === 'pending' || f.status === 'failed');
+  if (_files.length === 0) {
+    setButtonStates('idle');
+  } else if (hasRunnable) {
+    setButtonStates('ready');
+  } else {
+    setButtonStates('done');
+  }
 }
 
 // ============================================================
@@ -556,18 +682,30 @@ function _fileMatchesFilter(f) {
 function _updateSessionCard() {
   const el = document.getElementById('statSession');
   const sub = document.getElementById('statSessionSub');
+  const est = document.getElementById('statSessionEst');
   const bar = document.getElementById('statSessionBar');
   if (!el) return;
   if (_sessionSavedMB === null) {
     el.textContent  = '—';
     if (sub) sub.textContent = 'No conversions yet';
+    if (est) est.textContent = '';
     if (bar) bar.style.width = '0%';
   } else {
-    const gb = _sessionSavedMB / 1024;
-    el.textContent = gb >= 1 ? gb.toFixed(1) + ' GB' : _sessionSavedMB.toFixed(0) + ' MB';
+    el.textContent = _fmtSavedShort(_sessionSavedMB);
     if (sub) {
       const fileLabel = _sessionProcessed === 1 ? '1 file' : _sessionProcessed + ' files';
-      sub.textContent = _sessionProcessed > 0 ? fileLabel + ' processed this run' : 'this run';
+      let _avgSpeed = '';
+      const sessionDone = _files.filter(f => !!f.session_done);
+      const totalDur = sessionDone.reduce((sum, f) => sum + _parseDuration(f.duration), 0);
+      const totalConv = sessionDone.reduce((sum, f) => sum + (Number(f.conv_secs || 0)), 0);
+      const avgX = _conversionSpeedX(totalDur, totalConv);
+      if (avgX > 0) _avgSpeed = ' · avg ' + _formatSpeedX(avgX);
+      sub.textContent = (_sessionProcessed > 0 ? fileLabel + ' processed · realized' : 'this run · realized') + _avgSpeed;
+    }
+    if (est) {
+      est.textContent = _sessionEstimatedMB > 0
+        ? ('In-progress est: +' + _fmtSavedShort(_sessionEstimatedMB))
+        : 'In-progress est: —';
     }
     // Bar: proportional to total saved card's bar (cap at 100%)
     // Use ratio vs total saved for relative sense, or just show fill capped at bar width
@@ -599,6 +737,8 @@ function _startElapsedTimer(startTs) {
 
 function _stopElapsedTimer() {
   if (_sessionElapsedTimer) { clearInterval(_sessionElapsedTimer); _sessionElapsedTimer = null; }
+  const jel = document.getElementById('jobElapsedVal');
+  if (jel) jel.textContent = '—';
 }
 
 function _startFileElapsedTimer(fileStartTs) {
@@ -615,6 +755,8 @@ function _stopFileElapsedTimer() {
   if (_fileElapsedTimer) { clearInterval(_fileElapsedTimer); _fileElapsedTimer = null; }
   const el = document.getElementById('elapsedVal');
   if (el) el.textContent = '—';
+  const sp = document.getElementById('speedVal');
+  if (sp) sp.textContent = '—';
 }
 
 function applyFilter() {
@@ -740,6 +882,7 @@ function scanFolder(path) {
   _probePhaseTotal = 0;
   _probePhaseDone  = 0;
   _sessionSavedMB = null;
+  _sessionEstimatedMB = 0;
   _sessionProcessed = 0;
   _updateSessionCard();
   _scanStripPhase1();
@@ -761,7 +904,7 @@ function scanFolder(path) {
   resetStatusFilter();
   setButtonStates('scanning');
   document.getElementById('queueBody').innerHTML =
-    '<tr><td colspan="13" class="text-center text-secondary py-4">' +
+    '<tr><td colspan="' + _QUEUE_COL_COUNT + '" class="text-center text-secondary py-4">' +
     '<div class="spinner-border spinner-border-sm me-2"></div>Scanning for video files\u2026</td></tr>';
   document.getElementById('totalSizeLabel').textContent = 'Scanning\u2026';
   addLog('Scanning: ' + path, 'info');
@@ -798,6 +941,8 @@ function scanFolder(path) {
       f.duration     = msg.duration;
       f.is_hi10      = msg.is_hi10;
       f.streams      = msg.streams;
+      f.video_track_count = msg.video_track_count;
+      f.audio_track_count = msg.audio_track_count;
       f.bitrate_kbps = msg.bitrate_kbps || (msg.streams && msg.streams.video
         ? Math.round((msg.streams.video.bitrate || 0) / 1000) : 0);
       _updateRowProbe(idx, f);
@@ -844,7 +989,7 @@ function scanFolder(path) {
       const pendingCount = _files.filter(f => f.status === 'pending' || f.status === 'failed' || !f.status).length;
       if (_files.length === 0) {
         document.getElementById('queueBody').innerHTML =
-          '<tr><td colspan="13" class="text-center text-secondary py-4">' +
+          '<tr><td colspan="' + _QUEUE_COL_COUNT + '" class="text-center text-secondary py-4">' +
           'No video files found.</td></tr>';
         addLog('Scan complete \u2014 no video files found.', 'ok');
         setButtonStates('idle');
@@ -1033,19 +1178,20 @@ function _estTick(pending, i) {
   fetch('/api/estimate?path=' + encodeURIComponent(f.full_path))
     .then(r => r.json())
     .then(data => {
-      if (cell) {
-        if (data.error) {
-          cell.innerHTML = '<span class="text-secondary">\u2014</span>';
-        } else {
-          cell.innerHTML =
-            '<span class="text-success fw-semibold">' + data.estimated_saving_pct + '%</span>' +
-            '<br><small class="text-secondary">' + data.estimated_saving_mb + '\u202fMB</small>';
-        }
-      }
       // Store back into _files so sort-by-estimated-savings can use it
       if (idx !== undefined && _files[idx]) {
         _files[idx].est_pct = data.error ? 0 : (data.estimated_saving_pct || 0);
         _files[idx].est_mb  = data.error ? 0 : (data.estimated_saving_mb  || 0);
+        _files[idx].est_cv  = data.error ? null : (data.sample_cv_pct ?? null);
+        _files[idx].est_high_variance = data.error ? false : !!data.high_variance;
+        _files[idx].est_aggregation = data.error ? null : (data.aggregation || null);
+      }
+      if (cell) {
+        if (data.error) {
+          cell.innerHTML = '<span class="text-secondary">—</span>';
+        } else if (idx !== undefined && _files[idx]) {
+          cell.innerHTML = _estimateHtml(_files[idx]);
+        }
       }
       // If currently sorted by est_saving, re-apply the sort live so the table
       // reorders itself as each result arrives.
@@ -1106,8 +1252,10 @@ function _renderCurrentJob(s) {
   const idle       = document.getElementById('jobIdle');
   const ocrDiv     = document.getElementById('jobOcrBatch');
   const convDiv    = document.getElementById('jobConverting');
-  const overallDiv = document.getElementById('jobOverall');
   const counter    = document.getElementById('jobFileCounter');
+  const phasePill  = document.getElementById('jobPhasePill');
+  const pausedPill = document.getElementById('jobPausedPill');
+  const modeChip   = document.getElementById('jobModeChip');
   if (!idle) return; // card not in DOM yet
 
   const phase     = s.phase || '';
@@ -1119,10 +1267,72 @@ function _renderCurrentJob(s) {
       : '';
   }
 
+  const curFile = s.current_file ? (_files.find(f => f.full_path === s.current_file) || null) : null;
+
+  if (phasePill) {
+    let phaseText = '';
+    let phaseClass = 'badge-pending';
+    if (isRunning) {
+      if (phase === 'ocr_batch') {
+        phaseText = 'OCR pre-pass';
+        phaseClass = 'badge-ocr';
+      } else if (phase === 'converting') {
+        const _steps = Array.isArray(s.steps) ? s.steps : [];
+        const _active = _steps.find(st => st && (st.state === 'running' || st.state === 'retry'));
+        const _postIds = new Set(['audio', 'remux', 'verify']);
+        const _isPostStep = !!(_active && _postIds.has(String(_active.id || '')));
+        const _frameVisible = /frame=\s*\d+/i.test(String(s.ffmpeg_status || ''));
+        const _nearEnd = (Number(s.progress_pct) || 0) >= 99;
+        if (_isPostStep || (_nearEnd && !_frameVisible)) {
+          phaseText = 'Finalizing';
+          phaseClass = 'badge-pending';
+        } else {
+          phaseText = 'Converting';
+          phaseClass = 'badge-converting';
+        }
+      } else {
+        phaseText = 'Starting';
+        phaseClass = 'badge-pending';
+      }
+    }
+    if (phaseText) {
+      phasePill.textContent = phaseText;
+      phasePill.classList.remove('d-none', 'badge-pending', 'badge-converting', 'badge-ocr');
+      phasePill.classList.add(phaseClass);
+    } else {
+      phasePill.classList.add('d-none');
+    }
+  }
+
+  if (pausedPill) {
+    pausedPill.classList.toggle('d-none', !(isRunning && !!s.paused));
+  }
+
+  if (modeChip) {
+    let modeText = '';
+    let modeClass = 'badge-pending';
+    if (s.encoder) {
+      modeText = String(s.encoder).toUpperCase();
+      modeClass = 'badge-converting';
+    } else if (curFile) {
+      const sw = !!curFile.force_sw;
+      const fc = !!curFile.force_convert;
+      modeText = sw ? 'SW path' : 'QSV path';
+      if (fc) modeText += ' · FC';
+      modeClass = sw ? 'badge-pending' : 'badge-converting';
+    }
+    if (modeText && isRunning) {
+      modeChip.textContent = modeText;
+      modeChip.classList.remove('d-none', 'badge-pending', 'badge-converting', 'badge-ocr');
+      modeChip.classList.add(modeClass);
+    } else {
+      modeChip.classList.add('d-none');
+    }
+  }
+
   idle.classList.toggle('d-none',       phase !== '');
   ocrDiv.classList.toggle('d-none',     phase !== 'ocr_batch');
   convDiv.classList.toggle('d-none',    phase !== 'converting');
-  if (overallDiv) overallDiv.classList.toggle('d-none', !isRunning);
 
   if (phase === 'ocr_batch' && s.ocr_batch) {
     const b   = s.ocr_batch;
@@ -1169,36 +1379,84 @@ function _pollStatus() {
     .then(r => r.json())
     .then(s => {
       _renderCurrentJob(s);
+      const statusEl = document.getElementById('ffmpegStatus');
+      const statusInlineEl = document.getElementById('ffmpegStatusInline');
+      const statusText = s.ffmpeg_status || (s.state === 'running' ? 'waiting for ffmpeg telemetry...' : '');
+      if (statusEl) {
+        if (statusText) {
+          statusEl.textContent = statusText;
+          statusEl.classList.remove('d-none');
+        } else {
+          statusEl.textContent = '';
+          statusEl.classList.add('d-none');
+        }
+      }
+      if (statusInlineEl) statusInlineEl.textContent = statusText || '\u2014';
       // Update progress widgets
       const pct = s.progress_pct || 0;
       document.getElementById('fileBar').style.width = pct + '%';
       document.getElementById('filePct').textContent  = Math.round(pct) + '%';
       document.getElementById('fpsVal').textContent   = s.fps ? s.fps.toFixed(0) : '\u2014';
+      const framesEl = document.getElementById('framesVal');
+      const framesRemainingEl = document.getElementById('framesRemainingVal');
+      if (framesEl) {
+        if (s.state === 'running' && s.current_file) {
+          const curFile = _files.find(f => f.full_path === s.current_file);
+          const x = _extractFrameFromStatus(s.ffmpeg_status || '');
+          const durSecs = curFile ? _parseDuration(curFile.duration) : 0;
+          const srcFps = curFile && curFile.streams && curFile.streams.video
+            ? _parseFpsVal(curFile.streams.video.fps)
+            : 0;
+          const yFromMeta = (durSecs > 0 && srcFps > 0) ? Math.round(durSecs * srcFps) : 0;
+          const pctNum = Number(s.progress_pct) || 0;
+          // Fallback total-frame estimate from live frame + progress when source FPS is unavailable.
+          const yFromPct = (x > 0 && pctNum > 0.5) ? Math.round(x / (pctNum / 100)) : 0;
+          const y = yFromMeta > 0 ? yFromMeta : yFromPct;
+          if (x > 0 && y > 0) {
+            framesEl.textContent = _fmtInt(x) + ' / ~' + _fmtInt(y);
+            if (framesRemainingEl) framesRemainingEl.textContent = '~' + _fmtInt(Math.max(0, y - x));
+          } else if (x > 0) {
+            framesEl.textContent = _fmtInt(x);
+            if (framesRemainingEl) framesRemainingEl.textContent = '\u2014';
+          } else {
+            framesEl.textContent = '\u2014';
+            if (framesRemainingEl) framesRemainingEl.textContent = '\u2014';
+          }
+        } else {
+          framesEl.textContent = '\u2014';
+          if (framesRemainingEl) framesRemainingEl.textContent = '\u2014';
+        }
+      }
+      let liveSpeedX = 0;
+      if (s.file_started_at && s.current_file && pct > 0) {
+        const curFile = _files.find(f => f.full_path === s.current_file);
+        const durSecs = curFile ? _parseDuration(curFile.duration) : 0;
+        const elapsedSecs = Math.max(0, (Date.now() / 1000) - s.file_started_at);
+        if (durSecs > 0 && elapsedSecs > 1) {
+          liveSpeedX = _conversionSpeedX(durSecs * (pct / 100), elapsedSecs);
+        }
+      }
+      const speedEl = document.getElementById('speedVal');
+      if (speedEl) speedEl.textContent = _formatSpeedX(liveSpeedX);
       document.getElementById('etaVal').textContent   = s.eta_secs > 0
         ? Math.floor(s.eta_secs / 60) + 'm ' + (s.eta_secs % 60) + 's'
         : '\u2014';
-      document.getElementById('savedVal').textContent = s.saved_mb
-        ? (s.saved_mb / 1024 > 1
-            ? (s.saved_mb / 1024).toFixed(1) + ' GB'
-            : s.saved_mb.toFixed(0) + ' MB')
-        : '\u2014';
-      if (s.saved_mb !== undefined) {
-        _sessionSavedMB = s.saved_mb || 0;
-        if (s.files) {
-          _sessionProcessed = s.files.filter(f =>
-            f.status === 'done' || f.status === 'failed' || f.status === 'no_saving' || f.status === 'low_savings'
-          ).length;
+      const jobElapsedEl = document.getElementById('jobElapsedVal');
+      if (jobElapsedEl) {
+        const _jobStart = s.session_started_at || _sessionStartedAt;
+        if (s.state === 'running' && _jobStart) {
+          jobElapsedEl.textContent = _fmtDuration(Math.max(0, Date.now() / 1000 - _jobStart));
+        } else {
+          jobElapsedEl.textContent = '—';
         }
-        _updateSessionCard();
+      }
+      if (s.files) {
+        _sessionProcessed = s.files.filter(f =>
+          f.status === 'done' || f.status === 'failed' || f.status === 'no_saving' || f.status === 'low_savings'
+        ).length;
       }
       if (s.session_started_at && _sessionStartedAt !== s.session_started_at) _startElapsedTimer(s.session_started_at);
       if (s.file_started_at && s.state === 'running') _startFileElapsedTimer(s.file_started_at);
-      const overallDone  = s.files ? s.files.filter(f => f.status === 'done' || f.status === 'failed' || f.status === 'no_saving' || f.status === 'low_savings').length : 0;
-      const overallTotal = s.total || 0;
-      const overallPct   = overallTotal > 0 ? Math.round(overallDone / overallTotal * 100) : 0;
-      document.getElementById('overallPct').textContent  = overallPct + '%';
-      document.getElementById('overallBar').style.width  = overallPct + '%';
-
       // Update pause button label
       const pauseBtn = document.getElementById('pauseBtn');
       if (pauseBtn) {
@@ -1224,6 +1482,7 @@ function _pollStatus() {
           f.status = sf.status;
           if (_prevStatus !== 'done' && sf.status === 'done') f.session_done = true;
           if (sf.force_sw !== undefined) f.force_sw = sf.force_sw;
+          if (sf.force_convert !== undefined) f.force_convert = sf.force_convert;
           if (sf.output)      f.output      = sf.output;
           if (sf.saved)       f.saved       = sf.saved;
           if (sf.pct)         f.pct         = sf.pct;
@@ -1235,13 +1494,16 @@ function _pollStatus() {
           if (sf.ocr_status !== undefined) f.ocr_status = sf.ocr_status;
           if (sf.est_pct    != null) f.est_pct    = sf.est_pct;
           if (sf.est_mb     != null) f.est_mb     = sf.est_mb;
+          if (sf.est_cv     !== undefined) f.est_cv = sf.est_cv;
+          if (sf.est_high_variance !== undefined) f.est_high_variance = sf.est_high_variance;
+          if (sf.est_aggregation !== undefined) f.est_aggregation = sf.est_aggregation;
 
           const row = document.getElementById('row-' + idx);
           if (!row) return;
           // Status badge (col index 7)
           const badgeCell = row.cells[7];
           if (badgeCell) {
-            badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
+            badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw, sf.force_convert) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
             row.classList.toggle('tr-done',        sf.status === 'done');
             row.classList.toggle('tr-failed',      sf.status === 'failed');
             row.classList.toggle('tr-low-savings', sf.status === 'low_savings');
@@ -1253,35 +1515,66 @@ function _pollStatus() {
               _lastAutoScrollPath = f.full_path;
             }
           }
-          // Output/Saved/% cells (cols 9, 10, 11)
+          // Output/Saved/% cells (cols 11, 12, 13)
           if (sf.status === 'done') {
-            if (row.cells[9])  row.cells[9].textContent  = sf.output ? sf.output + ' MB' : '';
-            if (row.cells[10]) row.cells[10].textContent = sf.saved  ? sf.saved  + ' MB' : '';
-            if (row.cells[11]) row.cells[11].innerHTML   = sf.pct     ? '<strong>' + sf.pct + '%</strong>' : '';
+            if (row.cells[11]) row.cells[11].textContent  = sf.output ? sf.output + ' MB' : '';
+            if (row.cells[12]) row.cells[12].textContent = sf.saved  ? sf.saved  + ' MB' : '';
+            if (row.cells[13]) row.cells[13].innerHTML   = sf.pct     ? '<strong>' + sf.pct + '%</strong>' : '';
           }
-          if (sf.conv_secs !== undefined && row.cells[12]) {
-            row.cells[12].textContent = sf.conv_secs ? _fmtDuration(sf.conv_secs) : '';
+          if (sf.conv_secs !== undefined) {
+            if (row.cells[15]) row.cells[15].textContent = sf.conv_secs ? _fmtDuration(sf.conv_secs) : '';
+            if (row.cells[14]) {
+              const sx = _conversionSpeedX(_parseDuration(f.duration), sf.conv_secs || 0);
+              row.cells[14].textContent = sx > 0 ? _formatSpeedX(sx) : '';
+            }
           }
           const estCell = document.getElementById('est-' + idx);
           if (estCell && sf.est_pct != null) {
-            estCell.innerHTML =
-              '<span class="text-success fw-semibold">' + sf.est_pct + '%</span>' +
-              '<br><small class="text-secondary">' + (sf.est_mb || 0) + '\u202fMB</small>';
+            estCell.innerHTML = _estimateHtml(f);
           }
         });
+
+        const _realizedMb = _files
+          .filter(f => !!f.session_done)
+          .reduce((sum, f) => sum + _savedMbFromFile(f), 0);
+        const _projectedMb = (s.saved_mb !== undefined && s.saved_mb !== null)
+          ? (Number(s.saved_mb) || 0)
+          : _realizedMb;
+        _sessionSavedMB = _realizedMb;
+        _sessionEstimatedMB = Math.max(0, _projectedMb - _realizedMb);
+        _updateSessionCard();
+
+        const _savedEl = document.getElementById('savedVal');
+        const _estEl = document.getElementById('estVal');
+        const _currentPath = s.current_file || '';
+        const _currentFile = _currentPath ? (_files.find(f => f.full_path === _currentPath) || null) : null;
+
+        let _currentSavedMb = 0;
+        if (_currentFile) {
+          if (s.state === 'running' && s.saved_mb !== undefined && s.saved_mb !== null) {
+            // During conversion backend reports: completed-session savings + live projection for current file.
+            _currentSavedMb = Math.max(0, (Number(s.saved_mb) || 0) - _realizedMb);
+          } else {
+            _currentSavedMb = _savedMbFromFile(_currentFile);
+          }
+        }
+
+        let _currentEstMb = _currentFile ? (Number(_currentFile.est_mb) || 0) : 0;
+        if (_currentEstMb <= 0 && _currentFile && _currentFile.est_pct != null) {
+          const _srcMb = parseFloat(String(_currentFile.size || '0').replace(/,/g, '')) || 0;
+          _currentEstMb = _srcMb > 0 ? (_srcMb * (Number(_currentFile.est_pct) || 0) / 100) : 0;
+        }
+
+        if (_savedEl) _savedEl.textContent = _currentSavedMb > 0 ? _fmtSavedShort(_currentSavedMb) : '—';
+        if (_estEl) _estEl.textContent = _currentEstMb > 0 ? ('+' + _fmtSavedShort(_currentEstMb)) : '—';
+
         updateStats(_files);
         if (_statusChanged) applyFilter();
       }
 
       // Render new backend log lines (filter out verbose ffmpeg internals)
       if (s.log && s.log.length > _logCursor) {
-        const statusEl = document.getElementById('ffmpegStatus');
         s.log.slice(_logCursor).forEach(msg => {
-          // FFmpeg progress lines → single-line status bar (replace, not append)
-          if (/^frame=\s*\d+.*speed=/.test(msg)) {
-            if (statusEl) { statusEl.textContent = msg.trim(); statusEl.classList.remove('d-none'); }
-            return;
-          }
           if (_isVerboseLogLine(msg)) return;
           const cls = msg.startsWith('ERROR:') ? 'err'
                     : /^(Done\.|NOTE:|Skipped |Track \d+ pre-encoded)/.test(msg) ? 'ok'
@@ -1333,6 +1626,7 @@ function startConversion() {
     return;
   }
   _sessionSavedMB = 0;
+  _sessionEstimatedMB = 0;
   _sessionProcessed = 0;
   _updateSessionCard();
   _stopElapsedTimer();
@@ -1585,7 +1879,13 @@ function showRowMenu(index, btn) {
       () => unskipFile(index)));
   }
 
-  if (isPending || isFailed || isSkipped) {
+  if (isDone || isFailed || f.status === 'low_savings' || f.status === 'no_saving') {
+    _rowMenu.appendChild(_menuDivider());
+    _rowMenu.appendChild(_menuItem('bi-arrow-counterclockwise text-warning', 'Reset to pending',
+      () => resetToPending(index)));
+  }
+
+  if (isPending || isFailed || isSkipped || f.status === 'low_savings') {
     if (f.force_sw) {
       _rowMenu.appendChild(_menuDivider());
       _rowMenu.appendChild(_menuItem('bi-cpu text-secondary', 'Remove SW-only flag',
@@ -1594,6 +1894,16 @@ function showRowMenu(index, btn) {
       _rowMenu.appendChild(_menuDivider());
       _rowMenu.appendChild(_menuItem('bi-cpu text-warning', 'Force SW encode (skip QSV)',
         () => forceSw(index)));
+    }
+
+    if (f.force_convert) {
+      _rowMenu.appendChild(_menuDivider());
+      _rowMenu.appendChild(_menuItem('bi-lightning-charge text-secondary', 'Remove Force Convert flag',
+        () => unforceConvert(index)));
+    } else {
+      _rowMenu.appendChild(_menuDivider());
+      _rowMenu.appendChild(_menuItem('bi-lightning-charge text-info', 'Force Convert (ignore low-savings estimate)',
+        () => forceConvert(index)));
     }
   }
 
@@ -1693,6 +2003,7 @@ function viewDetails(index) {
       <tr><td>Folder</td><td>${f.folder || '<span class="text-secondary">(root)</span>'}</td></tr>
       <tr><td>File size</td><td>${f.size} MB</td></tr>
       <tr><td>Duration</td><td>${f.duration || '—'}</td></tr>
+      ${f.est_pct != null ? `<tr><td>Estimate</td><td>${_estimateHtml(f)}</td></tr>` : ''}
       ${f.status === 'done' ? `<tr><td>Output size</td><td>${f.output} MB</td></tr>
       <tr><td>Space saved</td><td class="text-success fw-semibold">${f.saved} MB (${f.pct}%)</td></tr>` : ''}
     </table>`;
@@ -1703,7 +2014,7 @@ function viewDetails(index) {
   if (!s) {
     html += `<p class="text-secondary small mb-3">Stream data not loaded. <button class="btn btn-sm btn-outline-secondary py-0" onclick="probeStreams(${index})"><i class="bi bi-search me-1"></i>Probe</button></p>`;
   } else if (audioTracks.length) {
-    html += '<table class="table table-sm details-table mb-3"><thead><tr><th>#</th><th>Codec</th><th>Channels</th><th>Language</th><th>Bitrate</th><th>Title</th><th class="text-end"><button class="btn btn-link btn-sm p-0 me-2" onclick="setAllStreamsDropped(' + index + ',\'audio\',true)">Drop all</button><button class="btn btn-link btn-sm p-0" onclick="setAllStreamsDropped(' + index + ',\'audio\',false)">Restore all</button></th></tr></thead><tbody>';
+    html += '<div class="details-track-table-wrap mb-3"><table class="table table-sm details-table mb-0"><thead><tr><th>#</th><th>Codec</th><th>Channels</th><th>Language</th><th>Bitrate</th><th>Title</th><th class="text-end"><button class="btn btn-link btn-sm p-0 me-2" onclick="setAllStreamsDropped(' + index + ',\'audio\',true)">Drop all</button><button class="btn btn-link btn-sm p-0" onclick="setAllStreamsDropped(' + index + ',\'audio\',false)">Restore all</button></th></tr></thead><tbody>';
     audioTracks.forEach(a => {
       const streamIdx = a.index != null ? a.index : null;
       const isDrop = streamIdx != null && dropped.has(streamIdx);
@@ -1713,7 +2024,7 @@ function viewDetails(index) {
       const rowClass = isDrop ? ' class="details-track-dropped"' : '';
       html += `<tr${rowClass}><td class="text-secondary">${a.track}</td><td>${a.codec}</td><td>${a.channels}</td><td><span class="badge bg-secondary">${a.language}</span></td><td class="text-secondary">${a.bitrate}</td><td>${a.title || '—'}</td><td>${dropBtn}</td></tr>`;
     });
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
   } else if (s) {
     html += '<p class="text-secondary small mb-3">No audio tracks found.</p>';
   }
@@ -1724,7 +2035,7 @@ function viewDetails(index) {
   if (!s) {
     html += '<p class="text-secondary small mb-0">Click Probe above to load track info.</p>';
   } else if (subTracks.length) {
-    html += '<table class="table table-sm details-table mb-0"><thead><tr><th>#</th><th>Format</th><th>Language</th><th>Title</th><th class="text-end"><button class="btn btn-link btn-sm p-0 me-2" onclick="setAllStreamsDropped(' + index + ',\'subs\',true)">Drop all</button><button class="btn btn-link btn-sm p-0" onclick="setAllStreamsDropped(' + index + ',\'subs\',false)">Restore all</button></th></tr></thead><tbody>';
+    html += '<div class="details-track-table-wrap"><table class="table table-sm details-table mb-0"><thead><tr><th>#</th><th>Format</th><th>Language</th><th>Likely</th><th>Title</th><th class="text-end"><button class="btn btn-link btn-sm p-0 me-2" onclick="setAllStreamsDropped(' + index + ',\'subs\',true)">Drop all</button><button class="btn btn-link btn-sm p-0" onclick="setAllStreamsDropped(' + index + ',\'subs\',false)">Restore all</button></th></tr></thead><tbody>';
     subTracks.forEach(sub => {
       const streamIdx = sub.index != null ? sub.index : null;
       const isDrop = streamIdx != null && dropped.has(streamIdx);
@@ -1732,16 +2043,31 @@ function viewDetails(index) {
       const fmtBadge = isImage
         ? `<span class="badge details-sub-image">${sub.codec}</span>`
         : `<span class="badge details-sub-text">${sub.codec}</span>`;
+      const likelyId = streamIdx != null ? _likelyLangCellId(index, streamIdx) : '';
+      const likelyCell = streamIdx != null
+        ? `<span id="${likelyId}" class="text-secondary small">…</span>`
+        : '<span class="text-secondary small">—</span>';
       const dropBtn = streamIdx != null
         ? `<button class="btn btn-xs details-drop-btn ${isDrop ? 'dropped' : ''}" title="${isDrop ? 'Click to restore track' : 'Click to drop track'}" onclick="toggleDropStream(${index},${streamIdx},this)"><i class="bi bi-${isDrop ? 'plus-circle' : 'dash-circle'}"></i></button>`
         : '';
+      const previewBtn = streamIdx != null
+        ? `<button class="btn btn-xs btn-outline-secondary ms-1" title="Preview subtitle text" onclick="previewSubtitleText(${index},${streamIdx})"><i class="bi bi-eye"></i></button>`
+        : '';
       const rowClass = isDrop ? ' class="details-track-dropped"' : '';
-      html += `<tr${rowClass}><td class="text-secondary">${sub.track}</td><td>${fmtBadge}</td><td><span class="badge bg-secondary">${sub.language}</span></td><td>${sub.title || '—'}</td><td>${dropBtn}</td></tr>`;
+      html += `<tr${rowClass}><td class="text-secondary">${sub.track}</td><td>${fmtBadge}</td><td><span class="badge bg-secondary">${sub.language}</span></td><td>${likelyCell}</td><td>${sub.title || '—'}</td><td>${previewBtn}${dropBtn}</td></tr>`;
     });
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
     if (dropped.size > 0) {
       html += '<p class="text-warning small mt-2 mb-0"><i class="bi bi-exclamation-triangle me-1"></i>Dropped tracks will be excluded from conversion and OCR.</p>';
     }
+    html += `
+      <div class="card mt-3">
+        <div class="card-header py-2 small"><i class="bi bi-card-text me-1"></i>Subtitle Text Preview</div>
+        <div class="card-body p-2">
+          <div id="detailsSubPreviewStatus" class="small text-secondary mb-2">Click <strong>Preview</strong> on a subtitle row to inspect text and detected language.</div>
+          <pre id="detailsSubPreviewText" class="bg-body-secondary rounded p-2 mb-0 small" style="max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;"></pre>
+        </div>
+      </div>`;
   } else if (s) {
     html += '<p class="text-secondary small mb-0">No subtitle tracks found.</p>';
   }
@@ -1754,6 +2080,144 @@ function viewDetails(index) {
   }
   existing.show();
   refreshStreamEditStatus();
+  refreshEngStereoStatus();
+  refreshLikelySubtitleLanguages(index);
+}
+
+function _likelyLangCellId(fileIndex, streamIndex) {
+  return 'detailsLikelyLang_' + fileIndex + '_' + streamIndex;
+}
+
+function _isImageSubtitleCodec(codec) {
+  const c = String(codec || '').toUpperCase();
+  return c === 'PGS' || c === 'HDMV_PGS_SUBTITLE' || c === 'PGSSUB' || c === 'DVDSUB' || c === 'DVD_SUBTITLE' || c === 'VOBSUB' || c === 'XSUB';
+}
+
+function _likelyCacheKey(filePath, streamIndex) {
+  return String(filePath || '') + '|' + String(streamIndex);
+}
+
+function _setLikelyCell(fileIndex, streamIndex, text, title) {
+  const el = document.getElementById(_likelyLangCellId(fileIndex, streamIndex));
+  if (!el) return;
+  el.textContent = text;
+  if (title) el.title = title;
+}
+
+function _formatLikelyLanguage(data) {
+  const det = (data && data.detected_language) || {};
+  const label = det.label || 'Unknown';
+  const conf = Number.isFinite(det.confidence) ? det.confidence : null;
+  const base = conf != null ? `${label} (${conf}%)` : label;
+  if (data && data.language_mismatch) return base + ' *';
+  return base;
+}
+
+function refreshLikelySubtitleLanguages(fileIndex) {
+  const f = _files[fileIndex];
+  if (!f || !f.streams) return;
+  const subTracks = (f.streams && f.streams.subs) || [];
+
+  subTracks.forEach(sub => {
+    const streamIndex = sub.index;
+    if (streamIndex == null) return;
+
+    if (_isImageSubtitleCodec(sub.codec)) {
+      _setLikelyCell(fileIndex, streamIndex, 'Image (OCR)', 'Image-based subtitle track');
+      return;
+    }
+
+    const key = _likelyCacheKey(f.full_path, streamIndex);
+    const cached = _subtitleLikelyCache[key];
+    if (cached) {
+      _setLikelyCell(fileIndex, streamIndex, _formatLikelyLanguage(cached), cached.language_mismatch ? 'Metadata language differs from subtitle text' : 'Detected from subtitle text preview');
+      return;
+    }
+
+    if (_subtitleLikelyPending.has(key)) {
+      _setLikelyCell(fileIndex, streamIndex, 'Detecting...', 'Running text-based language detection');
+      return;
+    }
+
+    _subtitleLikelyPending.add(key);
+    _setLikelyCell(fileIndex, streamIndex, 'Detecting...', 'Running text-based language detection');
+    const qs = new URLSearchParams({
+      path: f.full_path,
+      stream_index: String(streamIndex),
+      max_lines: '80',
+      metadata_language: String(sub.language || 'und'),
+    });
+    fetch('/api/subtitle_preview?' + qs.toString())
+      .then(async r => {
+        const data = await r.json().catch(() => ({ error: 'Invalid response' }));
+        return { ok: r.ok, data };
+      })
+      .then(({ ok, data }) => {
+        if (!ok || !data.ok) {
+          _setLikelyCell(fileIndex, streamIndex, 'Unknown', data.error || 'Detection failed');
+          return;
+        }
+        _subtitleLikelyCache[key] = data;
+        _setLikelyCell(fileIndex, streamIndex, _formatLikelyLanguage(data), data.language_mismatch ? 'Metadata language differs from subtitle text' : 'Detected from subtitle text preview');
+      })
+      .catch(() => {
+        _setLikelyCell(fileIndex, streamIndex, 'Unknown', 'Detection failed');
+      })
+      .finally(() => {
+        _subtitleLikelyPending.delete(key);
+      });
+  });
+}
+
+function previewSubtitleText(fileIndex, streamIndex) {
+  const f = _files[fileIndex];
+  if (!f || !f.full_path) return;
+
+  const statusEl = document.getElementById('detailsSubPreviewStatus');
+  const textEl = document.getElementById('detailsSubPreviewText');
+  if (!statusEl || !textEl) return;
+
+  const subs = (f.streams && f.streams.subs) || [];
+  const sub = subs.find(s => Number(s.index) === Number(streamIndex));
+  const metadataLanguage = (sub && sub.language) ? String(sub.language) : 'und';
+
+  statusEl.textContent = `Loading subtitle preview for stream #${streamIndex}...`;
+  textEl.textContent = '';
+
+  const qs = new URLSearchParams({
+    path: f.full_path,
+    stream_index: String(streamIndex),
+    max_lines: '120',
+    metadata_language: metadataLanguage,
+  });
+
+  fetch('/api/subtitle_preview?' + qs.toString())
+    .then(async r => {
+      const data = await r.json().catch(() => ({ error: 'Invalid response' }));
+      return { ok: r.ok, data };
+    })
+    .then(({ ok, data }) => {
+      if (!ok || !data.ok) {
+        statusEl.textContent = 'Subtitle preview failed';
+        textEl.textContent = data.error || 'Could not extract subtitle text.';
+        addLog('Subtitle preview failed: ' + (data.error || 'unknown error'), 'err');
+        return;
+      }
+
+      textEl.textContent = data.preview_text || '(No subtitle text extracted.)';
+
+      const det = data.detected_language || {};
+      const detLabel = det.label || 'Unknown';
+      const conf = (det.confidence != null) ? ` (${det.confidence}% confidence)` : '';
+      const tag = data.metadata_language || metadataLanguage || 'und';
+      const mismatch = data.language_mismatch ? ' - tag/content mismatch' : '';
+      statusEl.textContent = `Tag: ${tag} - Detected: ${detLabel}${conf}${mismatch}`;
+    })
+    .catch(err => {
+      statusEl.textContent = 'Subtitle preview failed';
+      textEl.textContent = String(err || 'Unknown error');
+      addLog('Subtitle preview failed: ' + err, 'err');
+    });
 }
 
 function _setDetailsButtonsDisabled(disabled) {
@@ -1761,10 +2225,18 @@ function _setDetailsButtonsDisabled(disabled) {
   const playBtn = document.getElementById('detailsPreviewPlayBtn');
   const discardBtn = document.getElementById('detailsPreviewDiscardBtn');
   const commitBtn = document.getElementById('detailsPreviewCommitBtn');
+  const engCreateBtn = document.getElementById('detailsEngStereoCreateBtn');
+  const engPlayBtn = document.getElementById('detailsEngStereoPlayBtn');
+  const engDiscardBtn = document.getElementById('detailsEngStereoDiscardBtn');
+  const engCommitBtn = document.getElementById('detailsEngStereoCommitBtn');
   if (createBtn) createBtn.disabled = disabled;
   if (playBtn) playBtn.disabled = disabled || !_detailsPreviewPath;
   if (discardBtn) discardBtn.disabled = disabled || !_detailsPreviewPath;
   if (commitBtn) commitBtn.disabled = disabled || !_detailsPreviewPath;
+  if (engCreateBtn) engCreateBtn.disabled = disabled;
+  if (engPlayBtn) engPlayBtn.disabled = disabled || !_detailsEngStereoPreviewPath;
+  if (engDiscardBtn) engDiscardBtn.disabled = disabled || !_detailsEngStereoPreviewPath;
+  if (engCommitBtn) engCommitBtn.disabled = disabled || !_detailsEngStereoPreviewPath;
 }
 
 function _setDetailsStatusText(text) {
@@ -1772,11 +2244,16 @@ function _setDetailsStatusText(text) {
   if (statusEl) statusEl.textContent = text || '';
 }
 
+function _setEngStereoStatusText(text) {
+  const statusEl = document.getElementById('detailsEngStereoStatus');
+  if (statusEl) statusEl.textContent = text || '';
+}
+
 function _renderRowStatusCell(fileIndex) {
   const f = _files[fileIndex];
   const row = document.getElementById('row-' + fileIndex);
   if (!row || !f) return;
-  row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
+  row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw, f.force_convert) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
 }
 
 function refreshStreamEditStatus() {
@@ -1799,6 +2276,29 @@ function refreshStreamEditStatus() {
       _detailsPreviewPath = '';
       _setDetailsButtonsDisabled(true);
       _setDetailsStatusText('Could not read preview status');
+    });
+}
+
+function refreshEngStereoStatus() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f) return;
+
+  fetch('/api/eng_stereo_status?path=' + encodeURIComponent(f.full_path))
+    .then(r => r.json())
+    .then(data => {
+      _detailsEngStereoPreviewPath = data.preview_exists ? (data.preview_path || '') : '';
+      _setDetailsButtonsDisabled(_detailsBusy || _appState === 'running');
+      if (data.preview_exists) {
+        _setEngStereoStatusText('Eng stereo test ready: ' + (data.preview_size_mb || 0).toFixed(1) + ' MB');
+      } else {
+        _setEngStereoStatusText('No Eng stereo test copy yet');
+      }
+    })
+    .catch(() => {
+      _detailsEngStereoPreviewPath = '';
+      _setDetailsButtonsDisabled(true);
+      _setEngStereoStatusText('Could not read Eng stereo status');
     });
 }
 
@@ -1948,6 +2448,7 @@ function commitStreamEditPreview() {
     }
     if (data.streams) {
       f.streams = data.streams;
+      _syncTrackCountsFromStreams(f);
       const v = data.streams.video || {};
       const codec = (v.codec || '').toUpperCase();
       if (codec) f.codec = codec;
@@ -1987,6 +2488,148 @@ function openCommitStreamEditModal() {
 function confirmCommitStreamEditPreview() {
   if (_streamReplaceConfirmModal) _streamReplaceConfirmModal.hide();
   commitStreamEditPreview();
+}
+
+function createEngStereoPreview() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f) return;
+
+  _detailsBusy = true;
+  _setDetailsButtonsDisabled(true);
+  _setEngStereoStatusText('Building Eng stereo test copy...');
+
+  fetch('/api/eng_stereo_preview', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    if (data.ok) {
+      _detailsEngStereoPreviewPath = data.preview_path || '';
+      _setDetailsButtonsDisabled(false);
+      _setEngStereoStatusText('Eng stereo test ready: ' + (data.preview_size_mb || 0).toFixed(1) + ' MB');
+      addLog('Created English-stereo test preview: ' + f.name, 'ok');
+    } else {
+      _detailsEngStereoPreviewPath = '';
+      _setDetailsButtonsDisabled(false);
+      _setEngStereoStatusText('Eng stereo build failed');
+      addLog('English-stereo preview failed: ' + (data.error || 'unknown error'), 'err');
+    }
+  }).catch(err => {
+    _detailsBusy = false;
+    _detailsEngStereoPreviewPath = '';
+    _setDetailsButtonsDisabled(false);
+    _setEngStereoStatusText('Eng stereo build failed');
+    addLog('English-stereo preview failed: ' + err, 'err');
+  });
+}
+
+function playEngStereoPreview() {
+  if (!_detailsEngStereoPreviewPath) return;
+  apiOpen(_detailsEngStereoPreviewPath, 'play');
+}
+
+function discardEngStereoPreview() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f || !_detailsEngStereoPreviewPath) return;
+
+  _detailsBusy = true;
+  _setDetailsButtonsDisabled(true);
+  fetch('/api/eng_stereo_discard', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    if (data.ok) {
+      _detailsEngStereoPreviewPath = '';
+      _setDetailsButtonsDisabled(false);
+      _setEngStereoStatusText('Eng stereo test discarded');
+      addLog('Discarded English-stereo test preview for ' + f.name, 'info');
+    } else {
+      _setDetailsButtonsDisabled(false);
+      addLog('Discard Eng stereo preview failed: ' + (data.error || 'unknown error'), 'err');
+    }
+  }).catch(err => {
+    _detailsBusy = false;
+    _setDetailsButtonsDisabled(false);
+    addLog('Discard Eng stereo preview failed: ' + err, 'err');
+  });
+}
+
+function openCommitEngStereoModal() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f || !_detailsEngStereoPreviewPath) return;
+  const label = document.getElementById('engStereoReplaceFileLabel');
+  if (label) label.textContent = f.name;
+  if (!_engStereoReplaceConfirmModal) {
+    _engStereoReplaceConfirmModal = new bootstrap.Modal(document.getElementById('engStereoReplaceConfirmModal'));
+  }
+  _engStereoReplaceConfirmModal.show();
+}
+
+function confirmCommitEngStereoPreview() {
+  if (_engStereoReplaceConfirmModal) _engStereoReplaceConfirmModal.hide();
+  commitEngStereoPreview();
+}
+
+function commitEngStereoPreview() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f || !_detailsEngStereoPreviewPath) return;
+
+  _detailsBusy = true;
+  _setDetailsButtonsDisabled(true);
+  _setEngStereoStatusText('Replacing original with Eng stereo test...');
+  fetch('/api/eng_stereo_commit', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: f.full_path}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    if (!data.ok) {
+      _setDetailsButtonsDisabled(false);
+      _setEngStereoStatusText('Eng stereo replace failed');
+      addLog('Replace with English-stereo failed: ' + (data.error || 'unknown error'), 'err');
+      return;
+    }
+
+    _detailsEngStereoPreviewPath = '';
+    f.status = data.status || 'pending';
+    f.output = null;
+    f.saved = null;
+    f.pct = null;
+    if (data.new_size_mb != null) {
+      f.size = _fmtMbVal(data.new_size_mb);
+    }
+    if (data.streams) {
+      f.streams = data.streams;
+      _syncTrackCountsFromStreams(f);
+      const v = data.streams.video || {};
+      const codec = (v.codec || '').toUpperCase();
+      if (codec) f.codec = codec;
+    }
+    _renderRowStatusCell(_detailsFileIndex);
+    const row = document.getElementById('row-' + _detailsFileIndex);
+    if (row) {
+      row.classList.remove('tr-done', 'tr-failed');
+      row.cells[3].textContent = (f.size || '0') + ' MB';
+      _updateRowProbe(_detailsFileIndex, f);
+    }
+    updateStats(_files);
+    _setDetailsButtonsDisabled(false);
+    _setEngStereoStatusText('Original replaced from Eng stereo test.');
+    addLog('English-stereo test accepted for ' + f.name + '. Backup saved.', 'ok');
+    viewDetails(_detailsFileIndex);
+  }).catch(err => {
+    _detailsBusy = false;
+    _setDetailsButtonsDisabled(false);
+    _setEngStereoStatusText('Eng stereo replace failed');
+    addLog('Replace with English-stereo failed: ' + err, 'err');
+  });
 }
 
 function toggleDropStream(fileIndex, streamIdx, btn) {
@@ -2082,7 +2725,7 @@ async function dropPgsFolder(folder) {
       targets.forEach(({f, i, newDropped}) => {
         f.dropped_streams = newDropped;
         const row = document.getElementById('row-' + i);
-        if (row) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw) + _droppedBadgeHtml(f);
+        if (row) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw, f.force_convert) + _droppedBadgeHtml(f);
       });
       addLog('Dropped PGS tracks for ' + updates.length + ' file(s) in \u201c' + (folder || 'root') + '\u201d', 'info');
     } else {
@@ -2166,7 +2809,7 @@ function retryFile(index) {
   const row = document.getElementById('row-' + index);
   if (row) {
     row.classList.remove('tr-failed');
-    row.cells[5].innerHTML = '<span class="badge badge-pending">pending</span>';
+    row.cells[7].innerHTML = '<span class="badge badge-pending">pending</span>';
   }
   _files[index].status = 'pending';
   addLog('Queued for retry: ' + f.name, 'info');
@@ -2187,7 +2830,7 @@ function skipFile(index) {
       if (row) {
         row.classList.remove('tr-failed', 'tr-pending');
         row.classList.add('tr-skipped');
-        row.cells[7].innerHTML = _badgeHtml('skipped', _files[index].force_sw);
+        row.cells[7].innerHTML = _badgeHtml('skipped', _files[index].force_sw, _files[index].force_convert);
       }
       updateStats(_files);
       addLog('Skipped: ' + f.name, 'warn');
@@ -2212,18 +2855,21 @@ function unskipFile(index) {
       const row = document.getElementById('row-' + index);
       if (row) {
         row.classList.remove('tr-skipped');
-        row.cells[7].innerHTML = _badgeHtml('pending', _files[index].force_sw);
+        row.cells[7].innerHTML = _badgeHtml('pending', _files[index].force_sw, _files[index].force_convert);
       }
       updateStats(_files);
+      _refreshQueueStateFromFiles();
       addLog('Reset to pending: ' + f.name, 'info');
     } else {
       addLog('Un-skip failed: ' + (d.error || 'unknown'), 'err');
     }
   })
   .catch(() => addLog('Could not reach server.', 'err'));
+  _refreshQueueStateFromFiles();
 }
 
 function forceSw(index) {
+  _refreshQueueStateFromFiles();
   const f = _files[index];
   fetch('/api/update_status', {
     method: 'POST',
@@ -2238,9 +2884,10 @@ function forceSw(index) {
       const row = document.getElementById('row-' + index);
       if (row) {
         row.classList.remove('tr-skipped', 'tr-failed');
-        row.cells[7].innerHTML = _badgeHtml('pending', true);
+        row.cells[7].innerHTML = _badgeHtml('pending', true, !!_files[index].force_convert);
       }
       updateStats(_files);
+      _refreshQueueStateFromFiles();
       addLog('SW-only mode enabled: ' + f.name, 'warn');
     } else {
       addLog('Force SW failed: ' + (d.error || 'unknown'), 'err');
@@ -2261,10 +2908,100 @@ function unforceSw(index) {
     if (d.ok) {
       _files[index].force_sw = false;
       const row = document.getElementById('row-' + index);
-      if (row) row.cells[7].innerHTML = _badgeHtml(_files[index].status, false);
+      if (row) row.cells[7].innerHTML = _badgeHtml(_files[index].status, false, !!_files[index].force_convert);
       addLog('SW-only mode cleared: ' + f.name, 'info');
+      _refreshQueueStateFromFiles();
     } else {
       addLog('Clear SW failed: ' + (d.error || 'unknown'), 'err');
+    }
+  })
+  .catch(() => addLog('Could not reach server.', 'err'));
+}
+
+function forceConvert(index) {
+  _refreshQueueStateFromFiles();
+  const f = _files[index];
+  fetch('/api/update_status', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: [f.full_path], status: 'pending', force_convert: true }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      _files[index].force_convert = true;
+      _files[index].status = 'pending';
+      const row = document.getElementById('row-' + index);
+      if (row) {
+        row.classList.remove('tr-skipped', 'tr-failed');
+        row.cells[7].innerHTML = _badgeHtml('pending', !!_files[index].force_sw, true);
+      }
+      updateStats(_files);
+      _refreshQueueStateFromFiles();
+      addLog('Force convert enabled: ' + f.name, 'warn');
+    } else {
+      addLog('Force convert failed: ' + (d.error || 'unknown'), 'err');
+    }
+  })
+  .catch(() => addLog('Could not reach server.', 'err'));
+}
+
+function unforceConvert(index) {
+  const f = _files[index];
+  fetch('/api/update_status', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: [f.full_path], force_convert: false }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      _files[index].force_convert = false;
+      const row = document.getElementById('row-' + index);
+      if (row) row.cells[7].innerHTML = _badgeHtml(_files[index].status, !!_files[index].force_sw, false);
+      addLog('Force convert cleared: ' + f.name, 'info');
+      _refreshQueueStateFromFiles();
+    } else {
+      addLog('Clear force convert failed: ' + (d.error || 'unknown'), 'err');
+    }
+  })
+  .catch(() => addLog('Could not reach server.', 'err'));
+}
+
+function resetToPending(index) {
+  const f = _files[index];
+  if (!f) return;
+  fetch('/api/update_status', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: [f.full_path], status: 'pending' }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      f.status = 'pending';
+      f.output = null;
+      f.saved = null;
+      f.pct = null;
+      f.output_path = null;
+      f.output_size_mb = null;
+      f.output_hash = null;
+      f.output_bitrate_kbps = null;
+      const row = document.getElementById('row-' + index);
+      if (row) {
+        row.classList.remove('tr-done', 'tr-failed', 'tr-low-savings', 'tr-skipped', 'tr-converting');
+        row.cells[7].innerHTML = _badgeHtml('pending', !!f.force_sw, !!f.force_convert) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
+        if (row.cells[11]) row.cells[11].textContent = '';
+        if (row.cells[12]) row.cells[12].textContent = '';
+        if (row.cells[13]) row.cells[13].innerHTML = '';
+        if (row.cells[14]) row.cells[14].textContent = '';
+        if (row.cells[15]) row.cells[15].textContent = '';
+      }
+      updateStats(_files);
+      applyFilter();
+      addLog('Reset to pending: ' + f.name, 'info');
+    } else {
+      addLog('Reset failed: ' + (d.error || 'unknown'), 'err');
     }
   })
   .catch(() => addLog('Could not reach server.', 'err'));
@@ -2961,6 +3698,7 @@ async function startPrepEstimate(path) {
   _prepEstimateRoot = path;
   _logCursor = 0;
   _sessionSavedMB = 0;
+  _sessionEstimatedMB = 0;
   _sessionProcessed = 0;
   _updateSessionCard();
 
@@ -2969,7 +3707,7 @@ async function startPrepEstimate(path) {
     const startResp = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files: data.files, estimate_only: true, anime_mode: false }),
+      body: JSON.stringify({ files: data.files, estimate_only: true, anime_mode: false, force_reestimate: true }),
     });
     startData = await startResp.json();
   } catch (e) {

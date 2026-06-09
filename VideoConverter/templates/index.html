@@ -107,6 +107,7 @@
           </div>
         </div>
         <div class="stat-sub" id="statSessionSub">No conversions yet</div>
+        <div class="stat-sub" id="statSessionEst"></div>
         <div class="stat-bar-track mt-2"><div class="stat-bar" id="statSessionBar" style="width:0%; background:#58a6ff"></div></div>
       </div>
     </div>
@@ -214,14 +215,14 @@
                 <tr>
                   <th style="width:20px"></th>
                   <th>Folder</th><th>Filename</th><th class="text-end">Size</th><th class="text-end">Bitrate</th><th>Codec</th>
-                  <th>Duration</th><th>Status</th>
+                  <th>Duration</th><th>Status</th><th class="text-end">V</th><th class="text-end">A</th>
                   <th class="text-end">Est. saving</th>
-                  <th>Output</th><th>Saved</th><th class="text-end">%</th><th class="text-end">Time</th><th></th>
+                  <th>Output</th><th>Saved</th><th class="text-end">%</th><th class="text-end">Speed</th><th class="text-end">Time</th><th></th>
                 </tr>
               </thead>
               <tbody id="queueBody">
                 <tr id="emptyRow">
-                  <td colspan="14" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
+                  <td colspan="17" class="text-center text-secondary py-4">Select a folder above to scan for videos.</td>
                 </tr>
               </tbody>
             </table>
@@ -240,7 +241,7 @@
           <button class="btn btn-start text-white" id="startBtn" onclick="startConversion()" disabled>
             <i class="bi bi-play-fill me-2"></i>Start Conversion
           </button>
-          <button class="btn btn-outline-secondary" id="estimateBtn" onclick="estimateAll()" disabled title="Run the 10-second test-encode on all pending files to fill in estimated savings, without converting">
+          <button class="btn btn-outline-secondary" id="estimateBtn" onclick="estimateAll()" disabled title="Run a short multi-sample estimate on all pending files to fill in estimated savings, without converting">
             <i class="bi bi-calculator me-2"></i>Estimate All
           </button>
           <div class="row g-2">
@@ -270,7 +271,12 @@
       <div class="card" id="currentJobCard" style="height:260px;flex-shrink:0;display:flex;flex-direction:column;overflow:hidden">
         <div class="card-header d-flex align-items-center justify-content-between">
           <span><i class="bi bi-activity me-2"></i>Current Job</span>
-          <span class="text-secondary" style="font-size:.75rem" id="jobFileCounter"></span>
+          <div class="job-header-meta">
+            <span id="jobPhasePill" class="badge badge-pending job-header-pill d-none">Starting</span>
+            <span id="jobPausedPill" class="badge badge-paused job-header-pill d-none">Paused</span>
+            <span id="jobModeChip" class="badge badge-pending job-header-pill d-none">QSV path</span>
+            <span class="text-secondary" style="font-size:.75rem" id="jobFileCounter"></span>
+          </div>
         </div>
         <div class="card-body pb-2" id="jobCardBody" style="overflow-y:auto;flex:1;min-height:0">
 
@@ -302,10 +308,12 @@
               <div class="progress-bar" id="fileBar" style="width:0%"></div>
             </div>
 
+            <div id="ffmpegStatusInline" class="ffmpeg-status-inline text-truncate">—</div>
+
             <!-- Step checklist -->
             <ul class="step-list" id="stepList"></ul>
 
-            <!-- Stats row: fps / ETA / saved / elapsed -->
+              <!-- Stats row: fps / frames / remaining / speed / ETA / saved / est / file elapsed / job elapsed -->
             <div class="d-flex justify-content-between align-items-center mt-2 pt-1 border-top"
                  style="font-size:.75rem">
               <span>
@@ -313,28 +321,37 @@
                 <span class="text-secondary ms-1">fps</span>
               </span>
               <span>
+                <span class="fw-bold text-primary" id="framesVal">—</span>
+                <span class="text-secondary ms-1">frames</span>
+              </span>
+              <span>
+                <span class="fw-bold text-primary" id="framesRemainingVal">—</span>
+                <span class="text-secondary ms-1">left</span>
+              </span>
+              <span>
+                <span class="fw-bold text-secondary" id="speedVal">—</span>
+                <span class="text-secondary ms-1">speed</span>
+              </span>
+              <span>
                 <span class="fw-bold text-warning" id="etaVal">—</span>
                 <span class="text-secondary ms-1">ETA</span>
               </span>
               <span>
                 <span class="fw-bold text-success" id="savedVal">—</span>
-                <span class="text-secondary ms-1">saved</span>
+                <span class="text-secondary ms-1">saved (file)</span>
+              </span>
+              <span>
+                <span class="fw-bold text-success" id="estVal">—</span>
+                <span class="text-secondary ms-1">est (file)</span>
               </span>
               <span>
                 <span class="fw-bold text-info" id="elapsedVal">—</span>
-                <span class="text-secondary ms-1">elapsed</span>
+                <span class="text-secondary ms-1">file</span>
               </span>
-            </div>
-          </div>
-
-          <!-- Overall progress (shown whenever running) -->
-          <div id="jobOverall" class="mt-2 d-none">
-            <div class="d-flex justify-content-between mb-1">
-              <small class="text-secondary">Overall</small>
-              <small id="overallPct">0%</small>
-            </div>
-            <div class="progress" style="height:4px">
-              <div class="progress-bar overall" id="overallBar" style="width:0%"></div>
+              <span>
+                <span class="fw-bold text-info" id="jobElapsedVal">—</span>
+                <span class="text-secondary ms-1">job</span>
+              </span>
             </div>
           </div>
 
@@ -499,7 +516,10 @@
         <div class="text-center text-secondary py-4"><div class="spinner-border spinner-border-sm"></div> Loading…</div>
       </div>
       <div class="modal-footer">
-        <small class="text-secondary me-auto text-truncate" id="detailsStreamEditStatus" style="max-width:40%"></small>
+        <div class="me-auto text-truncate" style="max-width:45%">
+          <small class="text-secondary d-block text-truncate" id="detailsStreamEditStatus"></small>
+          <small class="text-secondary d-block text-truncate" id="detailsEngStereoStatus"></small>
+        </div>
         <button type="button" class="btn btn-outline-secondary btn-sm" id="detailsPreviewPlayBtn" onclick="playStreamEditPreview()" disabled>
           <i class="bi bi-play-circle me-1"></i>Play Preview
         </button>
@@ -511,6 +531,18 @@
         </button>
         <button type="button" class="btn btn-success btn-sm" id="detailsPreviewCommitBtn" onclick="openCommitStreamEditModal()" disabled>
           <i class="bi bi-check2-circle me-1"></i>Accept and Replace Original
+        </button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="detailsEngStereoPlayBtn" onclick="playEngStereoPreview()" disabled>
+          <i class="bi bi-play-circle me-1"></i>Play Eng Test
+        </button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="detailsEngStereoDiscardBtn" onclick="discardEngStereoPreview()" disabled>
+          <i class="bi bi-trash3 me-1"></i>Discard Eng Test
+        </button>
+        <button type="button" class="btn btn-outline-primary btn-sm" id="detailsEngStereoCreateBtn" onclick="createEngStereoPreview()">
+          <i class="bi bi-volume-down me-1"></i>Create Eng Stereo Test
+        </button>
+        <button type="button" class="btn btn-success btn-sm" id="detailsEngStereoCommitBtn" onclick="openCommitEngStereoModal()" disabled>
+          <i class="bi bi-check2-circle me-1"></i>Replace with Eng Stereo
         </button>
         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
       </div>
@@ -534,6 +566,29 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
         <button type="button" class="btn btn-danger btn-sm" id="streamReplaceConfirmBtn" onclick="confirmCommitStreamEditPreview()">
+          <i class="bi bi-check2-circle me-1"></i>Replace Original
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- English Stereo Replace Confirm Modal -->
+<div class="modal fade" id="engStereoReplaceConfirmModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-exclamation-triangle text-warning me-2"></i>Confirm Replace with Eng Stereo</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">This will replace the original file with the English stereo test copy and create an <span class="fw-semibold">.original-backup</span> file.</p>
+        <p class="mb-2"><strong id="engStereoReplaceFileLabel">—</strong></p>
+        <p class="text-secondary small mb-0">Only continue after you have played the Eng stereo test copy and confirmed audio/downmix behavior.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger btn-sm" id="engStereoReplaceConfirmBtn" onclick="confirmCommitEngStereoPreview()">
           <i class="bi bi-check2-circle me-1"></i>Replace Original
         </button>
       </div>
@@ -617,7 +672,7 @@
           </label>
           <input type="range" class="form-range" id="settingsLowSavingsThreshold" min="0" max="50" step="1" value="5"
             oninput="document.getElementById('lowSavingsThresholdVal').textContent=this.value">
-          <div class="form-text">Step 0 of each conversion runs a 10s test-encode. Files where the estimate falls below this threshold are marked <strong>Low Savings</strong> and skipped — no full encode. Set to 0 to always encode.</div>
+          <div class="form-text">Step 0 of each conversion runs several short sample encodes across the file. Files where the estimate falls below this threshold are marked <strong>Low Savings</strong> and skipped — no full encode. High-variance estimates are shown in the UI and bypass auto-skip. Set to 0 to always encode.</div>
         </div>
 
         <h6 class="details-section-head">Paths</h6>

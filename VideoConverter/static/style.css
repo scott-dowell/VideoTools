@@ -70,10 +70,50 @@ span.badge.badge-ocr-done, span.badge.badge-ocr-skip {
   text-overflow: ellipsis;
   flex-shrink: 0;
 }
+.ffmpeg-status-inline {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 0.72rem;
+  color: #8b949e;
+  padding: 2px 0 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-header-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: .35rem;
+  flex-wrap: wrap;
+}
+
+.job-header-pill {
+  font-size: .66rem !important;
+  line-height: 1.25 !important;
+  letter-spacing: .01em;
+  padding: .16rem .5rem !important;
+}
+
+.badge-paused {
+  background: rgba(248, 81, 73, .14);
+  color: #f85149;
+  border-color: #f85149;
+}
+
+span.badge.badge-paused {
+  border: 1px solid;
+  border-radius: 2rem;
+}
 /* Queue card — make table body scroll internally */
 #queueCard { display: flex; flex-direction: column; }
 #queueCard .card-body { flex: 1 1 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 #queueCard .table-responsive { flex: 1 1 0; min-height: 0; overflow-y: auto; }
+#queueCard .table-responsive thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
 .log-info  { color: #8b949e; }
 .log-ok    { color: #3fb950; }
 .log-warn  { color: #d29922; }
@@ -189,6 +229,18 @@ tr.drag-over > td { background-color: rgba(29,109,224,.15) !important;
 .details-drop-btn.dropped:hover { color:#f85149; background:rgba(248,81,73,.1); }
 .details-track-dropped td { opacity:.4; text-decoration:line-through; }
 .details-track-dropped td:last-child { opacity:1; text-decoration:none; }
+.details-track-table-wrap {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--bs-border-color);
+  border-radius: .35rem;
+}
+.details-track-table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bs-body-bg);
+}
 .codec-h264 { color: #58a6ff; }
 .folder-path { font-family: Consolas, monospace; font-size:0.78rem; color:#8b949e; }
 /* Row action menu */
@@ -234,6 +286,7 @@ tr.drag-over > td { background-color: rgba(29,109,224,.15) !important;
 [data-bs-theme="light"] .log-err  { color:#cf222e; }
 [data-bs-theme="light"] .progress { background:#d0d7de; }
 [data-bs-theme="light"] .badge-pending  { background:rgba(210,153,34,.12); color:#9a6700; border-color:#9a6700; }
+[data-bs-theme="light"] .badge-paused   { background:rgba(207,34,46,.12);  color:#cf222e; border-color:#cf222e; }
 [data-bs-theme="light"] .badge-ocr-done { background:rgba(22,163,74,.12);  color:#166534; border-color:#166534; }
 [data-bs-theme="light"] .badge-ocr-skip { background:rgba(107,114,128,.1); color:#6b7280; border-color:#6b7280; }
 [data-bs-theme="light"] .folder-path { color:#57606a; }

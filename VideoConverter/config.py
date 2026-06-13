@@ -3,6 +3,9 @@ Central configuration for VideoConverter.
 All tunable constants live here.
 """
 
+# Application version shown in the UI and used for release tracking.
+APP_VERSION = "0.0.001"
+
 # FFmpeg encoding quality
 QSV_QUALITY = 30        # hevc_qsv global_quality (lower = better quality)
 SW_HEVC_CRF = 28        # libx265 CRF fallback (lower = better quality)

@@ -6,9 +6,14 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
-- Tracking issue: #1
+- Tracking issue: #2
+
+- No changes yet.
+
+## [0.0.001] - 2026-06-13
 
 ### Added
+- Started app versioning at 0.0.001 and surfaced the current version in the navbar UI.
 - Added queue filtered count display in the Video Queue header (x/y when filters are active).
 - Added backend status savings fields for session and current file values:
   - session_realized_mb
@@ -28,4 +33,5 @@ The format is based on Keep a Changelog.
 ### Fixed
 - Improved consistency of live savings numbers shown during active conversion.
 
-[Unreleased]: https://github.com/scott-dowell/VideoTools/compare/master...HEAD
+[Unreleased]: https://github.com/scott-dowell/VideoTools/compare/0.0.001...HEAD
+[0.0.001]: https://github.com/scott-dowell/VideoTools/releases/tag/0.0.001

@@ -1425,7 +1425,7 @@ def _volume_label(drive: str) -> str:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", app_version=config.APP_VERSION)
 
 
 @app.route("/api/browse")

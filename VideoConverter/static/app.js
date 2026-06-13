@@ -780,6 +780,13 @@ function applyFilter() {
   // so the DOM order matches the active sort when a filter is applied.
   matching.forEach(r => tbody.appendChild(r));
   nonMatching.forEach(r => tbody.appendChild(r));
+  const countEl = document.getElementById('queueCountLabel');
+  if (countEl) {
+    const total = matching.length + nonMatching.length;
+    countEl.textContent = (nonMatching.length > 0 || _searchQuery || _activeStatuses.size < 7)
+      ? `· ${matching.length} / ${total}`
+      : '';
+  }
 }
 
 function toggleFilterBar() {
@@ -1534,36 +1541,22 @@ function _pollStatus() {
           }
         });
 
-        const _realizedMb = _files
-          .filter(f => !!f.session_done)
-          .reduce((sum, f) => sum + _savedMbFromFile(f), 0);
-        const _projectedMb = (s.saved_mb !== undefined && s.saved_mb !== null)
-          ? (Number(s.saved_mb) || 0)
-          : _realizedMb;
-        _sessionSavedMB = _realizedMb;
-        _sessionEstimatedMB = Math.max(0, _projectedMb - _realizedMb);
+        _sessionSavedMB = (s.session_realized_mb !== undefined && s.session_realized_mb !== null)
+          ? (Number(s.session_realized_mb) || 0)
+          : _sessionSavedMB;
+        _sessionEstimatedMB = (s.session_in_progress_est_mb !== undefined && s.session_in_progress_est_mb !== null)
+          ? Math.max(0, Number(s.session_in_progress_est_mb) || 0)
+          : 0;
         _updateSessionCard();
 
         const _savedEl = document.getElementById('savedVal');
         const _estEl = document.getElementById('estVal');
-        const _currentPath = s.current_file || '';
-        const _currentFile = _currentPath ? (_files.find(f => f.full_path === _currentPath) || null) : null;
-
-        let _currentSavedMb = 0;
-        if (_currentFile) {
-          if (s.state === 'running' && s.saved_mb !== undefined && s.saved_mb !== null) {
-            // During conversion backend reports: completed-session savings + live projection for current file.
-            _currentSavedMb = Math.max(0, (Number(s.saved_mb) || 0) - _realizedMb);
-          } else {
-            _currentSavedMb = _savedMbFromFile(_currentFile);
-          }
-        }
-
-        let _currentEstMb = _currentFile ? (Number(_currentFile.est_mb) || 0) : 0;
-        if (_currentEstMb <= 0 && _currentFile && _currentFile.est_pct != null) {
-          const _srcMb = parseFloat(String(_currentFile.size || '0').replace(/,/g, '')) || 0;
-          _currentEstMb = _srcMb > 0 ? (_srcMb * (Number(_currentFile.est_pct) || 0) / 100) : 0;
-        }
+        const _currentSavedMb = (s.current_file_saved_mb !== undefined && s.current_file_saved_mb !== null)
+          ? Math.max(0, Number(s.current_file_saved_mb) || 0)
+          : 0;
+        const _currentEstMb = (s.current_file_est_mb !== undefined && s.current_file_est_mb !== null)
+          ? Math.max(0, Number(s.current_file_est_mb) || 0)
+          : 0;
 
         if (_savedEl) _savedEl.textContent = _currentSavedMb > 0 ? _fmtSavedShort(_currentSavedMb) : '—';
         if (_estEl) _estEl.textContent = _currentEstMb > 0 ? ('+' + _fmtSavedShort(_currentEstMb)) : '—';

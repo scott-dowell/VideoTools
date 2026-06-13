@@ -3,6 +3,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import config
 from app import _build_steps
 
 H264_PGS = {
@@ -62,10 +63,14 @@ def test_h264_anime_no_pgs():
 def test_av1_anime():
     steps = _build_steps(AV1_FILE, anime_mode=True)
     ids = [s["id"] for s in steps]
-    assert "compress" not in ids
     assert "remux" in ids
     remux = next(s for s in steps if s["id"] == "remux")
-    assert "AV1" in remux["detail"]
+    if bool(getattr(config, "REENCODE_AV1", True)):
+        assert ids == ["ocr", "estimate", "compress", "audio", "remux", "verify"]
+        assert remux["detail"] == "MKV → MP4"
+    else:
+        assert "compress" not in ids
+        assert "AV1" in remux["detail"]
 
 
 def test_hevc_anime_no_pgs():

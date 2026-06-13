@@ -4,6 +4,8 @@ Backs up source, converts, ffprobes output to confirm bin_data track present.
 """
 import sys, os, shutil, json, subprocess
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import converter
 
@@ -12,8 +14,7 @@ BAK = SRC + ".bak"
 OUT = SRC.replace(".mkv", ".mp4")
 
 if not os.path.exists(SRC):
-    print(f"SKIP: source not found: {SRC}")
-    sys.exit(0)
+    pytest.skip(f"source not found: {SRC}", allow_module_level=True)
 
 print(f"Backing up → {BAK}")
 shutil.copy2(SRC, BAK)

@@ -5,6 +5,7 @@ Routes only; no business logic here.
 import ctypes
 import json
 import os
+import re
 import shutil
 import sqlite3
 import string
@@ -60,10 +61,58 @@ _job: dict = {
     "phase":           "",          # "" | "ocr_batch" | "converting"
     "ocr_batch":       {"total": 0, "done": 0, "current_file": "", "files": []},
     "steps":           [],          # per-file step checklist
+    "ffmpeg_status":   "",          # single live status line (no history)
+    "ffmpeg_status_at": 0.0,         # unix timestamp of last status update
 }
 
 _PROCESS_ALL_ACCESS = 0x1F0FFF
 _session_started_at: float = 0.0   # set when /api/start is called
+_ESTIMATE_VERSION = 2  # bump when estimate methodology/output semantics change
+
+
+def _as_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+            if not value:
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _status_savings_fields(data: dict) -> dict:
+    files = data.get("files") or []
+    realized_mb = sum(
+        _as_float(f.get("saved"), 0.0)
+        for f in files
+        if (f.get("status") == "done")
+    )
+    projected_total_mb = _as_float(data.get("saved_mb"), realized_mb)
+    in_progress_est_mb = max(0.0, projected_total_mb - realized_mb)
+
+    current_saved_mb = 0.0
+    current_est_mb = 0.0
+    current_path = data.get("current_file") or ""
+    current = next((f for f in files if (f.get("full_path") or "") == current_path), None)
+    if current:
+        current_est_mb = _as_float(current.get("est_mb"), 0.0)
+        if current.get("status") == "done":
+            current_saved_mb = _as_float(current.get("saved"), 0.0)
+        elif data.get("state") == "running":
+            current_saved_mb = max(0.0, projected_total_mb - realized_mb)
+        else:
+            current_saved_mb = _as_float(current.get("saved"), 0.0)
+
+    return {
+        "session_realized_mb": round(realized_mb, 1),
+        "session_in_progress_est_mb": round(in_progress_est_mb, 1),
+        "session_projected_total_mb": round(projected_total_mb, 1),
+        "current_file_saved_mb": round(current_saved_mb, 1),
+        "current_file_est_mb": round(current_est_mb, 1),
+    }
 
 
 def _suspend_ffmpeg() -> None:
@@ -109,6 +158,20 @@ def _write_crash_log(msg: str) -> None:
         with open(_crash_path, "a", encoding="utf-8") as _cf:
             from datetime import datetime as _dt
             _cf.write(f"\n{'='*60}\n{_dt.now().isoformat(timespec='seconds')}\n{msg}\n")
+    except Exception:
+        pass
+
+
+def _write_ffmpeg_status_log(msg: str) -> None:
+    """Append raw ffmpeg status lines to a persistent diagnostic file."""
+    try:
+        _status_path = os.path.join(os.path.dirname(__file__), "logs", "ffmpeg_status_raw.log")
+        os.makedirs(os.path.dirname(_status_path), exist_ok=True)
+        with open(_status_path, "a", encoding="utf-8") as _sf:
+            from datetime import datetime as _dt
+            with _job_lock:
+                _current = _job.get("current_file", "")
+            _sf.write(f"[{_dt.now().isoformat(timespec='seconds')}] {_current} | {msg}\n")
     except Exception:
         pass
 
@@ -266,6 +329,138 @@ def _is_job_running() -> bool:
         return _job.get("state") == "running"
 
 
+def _normalise_lang_code(lang: str) -> str:
+    """Normalise mixed language tags (eng/en/EN-us) into compact codes."""
+    raw = (lang or "").strip().lower().replace("_", "-")
+    if not raw or raw in {"und", "unknown", "none", "null"}:
+        return "und"
+    base = raw.split("-", 1)[0]
+    if len(base) == 2:
+        return base
+    iso3_to_iso2 = {
+        "eng": "en", "ara": "ar", "jpn": "ja", "spa": "es", "por": "pt",
+        "fra": "fr", "fre": "fr", "deu": "de", "ger": "de", "ita": "it",
+        "rus": "ru", "zho": "zh", "chi": "zh", "kor": "ko",
+    }
+    return iso3_to_iso2.get(base, base)
+
+
+def _subtitle_payload_text(srt_text: str) -> str:
+    """Strip cue numbers and timestamps, keeping only dialogue text."""
+    kept: list[str] = []
+    for line in (srt_text or "").splitlines():
+        t = line.strip()
+        if not t:
+            continue
+        if t.isdigit() or "-->" in t:
+            continue
+        kept.append(t)
+    return " ".join(kept)
+
+
+def _detect_subtitle_language(dialogue_text: str) -> dict:
+    """Lightweight script/language heuristic for subtitle preview text."""
+    text = (dialogue_text or "").strip()
+    if not text:
+        return {
+            "code": "und",
+            "label": "Unknown",
+            "confidence": 0,
+            "script_counts": {},
+            "english_stopword_ratio": 0.0,
+        }
+
+    counts = {
+        "latin": 0,
+        "arabic": 0,
+        "cyrillic": 0,
+        "cjk": 0,
+        "other": 0,
+    }
+
+    for ch in text:
+        o = ord(ch)
+        if (65 <= o <= 90) or (97 <= o <= 122):
+            counts["latin"] += 1
+        elif (
+            (0x0600 <= o <= 0x06FF)
+            or (0x0750 <= o <= 0x077F)
+            or (0x08A0 <= o <= 0x08FF)
+            or (0xFB50 <= o <= 0xFDFF)
+            or (0xFE70 <= o <= 0xFEFF)
+        ):
+            counts["arabic"] += 1
+        elif (0x0400 <= o <= 0x04FF) or (0x0500 <= o <= 0x052F):
+            counts["cyrillic"] += 1
+        elif (
+            (0x3040 <= o <= 0x30FF)
+            or (0x3400 <= o <= 0x4DBF)
+            or (0x4E00 <= o <= 0x9FFF)
+            or (0xF900 <= o <= 0xFAFF)
+        ):
+            counts["cjk"] += 1
+        elif ch.isalpha():
+            counts["other"] += 1
+
+    total_letters = sum(counts.values())
+    if total_letters <= 0:
+        return {
+            "code": "und",
+            "label": "Unknown",
+            "confidence": 0,
+            "script_counts": counts,
+            "english_stopword_ratio": 0.0,
+        }
+
+    dominant_script = max(counts, key=counts.get)
+    dominant_ratio = counts[dominant_script] / max(total_letters, 1)
+
+    tokens = [
+        w
+        for w in re.findall(r"[A-Za-z']+", text.lower())
+        if len(w) >= 1
+    ]
+    stopwords = {
+        "the", "and", "you", "your", "are", "for", "with", "that", "this", "was",
+        "have", "not", "but", "from", "they", "she", "him", "her", "what", "when",
+        "where", "why", "how", "who", "can", "could", "will", "would", "there", "here",
+        "is", "it", "to", "of", "in", "on", "at", "we", "i", "me", "my", "our",
+        "be", "do", "did", "does", "an", "a", "as", "if", "then", "than",
+    }
+    stopword_hits = sum(1 for t in tokens if t in stopwords)
+    stopword_ratio = (stopword_hits / len(tokens)) if tokens else 0.0
+
+    code = "und"
+    label = "Unknown"
+    if dominant_script == "latin":
+        if len(tokens) >= 12 and stopword_ratio >= 0.05:
+            code = "en"
+            label = "English (heuristic)"
+        else:
+            code = "latin"
+            label = "Latin script"
+    elif dominant_script == "arabic":
+        code = "ar"
+        label = "Arabic script"
+    elif dominant_script == "cyrillic":
+        code = "cyrl"
+        label = "Cyrillic script"
+    elif dominant_script == "cjk":
+        code = "cjk"
+        label = "CJK script"
+    else:
+        code = "und"
+        label = "Unknown"
+
+    return {
+        "code": code,
+        "label": label,
+        "confidence": int(round(dominant_ratio * 100)),
+        "script_counts": counts,
+        "english_stopword_ratio": round(stopword_ratio, 3),
+    }
+
+
 # Windows error codes that indicate unrecoverable hardware / device failure.
 # When any of these are detected the entire queue is halted immediately.
 _FATAL_WINERRORS = {
@@ -293,7 +488,14 @@ def _is_fatal_device_error(exc: BaseException) -> bool:
     return False
 
 
-def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings_threshold_pct: int = 5, estimate_only: bool = False) -> None:
+def _queue_worker(
+    files: list[dict],
+    anime_mode: bool,
+    quality: int,
+    low_savings_threshold_pct: int = 5,
+    estimate_only: bool = False,
+    force_reestimate: bool = False,
+) -> None:
     """Runs in a daemon thread; processes the file queue sequentially."""
     total_saved = 0.0
 
@@ -577,6 +779,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
             except OSError:
                 pass
         force_sw = bool(db_rec.get("force_sw", False))
+        force_convert = bool(db_rec.get("force_convert", False))
 
         try:
             mtime      = os.path.getmtime(full_path)
@@ -607,6 +810,8 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
             _job["fps"]           = 0.0
             _job["eta_secs"]      = 0
             _job["encoder"]       = ""
+            _job["ffmpeg_status"] = "starting ffmpeg..."
+            _job["ffmpeg_status_at"] = time.time()
             # Status will be set to 'ocr' or 'converting' below once we know
             # whether an OCR pre-flight is needed.
 
@@ -685,6 +890,14 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
         _REMUX_ATTEMPT = [0]   # tracks current remux attempt number for this file
 
         def _capture_log(msg: str) -> None:
+            if msg.startswith("__ffstatus__:"):
+                raw = msg.split(":", 1)[1].strip()
+                if raw:
+                    with _job_lock:
+                        _job["ffmpeg_status"] = raw
+                        _job["ffmpeg_status_at"] = time.time()
+                    _write_ffmpeg_status_log(raw)
+                return
             _file_log.append(msg)
             _job_log(msg)
             _process_step_log(msg, _REMUX_ATTEMPT)
@@ -728,19 +941,43 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                     _ref_pixels  = 1920 * 1080
                     _ref_fps     = 25.0
                     _norm_bitrate = _src_bitrate * (_ref_pixels / _pixels) * (_ref_fps / max(_fps_val, 1.0))
-                    if _norm_bitrate < _HEVC_FASTSKIP_KBPS:
+                    if _norm_bitrate < _HEVC_FASTSKIP_KBPS and not force_convert:
                         _step("estimate", "done", f"HEVC {_src_bitrate}\u202fkbps (norm {round(_norm_bitrate)}\u202fkbps) \u2014 fast skip")
                         _job_log(f"HEVC source at {_src_bitrate} kbps (normalised {round(_norm_bitrate)} kbps < {_HEVC_FASTSKIP_KBPS} kbps) — skipping estimate, marking low_savings.")
-                        db.save_estimate(rec_id, 0, 0.0, est_sample_cv_pct=0.0, est_high_variance=False, est_aggregation="fast_skip")
+                        db.save_estimate(
+                            rec_id,
+                            0,
+                            0.0,
+                            est_sample_cv_pct=0.0,
+                            est_high_variance=False,
+                            est_aggregation="fast_skip",
+                            est_quality=quality,
+                            est_version=_ESTIMATE_VERSION,
+                        )
                         db.mark_low_savings(rec_id, 0, low_savings_threshold_pct, _utcnow())
                         with _job_lock:
                             _job["files"][idx]["status"] = "low_savings"
                         continue
+                    if _norm_bitrate < _HEVC_FASTSKIP_KBPS and force_convert:
+                        _job_log(
+                            f"HEVC source at {_src_bitrate} kbps (normalised {round(_norm_bitrate)} kbps < {_HEVC_FASTSKIP_KBPS} kbps) — force convert enabled, bypassing fast-skip."
+                        )
                 # Use cached estimate from DB if available — avoids the 10s test-encode
                 # on re-runs (e.g. queue re-started after threshold change).
                 _cached_pct = db_rec.get("est_saving_pct")
                 _cached_mb  = db_rec.get("est_saving_mb")
-                if _cached_pct is not None and _cached_mb is not None:
+                _cached_quality = db_rec.get("est_quality")
+                _cached_version = db_rec.get("est_version")
+                _cache_context_ok = (
+                    _cached_quality == quality
+                    and _cached_version == _ESTIMATE_VERSION
+                )
+                if (
+                    not force_reestimate
+                    and _cached_pct is not None
+                    and _cached_mb is not None
+                    and _cache_context_ok
+                ):
                     _est = {
                         "estimated_saving_pct": _cached_pct,
                         "estimated_saving_mb": _cached_mb,
@@ -751,6 +988,12 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                     }
                     _step("estimate", "running", "cached")
                 else:
+                    if force_reestimate and _cached_pct is not None:
+                        _job_log("Force re-estimate enabled — bypassing cached estimate.")
+                    elif _cached_pct is not None and not _cache_context_ok:
+                        _job_log(
+                            f"Estimate cache invalid (quality/version mismatch; cached q={_cached_quality}, v={_cached_version}, current q={quality}, v={_ESTIMATE_VERSION}) — recomputing."
+                        )
                     _step("estimate", "running", "sampling 10s clip\u2026")
                     _est = converter.estimate(full_path, quality=quality)
                 if _est.get("error"):
@@ -770,6 +1013,8 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                         est_sample_cv_pct=_est_cv,
                         est_high_variance=_est_high_variance,
                         est_aggregation=_est_aggregation,
+                        est_quality=quality,
+                        est_version=_ESTIMATE_VERSION,
                     )
                     with _job_lock:
                         _job["files"][idx]["est_pct"] = _est_pct
@@ -778,7 +1023,7 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                         _job["files"][idx]["est_high_variance"] = _est_high_variance
                         _job["files"][idx]["est_aggregation"] = _est_aggregation
                     _threshold = low_savings_threshold_pct
-                    if _est_pct < _threshold and not _est_high_variance:
+                    if _est_pct < _threshold and not _est_high_variance and not force_convert:
                         _step("estimate", "done", f"~{_est_pct}% \u2014 below {_threshold}% threshold")
                         _job_log(f"Estimated savings {_est_pct}% < {_threshold}% threshold \u2014 skipping encode.")
                         db.mark_low_savings(rec_id, _est_pct, _threshold, _utcnow())
@@ -786,6 +1031,10 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                             _job["files"][idx]["status"] = "low_savings"
                         continue
                     else:
+                        if _est_pct < _threshold and force_convert:
+                            _job_log(
+                                f"Estimated savings {_est_pct}% < {_threshold}% threshold \u2014 force convert enabled, continuing."
+                            )
                         _step("estimate", "done", f"~{_est_pct}% \u00b7 {_est_mb}\u202fMB")
                         if estimate_only:
                             # Estimate-only pass: don't compress, leave file pending
@@ -905,7 +1154,18 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
                 "",
             )
             _clog = result.get("conv_logger")
-            if result.get("error") == "no_savings":
+            if result.get("error") == "stopped" or _stop_event.is_set():
+                # Hard-stop is user intent, not a conversion failure.
+                db.reset_done_to_pending(rec_id)
+                if _clog:
+                    _clog.failure("stopped")
+                with _job_lock:
+                    _job["files"][idx]["status"] = "pending"
+                    _job["files"][idx]["ffmpeg_cmd"] = ""
+                    _job["files"][idx]["error_tail"] = ""
+                    _job["files"][idx]["conv_secs"] = _conv_secs
+                _job_log("Stopped by user — returned file to pending.")
+            elif result.get("error") == "no_savings":
                 db.mark_no_saving(rec_id, _utcnow())
                 if _clog:
                     _clog.failure("no_savings")
@@ -944,6 +1204,8 @@ def _queue_worker(files: list[dict], anime_mode: bool, quality: int, low_savings
         _ffmpeg_pid[0]       = 0
         _job["phase"]     = ""
         _job["steps"]     = []
+        _job["ffmpeg_status"] = ""
+        _job["ffmpeg_status_at"] = 0.0
         _job["ocr_batch"] = {"total": 0, "done": 0, "current_file": "", "files": []}
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
@@ -1292,6 +1554,7 @@ def api_start():
     files     = data.get("files", [])
     anime     = bool(data.get("anime_mode", False))
     estimate_only = bool(data.get("estimate_only", False))
+    force_reestimate = bool(data.get("force_reestimate", False))
     settings  = _load_settings()
     quality   = int(settings.get("qsv_quality", config.QSV_QUALITY))
     threshold = int(settings.get("low_savings_threshold_pct", 5))
@@ -1325,11 +1588,20 @@ def api_start():
             "phase":         "",
             "ocr_batch":     {"total": 0, "done": 0, "current_file": "", "files": []},
             "steps":         [],
+            "ffmpeg_status": "",
+            "ffmpeg_status_at": 0.0,
         })
 
     def _worker_safe():
         try:
-            _queue_worker(list(files), anime, quality, threshold, estimate_only)
+            _queue_worker(
+                list(files),
+                anime,
+                quality,
+                threshold,
+                estimate_only,
+                force_reestimate,
+            )
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
@@ -1354,6 +1626,7 @@ def api_status():
     with _job_lock:
         data = dict(_job)
     data["session_started_at"] = _session_started_at
+    data.update(_status_savings_fields(data))
     return jsonify(data)
 
 
@@ -1518,19 +1791,20 @@ def api_trash():
 
 @app.route("/api/update_status", methods=["POST"])
 def api_update_status():
-    """Manually set the status and/or force_sw flag of one or more files."""
+    """Manually set status and/or force flags of one or more files."""
     data  = request.get_json(force=True) or {}
     paths = data.get("paths", [])
     new_status = data.get("status", "")
     force_sw   = data.get("force_sw", None)  # None = don't change it
+    force_convert = data.get("force_convert", None)  # None = don't change it
 
     ALLOWED = {"skipped", "pending", "failed"}
     if new_status and new_status not in ALLOWED:
         return jsonify({"error": f"status must be one of {ALLOWED}"}), 400
     if not paths:
         return jsonify({"error": "No paths provided"}), 400
-    if not new_status and force_sw is None:
-        return jsonify({"error": "Provide at least one of: status, force_sw"}), 400
+    if not new_status and force_sw is None and force_convert is None:
+        return jsonify({"error": "Provide at least one of: status, force_sw, force_convert"}), 400
 
     updated = 0
     with db._connect() as con:
@@ -1567,6 +1841,12 @@ def api_update_status():
                 cur.execute(
                     "UPDATE conversions SET force_sw=? WHERE source_path=?",
                     (1 if force_sw else 0, norm),
+                )
+                updated += cur.rowcount
+            if force_convert is not None:
+                cur.execute(
+                    "UPDATE conversions SET force_convert=? WHERE source_path=?",
+                    (1 if force_convert else 0, norm),
                 )
                 updated += cur.rowcount
     return jsonify({"ok": True, "updated": updated})
@@ -1634,6 +1914,100 @@ def api_probe_streams():
         return jsonify({"error": "ffprobe failed"}), 500
     parsed = scanner._parse_probe(probe)
     return jsonify({"ok": True, "streams": parsed["streams"]})
+
+
+@app.route("/api/subtitle_preview")
+def api_subtitle_preview():
+    """Extract a short subtitle text preview and detect likely language/script."""
+    path = request.args.get("path", "").strip()
+    stream_index_raw = request.args.get("stream_index", "").strip()
+    metadata_language = request.args.get("metadata_language", "").strip()
+
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    try:
+        stream_index = int(stream_index_raw)
+    except Exception:
+        return jsonify({"error": "Invalid stream_index"}), 400
+
+    try:
+        max_lines = int(request.args.get("max_lines", 120))
+    except Exception:
+        max_lines = 120
+    max_lines = max(20, min(300, max_lines))
+
+    probe = scanner._ffprobe(path)
+    if not probe:
+        return jsonify({"error": "ffprobe failed"}), 500
+
+    stream = None
+    for s in probe.get("streams", []):
+        if int(s.get("index", -1)) == stream_index:
+            stream = s
+            break
+
+    if not stream or (stream.get("codec_type") or "").lower() != "subtitle":
+        return jsonify({"error": "Subtitle stream not found"}), 404
+
+    codec_name = (stream.get("codec_name") or "").lower()
+    if codec_name in {"hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "vobsub", "xsub"}:
+        return jsonify({
+            "error": "Image-based subtitle track cannot be previewed as text without OCR.",
+            "is_text_subtitle": False,
+        }), 422
+
+    cmd = [
+        "ffmpeg", "-v", "error",
+        "-i", path,
+        "-map", f"0:{stream_index}",
+        "-f", "srt", "-",
+    ]
+
+    try:
+        proc = _sp.run(cmd, capture_output=True, timeout=40)
+    except Exception as exc:
+        return jsonify({"error": f"ffmpeg launch failed: {exc}"}), 500
+
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        tail = "\n".join(err.splitlines()[-25:]) if err else "subtitle extraction failed"
+        return jsonify({"error": tail}), 500
+
+    text = (proc.stdout or b"").decode("utf-8", "replace")
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        preview_text = "\n".join(lines[:max_lines]) + "\n\n[Preview truncated]"
+    else:
+        preview_text = text
+
+    dialogue_text = _subtitle_payload_text(text)
+    detected = _detect_subtitle_language(dialogue_text)
+
+    stream_lang = ((stream.get("tags") or {}).get("language") or "")
+    metadata_norm = _normalise_lang_code(metadata_language or stream_lang)
+    detected_norm = _normalise_lang_code(detected.get("code", "und"))
+    mismatch = (
+        metadata_norm != "und"
+        and detected_norm not in {"und", "latin"}
+        and metadata_norm != detected_norm
+    )
+
+    return jsonify({
+        "ok": True,
+        "path": path,
+        "stream_index": stream_index,
+        "codec": codec_name,
+        "preview_text": preview_text,
+        "preview_line_count": len(lines),
+        "metadata_language": metadata_norm,
+        "detected_language": detected,
+        "language_mismatch": mismatch,
+        "is_text_subtitle": True,
+    })
 
 
 @app.route("/api/stream_edit_status")
@@ -2387,6 +2761,7 @@ def _load_db_file_dict(row, root_fwd: str = "") -> dict:
         "streams":         None,
         "status":          status,
         "force_sw":        bool(row["force_sw"]),
+        "force_convert":   bool(row["force_convert"]),
         "dropped_streams": dropped,
         "est_pct":         row["est_saving_pct"],
         "est_mb":          row["est_saving_mb"],
@@ -2422,7 +2797,7 @@ def api_load_from_db():
                c.output_size_mb, c.saved_mb, c.saved_pct,
              c.est_saving_pct, c.est_saving_mb,
              c.est_sample_cv_pct, c.est_high_variance, c.est_aggregation,
-               c.force_sw, c.dropped_streams
+             c.force_sw, c.force_convert, c.dropped_streams
         FROM conversions c
         INNER JOIN (
             SELECT source_path, MAX(id) AS max_id
@@ -2541,10 +2916,15 @@ def api_build_prep_queue():
         if folder in seeded_folders:
             folders_already_seeded += 1
             continue
-        # Keep only files that passed estimation (or haven't been estimated yet)
+        # Keep files that passed estimation, were not estimated yet, or were
+        # flagged high-variance (conversion path bypasses low-savings auto-skip).
         good = [
             c for c in candidates
-            if c["est_saving_pct"] is None or c["est_saving_pct"] >= threshold
+            if (
+                c["est_saving_pct"] is None
+                or c["est_saving_pct"] >= threshold
+                or bool(c["est_high_variance"])
+            )
         ]
         if not good:
             folders_no_candidates += 1

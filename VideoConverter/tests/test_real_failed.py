@@ -7,6 +7,11 @@ import os
 import shutil
 import threading
 
+import pytest
+
+if __name__ != "__main__":
+    pytest.skip("manual real-file regression script; not a pytest test module", allow_module_level=True)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import converter
 

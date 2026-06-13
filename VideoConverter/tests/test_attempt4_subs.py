@@ -13,6 +13,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
+if __name__ != "__main__":
+    pytest.skip("manual remux investigation script; not a pytest test module", allow_module_level=True)
+
 if len(sys.argv) < 2:
     # Default to ep08
     INPUT = r"C:\Users\scott\Downloads\Anime\_Ao-chan Can't Study\Ao-chan Can't Study - 08 [6FA0FA94].mkv"

@@ -169,7 +169,7 @@ def test_api_start_empty_files_400(client):
 # ---------------------------------------------------------------------------
 
 def test_api_stop(client):
-    """POST /api/stop signals stop_event and eventually state goes to done."""
+    """POST /api/stop triggers the soft-stop path."""
     event = threading.Event()
 
     def _blocking(*args, **kwargs):
@@ -191,7 +191,7 @@ def test_api_stop(client):
 
     assert stop_resp.status_code == 200
     assert stop_resp.get_json()["ok"] is True
-    assert flask_app._stop_event.is_set()
+    assert flask_app._soft_stop_event.is_set()
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +263,7 @@ def test_db_done_on_success(client, tmp_path, fresh_db):
     import sqlite3
     conn = sqlite3.connect(fresh_db)
     rows = conn.execute(
-        "SELECT status FROM conversions WHERE source_path = ?", (test_src,)
+        "SELECT status FROM conversions WHERE source_path = ?", (test_src.replace("\\", "/"),)
     ).fetchall()
     conn.close()
     assert rows, "No DB record found"
@@ -294,7 +294,7 @@ def test_db_failed_on_error(client, tmp_path, fresh_db):
     import sqlite3
     conn = sqlite3.connect(fresh_db)
     rows = conn.execute(
-        "SELECT status FROM conversions WHERE source_path = ?", (test_src,)
+        "SELECT status FROM conversions WHERE source_path = ?", (test_src.replace("\\", "/"),)
     ).fetchall()
     conn.close()
     assert rows
@@ -526,8 +526,8 @@ def test_stop_mid_queue_remaining_files_stay_pending(client, tmp_path, fresh_db)
 
     status = client.get("/api/status").get_json()
     assert status["state"] == "stopped"
-    # First file was being converted when stopped
-    assert status["files"][0]["status"] == "failed"
+    # First file was being converted when stopped — should return to pending
+    assert status["files"][0]["status"] == "pending"
     # Remaining files were never started — must stay pending
     assert status["files"][1]["status"] == "pending", (
         f"files[1] should be pending, got {status['files'][1]['status']}"
@@ -535,6 +535,153 @@ def test_stop_mid_queue_remaining_files_stay_pending(client, tmp_path, fresh_db)
     assert status["files"][2]["status"] == "pending", (
         f"files[2] should be pending, got {status['files'][2]['status']}"
     )
+
+
+def test_high_variance_estimate_does_not_mark_low_savings(client, tmp_path, fresh_db):
+    """Low estimate with high variance should proceed to conversion, not auto-skip."""
+    src = str(FIXTURES / "h264_short.mkv")
+    shutil.copy(src, str(tmp_path / "h264_short.mkv"))
+    test_src = str(tmp_path / "h264_short.mkv")
+
+    with patch.object(converter, "estimate", return_value={
+        "estimated_saving_pct": 0,
+        "estimated_saving_mb": 0.0,
+        "sample_count": 5,
+        "sample_cv_pct": 78.6,
+        "aggregation": "trimmed_mean_20",
+        "high_variance": True,
+        "error": None,
+    }), patch.object(converter, "convert_video", return_value={
+        "ok": True,
+        "output_path": test_src,
+        "output_size_mb": 1.0,
+        "saved_mb": 0.1,
+        "saved_pct": 1,
+        "encoder_used": "hevc_qsv",
+        "error": None,
+    }) as mock_convert:
+        client.post("/api/start", json={
+            "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
+            "anime_mode": False,
+            "low_savings_threshold_pct": 5,
+        })
+        assert _wait_done(client), "Worker did not finish in time"
+
+    assert mock_convert.call_count == 1, "Expected conversion to run despite low estimated savings"
+
+    import sqlite3
+    conn = sqlite3.connect(fresh_db)
+    row = conn.execute(
+        "SELECT status FROM conversions WHERE source_path = ?", (test_src.replace("\\", "/"),)
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "done", f"Expected done status, got: {row[0]}"
+
+    status = client.get("/api/status").get_json()
+    assert status["files"][0]["status"] == "done"
+
+
+def test_force_convert_bypasses_low_savings_skip(client, tmp_path, fresh_db):
+    """force_convert should override low-savings estimate auto-skip."""
+    src = str(FIXTURES / "h264_short.mkv")
+    shutil.copy(src, str(tmp_path / "h264_short.mkv"))
+    test_src = str(tmp_path / "h264_short.mkv")
+
+    # Seed DB row and enable force_convert before starting worker.
+    mtime = os.path.getmtime(test_src)
+    rec_id = db.upsert_pending(test_src, mtime)
+    with db._connect() as con:
+        con.execute("UPDATE conversions SET force_convert=1 WHERE id=?", (rec_id,))
+
+    with patch.object(converter, "estimate", return_value={
+        "estimated_saving_pct": 1,
+        "estimated_saving_mb": 0.5,
+        "sample_count": 5,
+        "sample_cv_pct": 3.2,
+        "aggregation": "mean",
+        "high_variance": False,
+        "error": None,
+    }), patch.object(converter, "convert_video", return_value={
+        "ok": True,
+        "output_path": test_src,
+        "output_size_mb": 1.0,
+        "saved_mb": 0.1,
+        "saved_pct": 1,
+        "encoder_used": "hevc_qsv",
+        "error": None,
+    }) as mock_convert:
+        client.post("/api/start", json={
+            "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
+            "anime_mode": False,
+            "low_savings_threshold_pct": 5,
+        })
+        assert _wait_done(client), "Worker did not finish in time"
+
+    assert mock_convert.call_count == 1, "Expected conversion to run when force_convert is enabled"
+
+    import sqlite3
+    conn = sqlite3.connect(fresh_db)
+    row = conn.execute(
+        "SELECT status FROM conversions WHERE source_path = ? ORDER BY id DESC LIMIT 1",
+        (test_src.replace("\\", "/"),),
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "done", f"Expected done status, got: {row[0]}"
+
+
+def test_force_convert_bypasses_hevc_fastskip(client, tmp_path, fresh_db):
+    """force_convert should bypass HEVC low-bitrate fast-skip and still run conversion."""
+    src = str(FIXTURES / "h264_short.mkv")
+    shutil.copy(src, str(tmp_path / "h264_short.mkv"))
+    test_src = str(tmp_path / "h264_short.mkv")
+
+    # Seed DB row with HEVC + very low bitrate to trigger fast-skip heuristic.
+    mtime = os.path.getmtime(test_src)
+    rec_id = db.upsert_pending(test_src, mtime, source_codec="HEVC")
+    with db._connect() as con:
+        con.execute(
+            "UPDATE conversions SET source_bitrate_kbps=500, source_codec='HEVC', force_convert=1 WHERE id=?",
+            (rec_id,),
+        )
+
+    with patch.object(converter, "estimate", return_value={
+        "estimated_saving_pct": 1,
+        "estimated_saving_mb": 0.5,
+        "sample_count": 5,
+        "sample_cv_pct": 3.2,
+        "aggregation": "mean",
+        "high_variance": False,
+        "error": None,
+    }) as mock_estimate, patch.object(converter, "convert_video", return_value={
+        "ok": True,
+        "output_path": test_src,
+        "output_size_mb": 1.0,
+        "saved_mb": 0.1,
+        "saved_pct": 1,
+        "encoder_used": "hevc_qsv",
+        "error": None,
+    }) as mock_convert:
+        client.post("/api/start", json={
+            "files": [{"full_path": test_src, "name": "h264_short.mkv", "status": "pending"}],
+            "anime_mode": False,
+            "low_savings_threshold_pct": 5,
+        })
+        assert _wait_done(client), "Worker did not finish in time"
+
+    assert mock_estimate.call_count == 1, "Expected estimate to run when force_convert bypasses fast-skip"
+    assert mock_convert.call_count == 1, "Expected conversion to run when force_convert is enabled"
+
+    import sqlite3
+    conn = sqlite3.connect(fresh_db)
+    row = conn.execute(
+        "SELECT status FROM conversions WHERE source_path = ? ORDER BY id DESC LIMIT 1",
+        (test_src.replace("\\", "/"),),
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "done", f"Expected done status, got: {row[0]}"
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +739,7 @@ def test_track_verify_fail_marks_failed_and_deletes_output(client, tmp_path, fre
     import sqlite3
     conn = sqlite3.connect(fresh_db)
     rows = conn.execute(
-        "SELECT status FROM conversions WHERE source_path = ?", (test_src,)
+        "SELECT status FROM conversions WHERE source_path = ?", (test_src.replace("\\", "/"),)
     ).fetchall()
     conn.close()
     assert rows and rows[0][0] == "failed", f"Expected DB status=failed, got: {rows}"
@@ -638,7 +785,7 @@ def test_track_verify_pass_deletes_source(client, tmp_path, fresh_db):
     import sqlite3
     conn = sqlite3.connect(fresh_db)
     rows = conn.execute(
-        "SELECT status FROM conversions WHERE source_path = ?", (test_src,)
+        "SELECT status FROM conversions WHERE source_path = ?", (test_src.replace("\\", "/"),)
     ).fetchall()
     conn.close()
     assert rows and rows[0][0] == "done"

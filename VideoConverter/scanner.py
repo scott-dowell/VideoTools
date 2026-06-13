@@ -138,6 +138,8 @@ def _parse_probe(probe: dict) -> dict:
         "is_hi10":       bool,
         "streams":       {...},
         "duration_secs": float,
+                "video_track_count": int,
+                "audio_track_count": int,
       }
     """
     video_stream: dict | None = None
@@ -182,6 +184,8 @@ def _parse_probe(probe: dict) -> dict:
             "is_hi10":       False,
             "streams":       {"video": None, "audio": audio_streams, "subs": sub_streams},
             "duration_secs": duration_secs,
+            "video_track_count": 0,
+            "audio_track_count": len(audio_streams),
         }
 
     codec_name = video_stream.get("codec_name", "")
@@ -214,6 +218,8 @@ def _parse_probe(probe: dict) -> dict:
         "is_hi10":       is_hi10,
         "streams":       {"video": video_info, "audio": audio_streams, "subs": sub_streams},
         "duration_secs": duration_secs,
+        "video_track_count": 1,
+        "audio_track_count": len(audio_streams),
     }
 
 
@@ -359,6 +365,8 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "bitrate_kbps":  fallback_rec.get("source_bitrate_kbps"),
                         "codec":         fallback_rec.get("source_codec"),
                         "duration_secs": fallback_rec.get("source_duration_secs"),
+                        "video_track_count": fallback_rec.get("source_video_track_count"),
+                        "audio_track_count": fallback_rec.get("source_audio_track_count"),
                         "output_size_mb": fallback_rec.get("output_size_mb"),
                         "saved_mb":      fallback_rec.get("saved_mb"),
                         "saved_pct":     fallback_rec.get("saved_pct"),
@@ -402,6 +410,9 @@ def walk(root: str) -> Generator[dict, None, None]:
                     saved_pct_val = db_info.get("saved_pct")
                     est_pct_val = db_info.get("est_saving_pct")
                     est_mb_val  = db_info.get("est_saving_mb")
+                    est_cv_val  = db_info.get("est_sample_cv_pct")
+                    est_hv_val  = bool(db_info.get("est_high_variance", False))
+                    est_agg_val = db_info.get("est_aggregation")
                     folder_files.append({
                         "full_path":    fp,
                         "name":         filename,
@@ -410,6 +421,8 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "codec":        cached_codec,
                         "duration":     _format_duration(cached_dur) if cached_dur else "",
                         "bitrate_kbps": cached_bitrate,
+                        "video_track_count": db_info.get("video_track_count"),
+                        "audio_track_count": db_info.get("audio_track_count"),
                         "is_hi10":      False,
                         "streams":      None,
                         "status":       "done",
@@ -418,6 +431,9 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "pct":          str(saved_pct_val) if saved_pct_val is not None else None,
                         "est_pct":      est_pct_val,
                         "est_mb":       est_mb_val,
+                        "est_cv":       est_cv_val,
+                        "est_high_variance": est_hv_val,
+                        "est_aggregation": est_agg_val,
                     })
                     if cached_bitrate is None:
                         record_id = db_info.get("id")
@@ -445,6 +461,8 @@ def walk(root: str) -> Generator[dict, None, None]:
                 "codec":           cached_codec,
                 "duration":        _format_duration(cached_dur) if cached_dur else "",
                 "bitrate_kbps":    cached_bitrate,
+                "video_track_count": db_info.get("video_track_count"),
+                "audio_track_count": db_info.get("audio_track_count"),
                 "is_hi10":         False,
                 "streams":         None,
                 "status":          db_status if (db_status and db_status not in ("pending", "queued")) else "pending",
@@ -452,6 +470,9 @@ def walk(root: str) -> Generator[dict, None, None]:
                 "dropped_streams": db_info.get("dropped_streams", []),
                 "est_pct":         db_info.get("est_saving_pct"),
                 "est_mb":          db_info.get("est_saving_mb"),
+                "est_cv":          db_info.get("est_sample_cv_pct"),
+                "est_high_variance": bool(db_info.get("est_high_variance", False)),
+                "est_aggregation": db_info.get("est_aggregation"),
             }
 
             folder_files.append(file_dict)
@@ -537,6 +558,8 @@ def walk(root: str) -> Generator[dict, None, None]:
         video_info    = parsed["streams"]["video"]
         display_codec = video_info["codec"] if video_info else "unknown"
         dur_secs      = parsed["duration_secs"]
+        v_tracks      = parsed.get("video_track_count", 0)
+        a_tracks      = parsed.get("audio_track_count", 0)
         if not size_bytes:
             try:
                 size_bytes = os.path.getsize(fp)
@@ -547,6 +570,7 @@ def walk(root: str) -> Generator[dict, None, None]:
 
         # Persist probe result (including file size) so future scans skip ffprobe.
         db.save_probe_result(fp, mtime, display_codec, bitrate_kbps, dur_secs,
+                     video_track_count=v_tracks, audio_track_count=a_tracks,
                              source_size_bytes=size_bytes, source_size_mb=size_mb)
 
         yield {
@@ -557,6 +581,8 @@ def walk(root: str) -> Generator[dict, None, None]:
             "is_hi10":     parsed["is_hi10"],
             "streams":     parsed["streams"],
             "bitrate_kbps": bitrate_kbps,
+            "video_track_count": v_tracks,
+            "audio_track_count": a_tracks,
         }
         kept += 1
 
@@ -577,6 +603,8 @@ def walk(root: str) -> Generator[dict, None, None]:
         video_info    = parsed["streams"]["video"]
         display_codec = video_info["codec"] if video_info else "HEVC"
         dur_secs      = parsed["duration_secs"]
+        v_tracks      = parsed.get("video_track_count", 0)
+        a_tracks      = parsed.get("audio_track_count", 0)
         try:
             size_bytes = os.path.getsize(fp)
         except OSError:
@@ -588,7 +616,15 @@ def walk(root: str) -> Generator[dict, None, None]:
         # (save_probe_result updates source_duration_secs which is reused for done rows)
         try:
             mtime = os.stat(fp).st_mtime
-            db.save_probe_result(fp, mtime, display_codec, bitrate_kbps, dur_secs)
+            db.save_probe_result(
+                fp,
+                mtime,
+                display_codec,
+                bitrate_kbps,
+                dur_secs,
+                video_track_count=v_tracks,
+                audio_track_count=a_tracks,
+            )
         except OSError:
             pass
         yield {
@@ -599,6 +635,8 @@ def walk(root: str) -> Generator[dict, None, None]:
             "is_hi10":     parsed["is_hi10"],
             "streams":     parsed["streams"],
             "bitrate_kbps": bitrate_kbps,
+            "video_track_count": v_tracks,
+            "audio_track_count": a_tracks,
         }
 
     yield {

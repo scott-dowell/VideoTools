@@ -35,6 +35,11 @@ import sys
 import tempfile
 import time
 
+import pytest
+
+if __name__ != "__main__":
+    pytest.skip("manual OCR comparison script; not a pytest test module", allow_module_level=True)
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------

@@ -92,6 +92,8 @@ def init_db(db_path: str) -> None:
                 source_hash          TEXT,
                 source_bitrate_kbps  INTEGER,
                 source_duration_secs REAL,
+                source_video_track_count INTEGER,
+                source_audio_track_count INTEGER,
                 output_path          TEXT,
                 output_size_mb       REAL,
                 output_hash          TEXT,
@@ -100,6 +102,7 @@ def init_db(db_path: str) -> None:
                 status               TEXT    NOT NULL DEFAULT 'pending',
                 anime_mode        INTEGER DEFAULT 0,
                 force_sw          INTEGER DEFAULT 0,
+                force_convert     INTEGER DEFAULT 0,
                 encoder_used      TEXT,
                 started_at        TEXT,
                 completed_at      TEXT,
@@ -117,11 +120,19 @@ def init_db(db_path: str) -> None:
             ("output_hash",          "TEXT"),
             ("source_bitrate_kbps",  "INTEGER"),
             ("source_duration_secs", "REAL"),
+            ("source_video_track_count", "INTEGER"),
+            ("source_audio_track_count", "INTEGER"),
             ("output_bitrate_kbps",  "INTEGER"),
             ("force_sw",             "INTEGER DEFAULT 0"),
+            ("force_convert",        "INTEGER DEFAULT 0"),
             ("dropped_streams",       "TEXT"),
             ("est_saving_pct",        "INTEGER"),
             ("est_saving_mb",         "REAL"),
+            ("est_sample_cv_pct",     "REAL"),
+            ("est_high_variance",     "INTEGER DEFAULT 0"),
+            ("est_aggregation",       "TEXT"),
+            ("est_quality",           "INTEGER"),
+            ("est_version",           "INTEGER"),
         ]:
             if col not in existing:
                 conn.execute(f"ALTER TABLE conversions ADD COLUMN {col} {typedef}")
@@ -253,9 +264,12 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             f"""
             SELECT c.id, c.source_path, c.status,
                    c.source_bitrate_kbps, c.source_codec, c.source_duration_secs,
+                   c.source_video_track_count, c.source_audio_track_count,
                    c.output_bitrate_kbps, c.output_size_mb, c.saved_mb, c.saved_pct,
-                   c.force_sw, c.dropped_streams,
-                   c.est_saving_pct, c.est_saving_mb
+                                     c.force_sw, c.force_convert, c.dropped_streams,
+                     c.est_saving_pct, c.est_saving_mb,
+                    c.est_sample_cv_pct, c.est_high_variance, c.est_aggregation,
+                    c.est_quality, c.est_version
               FROM conversions c
              INNER JOIN (
                  SELECT source_path, MAX(id) AS max_id
@@ -286,13 +300,21 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             "bitrate_kbps":   bitrate,
             "codec":          row["source_codec"],
             "duration_secs":  row["source_duration_secs"],
+            "video_track_count": row["source_video_track_count"],
+            "audio_track_count": row["source_audio_track_count"],
             "output_size_mb": row["output_size_mb"],
             "saved_mb":       row["saved_mb"],
             "saved_pct":      row["saved_pct"],
             "force_sw":       bool(row["force_sw"]),
+            "force_convert":  bool(row["force_convert"]),
             "dropped_streams": _json_loads_safe(row["dropped_streams"]),
             "est_saving_pct": row["est_saving_pct"],
             "est_saving_mb":  row["est_saving_mb"],
+            "est_sample_cv_pct": row["est_sample_cv_pct"],
+            "est_high_variance": bool(row["est_high_variance"]),
+            "est_aggregation": row["est_aggregation"],
+            "est_quality": row["est_quality"],
+            "est_version": row["est_version"],
         }
     return result
 
@@ -479,12 +501,40 @@ def mark_low_savings(record_id: int, est_pct: int, threshold_pct: int, completed
         )
 
 
-def save_estimate(record_id: int, est_pct: int, est_mb: float) -> None:
+def save_estimate(
+    record_id: int,
+    est_pct: int,
+    est_mb: float,
+    est_sample_cv_pct: float | None = None,
+    est_high_variance: bool = False,
+    est_aggregation: str | None = None,
+    est_quality: int | None = None,
+    est_version: int | None = None,
+) -> None:
     """Persist the estimate result so it is not re-computed on subsequent runs."""
     with _connect() as conn:
         conn.execute(
-            "UPDATE conversions SET est_saving_pct = ?, est_saving_mb = ? WHERE id = ?",
-            (est_pct, est_mb, record_id),
+            """
+            UPDATE conversions
+               SET est_saving_pct = ?,
+                   est_saving_mb = ?,
+                   est_sample_cv_pct = ?,
+                   est_high_variance = ?,
+                   est_aggregation = ?,
+                   est_quality = ?,
+                   est_version = ?
+             WHERE id = ?
+            """,
+            (
+                est_pct,
+                est_mb,
+                est_sample_cv_pct,
+                1 if est_high_variance else 0,
+                est_aggregation,
+                est_quality,
+                est_version,
+                record_id,
+            ),
         )
 
 
@@ -530,19 +580,21 @@ def sync_after_stream_edit(
     source_codec: str | None,
     source_bitrate_kbps: int | None,
     source_duration_secs: float | None,
+    source_video_track_count: int | None,
+    source_audio_track_count: int | None,
     content_hash: str | None,
     completed_at: str,
 ) -> str:
     """Persist file metadata after in-place stream-edit replacement.
 
-    If the latest record for this path was already 'done', keep it done so the
-    scanner doesn't re-queue the edited file as pending. Otherwise keep pending.
-    Returns the status that was written.
+    If the file has already been converted before, keep the replacement as
+    'done' so it stays out of the queue. Otherwise leave it 'pending' so the
+    user can edit streams first and convert later.
     """
     source_path = _norm(source_path)
     with _connect() as conn:
         prev = conn.execute(
-            "SELECT status, anime_mode, force_sw FROM conversions "
+            "SELECT status, anime_mode, force_sw, force_convert FROM conversions "
             "WHERE source_path = ? ORDER BY id DESC LIMIT 1",
             (source_path,),
         ).fetchone()
@@ -553,17 +605,19 @@ def sync_after_stream_edit(
         new_status = "done" if done_exists else "pending"
         anime_mode = int(prev["anime_mode"]) if prev else 0
         force_sw = int(prev["force_sw"]) if prev else 0
+        force_convert = int(prev["force_convert"]) if prev else 0
 
         conn.execute(
             """
             INSERT INTO conversions (
                 source_path, source_mtime, source_size_bytes, source_size_mb,
                 source_codec, source_hash, source_bitrate_kbps, source_duration_secs,
-                status, anime_mode, force_sw,
+                source_video_track_count, source_audio_track_count,
+                status, anime_mode, force_sw, force_convert,
                 output_path, output_size_mb, output_hash, output_bitrate_kbps,
                 encoder_used, completed_at, dropped_streams, error_tail, started_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             ON CONFLICT(source_path, source_mtime) DO UPDATE SET
                 source_size_bytes    = excluded.source_size_bytes,
                 source_size_mb       = excluded.source_size_mb,
@@ -571,9 +625,12 @@ def sync_after_stream_edit(
                 source_hash          = excluded.source_hash,
                 source_bitrate_kbps  = excluded.source_bitrate_kbps,
                 source_duration_secs = excluded.source_duration_secs,
+                source_video_track_count = excluded.source_video_track_count,
+                source_audio_track_count = excluded.source_audio_track_count,
                 status               = excluded.status,
                 anime_mode           = excluded.anime_mode,
                 force_sw             = excluded.force_sw,
+                force_convert        = excluded.force_convert,
                 output_path          = excluded.output_path,
                 output_size_mb       = excluded.output_size_mb,
                 output_hash          = excluded.output_hash,
@@ -593,9 +650,12 @@ def sync_after_stream_edit(
                 content_hash,
                 source_bitrate_kbps,
                 source_duration_secs,
+                source_video_track_count,
+                source_audio_track_count,
                 new_status,
                 anime_mode,
                 force_sw,
+                force_convert,
                 source_path,
                 source_size_mb,
                 content_hash,
@@ -614,6 +674,8 @@ def save_probe_result(
     codec: str | None,
     bitrate_kbps: int | None,
     duration_secs: float | None,
+    video_track_count: int | None = None,
+    audio_track_count: int | None = None,
     source_size_bytes: int | None = None,
     source_size_mb: float | None = None,
 ) -> None:
@@ -629,16 +691,20 @@ def save_probe_result(
             INSERT INTO conversions
                 (source_path, source_mtime, source_codec,
                  source_bitrate_kbps, source_duration_secs,
+                 source_video_track_count, source_audio_track_count,
                  source_size_bytes, source_size_mb, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
             ON CONFLICT (source_path, source_mtime) DO UPDATE SET
                 source_codec         = COALESCE(conversions.source_codec,         excluded.source_codec),
                 source_bitrate_kbps  = excluded.source_bitrate_kbps,
                 source_duration_secs = excluded.source_duration_secs,
+                source_video_track_count = excluded.source_video_track_count,
+                source_audio_track_count = excluded.source_audio_track_count,
                 source_size_bytes    = COALESCE(conversions.source_size_bytes,    excluded.source_size_bytes),
                 source_size_mb       = COALESCE(conversions.source_size_mb,       excluded.source_size_mb)
             """,
             (source_path, source_mtime, codec, bitrate_kbps, duration_secs,
+             video_track_count, audio_track_count,
              source_size_bytes, source_size_mb),
         )
 

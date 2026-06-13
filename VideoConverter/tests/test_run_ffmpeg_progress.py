@@ -56,6 +56,7 @@ def test_run_ffmpeg_progress_from_carriage_return_lines():
             logs.append,
             stop,
             duration_secs=100.0,
+            source_fps=24.0,
             progress_cb=lambda pct, fps, eta: callbacks.append((pct, fps, eta)),
         )
 
@@ -71,12 +72,14 @@ def test_run_ffmpeg_progress_from_key_value_events():
     stop = threading.Event()
 
     out = (
-        "out_time_ms=10000000\n"
+        "frame=100\n"
         "fps=50.0\n"
+        "out_time_ms=10000000\n"
         "speed=1.25x\n"
         "progress=continue\n"
-        "out_time_ms=60000000\n"
+        "frame=600\n"
         "fps=52.0\n"
+        "out_time_ms=60000000\n"
         "speed=1.30x\n"
         "progress=continue\n"
         "progress=end\n"
@@ -88,6 +91,7 @@ def test_run_ffmpeg_progress_from_key_value_events():
             logs.append,
             stop,
             duration_secs=100.0,
+            source_fps=24.0,
             progress_cb=lambda pct, fps, eta: callbacks.append((pct, fps, eta)),
         )
 

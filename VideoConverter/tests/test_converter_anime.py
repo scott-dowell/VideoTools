@@ -38,10 +38,10 @@ def _logs():
 # ---------------------------------------------------------------------------
 
 def test_aac_encoder_windows():
-    """`_aac_encoder()` returns 'aac_mf' on win32."""
+    """`_aac_encoder()` returns 'aac' on win32."""
     with patch("sys.platform", "win32"):
         enc = converter._aac_encoder()
-    assert enc == "aac_mf"
+    assert enc == "aac"
 
 
 def test_aac_encoder_linux():
@@ -168,6 +168,23 @@ def test_remux_mkv_multitrack(tmp_path):
     assert all(c in ("aac", "aac_latm") for c in audio_codecs), (
         f"Expected all audio AAC, got: {audio_codecs}"
     )
+
+
+def test_remux_mkv_multitrack_with_progress_cb(tmp_path):
+    """remux_to_mp4 should not crash when progress_cb is provided."""
+    out_dir = str(tmp_path / "out")
+    msgs, log = _logs()
+    stop = threading.Event()
+    calls = []
+
+    ok, enc = converter.remux_to_mp4(
+        str(FIXTURES / "h264_multitrack.mkv"),
+        out_dir, log, stop,
+        progress_cb=lambda pct, fps, eta: calls.append((pct, fps, eta)),
+    )
+
+    assert ok, f"Remux with progress callback failed; logs: {msgs}"
+    assert enc in ("copy", "hevc_qsv", "libx265")
 
 
 # ---------------------------------------------------------------------------

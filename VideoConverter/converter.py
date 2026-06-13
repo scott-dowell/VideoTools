@@ -377,6 +377,43 @@ def _parse_time(ts: str) -> float:
         return 0.0
 
 
+def _fmt_ffmpeg_time(seconds: float) -> str:
+    """Format seconds as HH:MM:SS.xx for live ffmpeg status display."""
+    try:
+        if seconds <= 0:
+            return "00:00:00.00"
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = seconds % 60
+        return f"{h:02d}:{m:02d}:{s:05.2f}"
+    except Exception:
+        return "00:00:00.00"
+
+
+def _frame_progress_pct(frame_n: float, duration_secs: float, source_fps: float) -> float:
+    """Estimate percent complete from encoded frame count."""
+    try:
+        if duration_secs <= 0 or source_fps <= 0:
+            return 0.0
+        total_frames = duration_secs * source_fps
+        if total_frames <= 0:
+            return 0.0
+        return min(100.0, (frame_n / total_frames) * 100.0)
+    except Exception:
+        return 0.0
+
+
+def _frame_eta_secs(frame_n: float, duration_secs: float, source_fps: float, fps_now: float) -> int:
+    """Estimate remaining seconds from frame count and current encode FPS."""
+    try:
+        if duration_secs <= 0 or source_fps <= 0 or fps_now <= 0:
+            return 0
+        total_frames = duration_secs * source_fps
+        return max(0, int((total_frames - frame_n) / fps_now))
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Core encode helper
 # ---------------------------------------------------------------------------
@@ -464,9 +501,32 @@ def _run_ffmpeg(
         # as hung (e.g. QSV driver freeze at startup) and kill it.
         _HUNG_TIMEOUT_SECS = 120
         _last_output_time  = time.monotonic()
-        _kv_elapsed = 0.0
+        _kv_frame = "0"
+        _kv_bitrate = "N/A"
         _kv_fps = 0.0
         _kv_speed = 0.0
+
+        def _emit_frame_progress() -> None:
+            if not progress_cb or duration_secs <= 0 or source_fps <= 0:
+                return
+            try:
+                frame_n = float(_kv_frame or 0)
+            except Exception:
+                frame_n = 0.0
+            pct = _frame_progress_pct(frame_n, duration_secs, source_fps)
+            eta_secs = _frame_eta_secs(frame_n, duration_secs, source_fps, _kv_fps)
+            try:
+                progress_cb(pct, _kv_fps, eta_secs)
+            except Exception:
+                pass
+
+        def _emit_kv_status() -> None:
+            fps_txt = f"{_kv_fps:.1f}" if _kv_fps > 0 else "N/A"
+            spd_txt = f"{_kv_speed:.2f}x" if _kv_speed > 0 else "N/A"
+            log(
+                f"__ffstatus__:frame={_kv_frame} fps={fps_txt} "
+                f"bitrate={_kv_bitrate} speed={spd_txt}"
+            )
 
         while True:
             try:
@@ -518,40 +578,38 @@ def _run_ffmpeg(
                     k = k.strip()
                     v = v.strip()
                     if k in _PROGRESS_KV_KEYS:
-                        if k in ("out_time_ms", "out_time_us"):
-                            try:
-                                _kv_elapsed = float(v) / 1_000_000.0
-                            except Exception:
-                                pass
-                        elif k == "out_time":
-                            _kv_elapsed = _parse_time(v)
+                        if k == "frame":
+                            _kv_frame = v or _kv_frame
+                            _emit_kv_status()
+                            _emit_frame_progress()
+                        elif k == "bitrate":
+                            _kv_bitrate = v or _kv_bitrate
+                            _emit_kv_status()
                         elif k == "fps":
                             try:
                                 _kv_fps = float(v)
+                                _emit_kv_status()
+                                _emit_frame_progress()
                             except Exception:
                                 pass
                         elif k == "speed":
                             try:
                                 _kv_speed = float(v.rstrip("x"))
+                                _emit_kv_status()
+                                _emit_frame_progress()
                             except Exception:
                                 pass
                         elif k == "progress":
-                            pct = min(100.0, (_kv_elapsed / duration_secs) * 100.0) if duration_secs > 0 else 0.0
-                            eta_secs = max(0, int((duration_secs - _kv_elapsed) / _kv_speed)) if _kv_speed > 0 else 0
-                            try:
-                                progress_cb(pct, _kv_fps, eta_secs)
-                            except Exception:
-                                pass
+                            _emit_frame_progress()
                         continue
 
                 m = _PROGRESS_RE.search(line_s)
                 if m:
-                    elapsed  = _parse_time(m.group("time"))
+                    log(f"__ffstatus__:{line_s}")
+                    frame_n  = float(m.group("frame") or 0)
                     fps      = float(m.group("fps") or 0)
-                    speed    = float(m.group("speed") or 0)
-                    pct      = min(100.0, elapsed / duration_secs * 100)
-                    # eta = remaining source-seconds / encode speed multiplier
-                    eta_secs = max(0, int((duration_secs - elapsed) / speed)) if speed > 0 else 0
+                    pct      = _frame_progress_pct(frame_n, duration_secs, source_fps)
+                    eta_secs = _frame_eta_secs(frame_n, duration_secs, source_fps, fps)
                     try:
                         progress_cb(pct, fps, eta_secs)
                     except Exception:
@@ -563,13 +621,12 @@ def _run_ffmpeg(
                 if source_fps > 0:
                     mf = _PROGRESS_FRAME_ONLY_RE.search(line_s)
                     if mf:
+                        log(f"__ffstatus__:{line_s}")
                         try:
                             frame_n = float(mf.group("frame") or 0)
                             fps_now = float(mf.group("fps") or 0)
-                            elapsed = frame_n / source_fps if frame_n > 0 else 0.0
-                            pct = min(100.0, elapsed / duration_secs * 100.0)
-                            speed = (fps_now / source_fps) if fps_now > 0 else 0.0
-                            eta_secs = max(0, int((duration_secs - elapsed) / speed)) if speed > 0 else 0
+                            pct = _frame_progress_pct(frame_n, duration_secs, source_fps)
+                            eta_secs = _frame_eta_secs(frame_n, duration_secs, source_fps, fps_now)
                             progress_cb(pct, fps_now, eta_secs)
                             continue
                         except Exception:
@@ -755,6 +812,7 @@ def compress_simple(
     transcode_audio = bool(input_decoder)
 
     encoder_used = ""
+    normalized_path = ""
     try:
         # Try QSV first (unless the caller requested SW-only for this file)
         if force_sw:
@@ -837,10 +895,64 @@ def compress_simple(
                 output_path=tmp_path,
             )
 
+        if (not success or not os.path.exists(tmp_path)) and not stop_event.is_set():
+            # Last-resort recovery for badly timestamped sources (often MPEG-TS
+            # content with broken PTS/DTS inside an .mp4 extension): stream-copy
+            # remux to normalize timestamps, then retry software encode once.
+            log("All direct encode attempts failed - trying timestamp-normalization remux, then one final software encode...")
+            norm_name = Path(input_path).stem + ".__normalized__.mkv"
+            normalized_path = os.path.join(_local_temp, norm_name)
+            if os.path.exists(normalized_path):
+                os.remove(normalized_path)
+
+            norm_log = conv_logger.tee(log, "normalize_ts") if conv_logger else log
+            norm_cmd = [
+                "ffmpeg", "-y",
+                "-stats_period", "1",
+                "-progress", "pipe:1",
+                "-fflags", "+genpts+discardcorrupt",
+                "-err_detect", "ignore_err",
+                "-probesize", "100M",
+                "-analyzeduration", "100M",
+                "-i", input_path,
+                "-map", "0",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-muxpreload", "0",
+                "-muxdelay", "0",
+            ]
+            for _di in (dropped_streams or []):
+                norm_cmd += ["-map", f"-0:{_di}"]
+            norm_cmd.append(normalized_path)
+
+            norm_ok = _run_ffmpeg(
+                norm_cmd, norm_log, stop_event,
+                pid_holder=pid_holder,
+                output_path=normalized_path,
+            )
+
+            if norm_ok and os.path.exists(normalized_path):
+                log("Timestamp-normalized remux succeeded. Retrying software encode...")
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                encoder_used = "libx265"
+                sw_quality = quality if quality <= 51 else config.SW_HEVC_CRF
+                sw_log3 = conv_logger.tee(log, "compress_sw_normalized") if conv_logger else log
+                success = _run_ffmpeg(
+                    _sw_cmd(normalized_path, tmp_path, sw_quality, dropped_streams,
+                            input_decoder=None, transcode_audio=transcode_audio),
+                    sw_log3, stop_event,
+                    duration_secs=duration, source_fps=source_fps,
+                    progress_cb=progress_cb, pid_holder=pid_holder,
+                    output_path=tmp_path,
+                )
+            else:
+                log("Timestamp-normalization remux failed.")
+
         if not success or not os.path.exists(tmp_path):
             log("Encode failed.")
             if conv_logger:
-                conv_logger.mark_fail_at("compress phase (QSV, SW, and SW+ignore_err all failed)")
+                conv_logger.mark_fail_at("compress phase (QSV, SW, SW+ignore_err, and normalize+SW failed)")
             return False, ""
 
         enc_size = os.path.getsize(tmp_path)
@@ -884,6 +996,11 @@ def compress_simple(
         return True, encoder_used
 
     finally:
+        if normalized_path and os.path.exists(normalized_path):
+            try:
+                os.remove(normalized_path)
+            except OSError:
+                pass
         if tmp_holder is not None:
             tmp_holder[0] = ""
         if os.path.exists(tmp_path):
@@ -1508,6 +1625,7 @@ def remux_to_mp4(
     input_path = os.path.normpath(input_path)
     src_size   = os.path.getsize(input_path)
     duration   = _ffprobe_duration(input_path)
+    source_fps = _ffprobe_source_fps(input_path)
 
     # ------------------------------------------------------------------
     # Probe streams
@@ -2024,9 +2142,12 @@ def remux_to_mp4(
         used instead of inline ASS→mov_text conversion from english_text_subs.
         """
         _ext_srts = extracted_text_srts or []
-        cmd = ["ffmpeg", "-y",
-               "-probesize", "100M", "-analyzeduration", "100M",
-               "-i", input_path]
+        cmd = [
+            "ffmpeg", "-y",
+            "-stats_period", "1", "-progress", "pipe:1",
+            "-probesize", "100M", "-analyzeduration", "100M",
+            "-i", input_path,
+        ]
 
         # Append OCR SRT files as additional inputs (inputs 1..len(srt_paths))
         for srt in srt_paths:
@@ -2221,6 +2342,32 @@ def remux_to_mp4(
                 _dts_loop_killed = False
                 _dts_warn_count = 0
                 _DTS_WARN_LIMIT = 50  # kill after 50 consecutive DTS warnings
+                _kv_frame = "0"
+                _kv_bitrate = "N/A"
+                _kv_fps = 0.0
+                _kv_speed = 0.0
+
+                def _emit_kv_status() -> None:
+                    fps_txt = f"{_kv_fps:.1f}" if _kv_fps > 0 else "N/A"
+                    spd_txt = f"{_kv_speed:.2f}x" if _kv_speed > 0 else "N/A"
+                    log(
+                        f"__ffstatus__:frame={_kv_frame} fps={fps_txt} "
+                        f"bitrate={_kv_bitrate} speed={spd_txt}"
+                    )
+
+                def _emit_frame_progress() -> None:
+                    if not progress_cb or duration <= 0 or source_fps <= 0:
+                        return
+                    try:
+                        frame_n = float(_kv_frame or 0)
+                    except Exception:
+                        frame_n = 0.0
+                    pct = _frame_progress_pct(frame_n, duration, source_fps)
+                    eta_secs = _frame_eta_secs(frame_n, duration, source_fps, _kv_fps)
+                    try:
+                        progress_cb(pct, _kv_fps, eta_secs)
+                    except Exception:
+                        pass
 
                 for line in proc.stdout:
                     output_lines.append(line)
@@ -2263,17 +2410,63 @@ def remux_to_mp4(
                     if "out of order" in line.lower() or "dts" in line.lower() and "out of order" in line.lower():
                         dts_error = True
                     if progress_cb and duration > 0:
-                        m = _PROGRESS_RE.search(line)
+                        _line_s = line.strip()
+                        _is_single_kv_line = bool(re.match(r"^[a-z0-9_]+=[^\n\r]*$", _line_s)) and (
+                            not bool(re.search(r"\s+[A-Za-z0-9_]+=", _line_s))
+                        )
+                        if _is_single_kv_line:
+                            k, v = _line_s.split("=", 1)
+                            if k in _PROGRESS_KV_KEYS:
+                                if k == "frame":
+                                    _kv_frame = v or _kv_frame
+                                    _emit_kv_status()
+                                    _emit_frame_progress()
+                                elif k == "bitrate":
+                                    _kv_bitrate = v or _kv_bitrate
+                                    _emit_kv_status()
+                                elif k == "fps":
+                                    try:
+                                        _kv_fps = float(v)
+                                        _emit_kv_status()
+                                        _emit_frame_progress()
+                                    except Exception:
+                                        pass
+                                elif k == "speed":
+                                    try:
+                                        _kv_speed = float(v.rstrip("x"))
+                                        _emit_kv_status()
+                                        _emit_frame_progress()
+                                    except Exception:
+                                        pass
+                                elif k == "progress":
+                                    _emit_frame_progress()
+                            continue
+
+                        m = _PROGRESS_RE.search(_line_s)
                         if m:
-                            elapsed  = _parse_time(m.group("time"))
+                            log(f"__ffstatus__:{_line_s}")
+                            frame_n  = float(m.group("frame") or 0)
                             fps      = float(m.group("fps") or 0)
-                            speed    = float(m.group("speed") or 0)
-                            pct      = min(100.0, elapsed / duration * 100)
-                            eta_secs = max(0, int((duration - elapsed) / speed)) if speed > 0 else 0
+                            pct      = _frame_progress_pct(frame_n, duration, source_fps)
+                            eta_secs = _frame_eta_secs(frame_n, duration, source_fps, fps)
                             try:
                                 progress_cb(pct, fps, eta_secs)
                             except Exception:
                                 pass
+                            continue
+
+                        if source_fps > 0:
+                            mf = _PROGRESS_FRAME_ONLY_RE.search(_line_s)
+                            if mf:
+                                log(f"__ffstatus__:{_line_s}")
+                                try:
+                                    frame_n = float(mf.group("frame") or 0)
+                                    fps_now = float(mf.group("fps") or 0)
+                                    pct = _frame_progress_pct(frame_n, duration, source_fps)
+                                    eta_secs = _frame_eta_secs(frame_n, duration, source_fps, fps_now)
+                                    progress_cb(pct, fps_now, eta_secs)
+                                except Exception:
+                                    pass
 
                 if not _timed_out:
                     proc.wait()

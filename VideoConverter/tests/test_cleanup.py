@@ -208,7 +208,7 @@ def test_cleanup_updates_db_paths_on_move(tmp_path, monkeypatch):
 def test_cleanup_empty_dir_returns_zero_moved(tmp_path):
     """Running cleanup on a dir with no legacy folders is a no-op."""
     result = _cleanup_legacy_folders(str(tmp_path))
-    assert result == {"moved": [], "skipped": [], "errors": []}
+    assert result == {"moved": [], "renamed": [], "skipped": [], "errors": []}
 
 
 def test_cleanup_legacy_dir_not_removed_when_not_empty(tmp_path):

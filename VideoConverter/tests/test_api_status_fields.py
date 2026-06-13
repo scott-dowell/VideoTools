@@ -20,8 +20,11 @@ def test_idle_status_has_new_fields():
     assert 'phase'     in data, "missing 'phase'"
     assert 'ocr_batch' in data, "missing 'ocr_batch'"
     assert 'steps'     in data, "missing 'steps'"
+    assert 'ffmpeg_status' in data, "missing 'ffmpeg_status'"
+    assert 'ffmpeg_status_at' in data, "missing 'ffmpeg_status_at'"
     assert data['phase'] == ''
     assert data['steps'] == []
+    assert data['ffmpeg_status'] == ''
     assert isinstance(data['ocr_batch'], dict)
     assert data['ocr_batch']['total'] == 0
 

@@ -2,6 +2,7 @@
   "qsv_quality": 30,
   "sw_hevc_crf": 28,
   "local_temp_dir": "C:\\Temp\\vc_working",
+  "keep_failed_intermediates": true,
   "default_sort": "bitrate",
   "anime_mode": false,
   "low_savings_threshold_pct": 5

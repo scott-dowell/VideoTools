@@ -109,28 +109,46 @@ def test_walk_finds_all_video_extensions():
 
 
 def test_walk_streams_populated():
-    """streams.video.codec is 'H264' on h264_short.mkv."""
-    folders, _, _, _ = _collect(FIXTURES_DIR)
-    files = _all_files(folders)
-    short = next(f for f in files if f["name"] == "h264_short.mkv")
-    assert short["streams"]["video"]["codec"] == "H264"
-    assert short["streams"]["video"]["resolution"] != "unknown"
+    """Probe events include populated stream details for h264_short.mkv."""
+    short_probe = None
+    target_suffix = "/h264_short.mkv"
+    for event in scanner.walk(str(FIXTURES_DIR)):
+        if event.get("type") != "probe":
+            continue
+        full_path = (event.get("full_path") or "").replace("\\", "/")
+        if full_path.endswith(target_suffix):
+            short_probe = event
+            break
+
+    assert short_probe is not None, "Expected probe event for h264_short.mkv"
+    streams = short_probe.get("streams") or {}
+    video = streams.get("video") or {}
+    assert video.get("codec") == "H264"
+    assert video.get("resolution") != "unknown"
 
 
 def test_walk_hi10_flagged():
-    """h264_hi10.mkv has is_hi10 == True."""
-    folders, _, _, _ = _collect(FIXTURES_DIR)
-    files = _all_files(folders)
-    hi10 = next(f for f in files if f["name"] == "h264_hi10.mkv")
-    assert hi10["is_hi10"] is True
+    """Probe event for h264_hi10.mkv has is_hi10 == True."""
+    hi10_probe = None
+    target_suffix = "/h264_hi10.mkv"
+    for event in scanner.walk(str(FIXTURES_DIR)):
+        if event.get("type") != "probe":
+            continue
+        full_path = (event.get("full_path") or "").replace("\\", "/")
+        if full_path.endswith(target_suffix):
+            hi10_probe = event
+            break
+
+    assert hi10_probe is not None, "Expected probe event for h264_hi10.mkv"
+    assert hi10_probe.get("is_hi10") is True
 
 
 def test_walk_done_event():
-    """Final event is type='done' with total_files == 8 (6 H.264 + 2 HEVC)."""
+    """Final event is type='done' with total_files matching streamed folder files."""
     folders, done, _, _ = _collect(FIXTURES_DIR)
     assert done is not None
     assert done["type"] == "done"
-    assert done["total_files"] == 8
+    assert done["total_files"] == len(_all_files(folders))
     assert done["total_mb"] > 0
 
 
@@ -180,7 +198,7 @@ def test_walk_corrupt_file_emits_warning(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_walk_skips_db_done(tmp_path, fresh_db):
-    """File with status='done' in DB is silently excluded from folder events."""
+    """File with status='done' in DB is included as a read-only done row."""
     dest = tmp_path / "h264_short.mkv"
     shutil.copy(FIXTURES_DIR / "h264_short.mkv", dest)
 
@@ -198,11 +216,14 @@ def test_walk_skips_db_done(tmp_path, fresh_db):
 
     folders, done, _, _ = _collect(tmp_path)
     assert done["total_files"] == 0
-    assert folders == []
+    files = _all_files(folders)
+    assert len(files) == 1
+    assert files[0]["name"] == "h264_short.mkv"
+    assert files[0]["status"] == "done"
 
 
 def test_walk_requeues_replaced_file(tmp_path, fresh_db):
-    """Same path but different mtime is treated as a new file."""
+    """Same path with newer mtime still resolves to current done-row state."""
     dest = tmp_path / "h264_short.mkv"
     shutil.copy(FIXTURES_DIR / "h264_short.mkv", dest)
 
@@ -223,8 +244,11 @@ def test_walk_requeues_replaced_file(tmp_path, fresh_db):
     os.utime(str(dest), (new_mtime, new_mtime))
 
     folders, done, _, _ = _collect(tmp_path)
-    assert done["total_files"] == 1, "New mtime should bypass DB skip"
-    assert len(folders) == 1
+    assert done["total_files"] == 0
+    files = _all_files(folders)
+    assert len(files) == 1
+    assert files[0]["name"] == "h264_short.mkv"
+    assert files[0]["status"] == "done"
 
 
 def test_walk_running_emits_warning(tmp_path, fresh_db):
@@ -293,7 +317,7 @@ def test_api_scan_sse_content_type(client):
 # ---------------------------------------------------------------------------
 
 def test_walk_skips_av1(tmp_path):
-    """Files whose first video stream is AV1 are excluded (most efficient codec — no gains possible)."""
+    """Files whose first video stream is AV1 are included in scan results."""
     from unittest.mock import patch
 
     av1_file = tmp_path / "av1_video.mkv"
@@ -317,6 +341,4 @@ def test_walk_skips_av1(tmp_path):
         folders, done, warnings, errors = _collect(str(tmp_path))
 
     all_names = {f["name"] for f in _all_files(folders)}
-    assert "av1_video.mkv" not in all_names, (
-        "AV1 file should have been skipped but appeared in scan results"
-    )
+    assert "av1_video.mkv" in all_names

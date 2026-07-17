@@ -258,6 +258,19 @@ def _db_lookup(path: str, mtime: float, size_bytes: int) -> str | None:
         return None
 
 
+def _has_ocr_sidecar(path: str) -> bool:
+    """Return True when prior OCR output (*.pgs*.srt) exists for this file."""
+    src = Path(path)
+    stem_lower = src.stem.lower()
+    try:
+        for p in src.parent.glob(f"{src.stem}.pgs*.srt"):
+            if p.is_file() and p.stem.lower().startswith(stem_lower + ".pgs"):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -434,6 +447,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "est_cv":       est_cv_val,
                         "est_high_variance": est_hv_val,
                         "est_aggregation": est_agg_val,
+                        "ocr_status":   "done" if _has_ocr_sidecar(full_path) else "",
                     })
                     if cached_bitrate is None:
                         record_id = db_info.get("id")
@@ -473,6 +487,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                 "est_cv":          db_info.get("est_sample_cv_pct"),
                 "est_high_variance": bool(db_info.get("est_high_variance", False)),
                 "est_aggregation": db_info.get("est_aggregation"),
+                "ocr_status":      "done" if _has_ocr_sidecar(full_path) else "",
             }
 
             folder_files.append(file_dict)

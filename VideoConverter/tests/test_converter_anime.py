@@ -229,6 +229,67 @@ def test_remux_hi10(tmp_path):
     )
 
 
+def test_remux_deletes_batch_ocr_sidecars_after_success(tmp_path):
+    """Successful remux should delete only OCR-generated .pgsN.srt sidecars."""
+    import json as _json
+
+    src_dir = tmp_path / "src"
+    out_dir = tmp_path / "out"
+    work_dir = tmp_path / "work"
+    src_dir.mkdir()
+    out_dir.mkdir()
+    work_dir.mkdir()
+
+    src = src_dir / "Episode 01.mkv"
+    src.write_bytes(b"source-bytes")
+    ocr_sidecar = src_dir / "Episode 01.pgs1.srt"
+    ocr_sidecar.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    manual_sidecar = src_dir / "Episode 01.eng.srt"
+    manual_sidecar.write_text("1\n00:00:00,000 --> 00:00:01,000\nManual\n", encoding="utf-8")
+
+    probe_data = {
+        "streams": [
+            {"index": 0, "codec_type": "video", "codec_name": "h264"},
+            {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "jpn"}},
+            {"index": 2, "codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle", "tags": {"language": "eng"}},
+        ]
+    }
+
+    class _Proc:
+        def __init__(self, cmd):
+            self.stdout = iter([])
+            self.returncode = 0
+            self.pid = 4321
+            Path(cmd[-1]).write_bytes(b"remuxed-output")
+        def wait(self):
+            return 0
+        def kill(self):
+            return None
+
+    msgs, log = _logs()
+    stop = threading.Event()
+
+    with patch.object(converter.config, "LOCAL_TEMP_DIR", str(work_dir)), \
+         patch("converter.subprocess.run", return_value=MagicMock(stdout=_json.dumps(probe_data), returncode=0)), \
+         patch("converter.subprocess.Popen", side_effect=lambda cmd, **kwargs: _Proc(cmd)), \
+         patch("converter._ffprobe_duration", return_value=60.0), \
+         patch("converter._ffprobe_source_fps", return_value=23.976):
+
+        ok, enc = converter.remux_to_mp4(
+            str(src),
+            str(out_dir),
+            log,
+            stop,
+            hi10=True,
+        )
+
+    assert ok is True, f"Expected remux success; logs: {msgs}"
+    assert enc == "copy"
+    assert not ocr_sidecar.exists(), "Batch OCR sidecar should be removed after successful mux"
+    assert manual_sidecar.exists(), "Manual external subtitle sidecar should be preserved"
+    assert any("Removed OCR sidecar" in m for m in msgs), f"Expected OCR cleanup log; got: {msgs}"
+
+
 # ---------------------------------------------------------------------------
 # stop event during remux
 # ---------------------------------------------------------------------------

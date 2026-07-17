@@ -1689,6 +1689,10 @@ def remux_to_mp4(
         if _ps == _src_stem_lower or _ps.startswith(_src_stem_lower + "."):
             ext_sub_paths.append(str(_p))
             log(f"Found external subtitle: {_p.name}")
+    _ocr_ext_sub_paths = [
+        p for p in ext_sub_paths
+        if re.search(r"\.pgs\d+\.srt$", p, re.IGNORECASE)
+    ]
 
     if not video_streams:
         log("ERROR: no video stream found")
@@ -2578,6 +2582,14 @@ def remux_to_mp4(
         return True, encoder_used
 
     finally:
+        if _remux_ok:
+            for _sp in _ocr_ext_sub_paths:
+                if os.path.exists(_sp):
+                    try:
+                        os.remove(_sp)
+                        log(f"Removed OCR sidecar: {Path(_sp).name}")
+                    except OSError as _re:
+                        log(f"WARNING: could not remove OCR sidecar {Path(_sp).name}: {_re}")
         _preserved = False
         if not _remux_ok and _should_keep_failed_intermediates():
             _keep_paths = [tmp_path]

@@ -1510,7 +1510,8 @@ function _pollStatus() {
           // Status badge (col index 7)
           const badgeCell = row.cells[7];
           if (badgeCell) {
-            badgeCell.innerHTML = _badgeHtml(sf.status, sf.force_sw, sf.force_convert) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
+            const _ocrDone = sf.status === 'ocr' && (f.ocr_status === 'done' || f.ocr_status === 'skipped');
+            badgeCell.innerHTML = (_ocrDone ? '' : _badgeHtml(sf.status, sf.force_sw, sf.force_convert)) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
             row.classList.toggle('tr-done',        sf.status === 'done');
             row.classList.toggle('tr-failed',      sf.status === 'failed');
             row.classList.toggle('tr-low-savings', sf.status === 'low_savings');

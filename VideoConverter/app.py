@@ -67,7 +67,7 @@ _job: dict = {
 
 _PROCESS_ALL_ACCESS = 0x1F0FFF
 _session_started_at: float = 0.0   # set when /api/start is called
-_ESTIMATE_VERSION = 2  # bump when estimate methodology/output semantics change
+_ESTIMATE_VERSION = 3  # bump when estimate methodology/output semantics change
 
 
 def _as_float(value, default: float = 0.0) -> float:
@@ -566,6 +566,36 @@ def _queue_worker(
                 crashed = False
                 _ocr_proc = None
                 _ocr_rsp_file = None
+
+                def _stamp_ocr_status(_fp: str) -> None:
+                    """Persist per-file OCR outcome as soon as it is known.
+
+                    done    -> sidecar was produced
+                    skipped -> no active PGS streams remained to OCR
+                    """
+                    _stem   = os.path.splitext(os.path.basename(_fp))[0]
+                    _parent = os.path.dirname(_fp)
+                    _has_srt = bool(_glob.glob(os.path.join(_parent, f"{_stem}.pgs*.srt")))
+                    _ocr_idx = _path_to_idx.get(_fp)
+                    if _ocr_idx is None:
+                        return
+                    if _has_srt:
+                        with _job_lock:
+                            _job["files"][_ocr_idx]["ocr_status"] = "done"
+                        return
+
+                    _fi = next((fi for fi in files if fi["full_path"].replace("\\", "/") == _fp), None)
+                    _fstreams = (_fi.get("streams") or {}).get("subs", []) if _fi else []
+                    _drops = set(_drop_manifest.get(_fp, []))
+                    _has_active_pgs = any(
+                        s.get("codec", "").upper() in ("PGS", "HDMV_PGS_SUBTITLE", "PGSSUB")
+                        and s.get("index") not in _drops
+                        for s in _fstreams
+                    )
+                    if not _has_active_pgs:
+                        with _job_lock:
+                            _job["files"][_ocr_idx]["ocr_status"] = "skipped"
+
                 try:
                     _manifest_args = ["--skip-manifest", _manifest_path] if _manifest_path else []
                     _base_cmd = [sys.executable, _ocr_script] + _manifest_args
@@ -610,6 +640,7 @@ def _queue_worker(
                                         if _fi["name"] == _new_bn:
                                             _fi["state"] = "running"
                                     b["current_file"] = _new_bn
+                                _stamp_ocr_status(_current_ocr_path)
                                 _current_ocr_path = _new_path
                         _prev_was_sep = (stripped == "-" * 60)
                         if stripped:
@@ -639,6 +670,12 @@ def _queue_worker(
                         if not _glob.glob(os.path.join(_parent, f"{_stem}.pgs*.srt")):
                             _no_sidecar.append(_fp)
 
+                    # Any file that now has a sidecar completed OCR successfully
+                    # in this attempt; stamp it immediately so row badges update.
+                    for _fp in _remaining:
+                        if _fp not in _no_sidecar:
+                            _stamp_ocr_status(_fp)
+
                     # The crashing file is the one being processed when the crash
                     # occurred AND has no sidecar — mark it permanently failed.
                     if _current_ocr_path in _no_sidecar:
@@ -657,6 +694,7 @@ def _queue_worker(
                     # UNLESS all its PGS streams were dropped (nothing to OCR → OK).
                     _PGS_CODECS = {"hdmv_pgs_subtitle", "pgssub"}
                     for _fp in _remaining:
+                        _stamp_ocr_status(_fp)
                         _stem   = os.path.splitext(os.path.basename(_fp))[0]
                         _parent = os.path.dirname(_fp)
                         if _glob.glob(os.path.join(_parent, f"{_stem}.pgs*.srt")):
@@ -919,10 +957,10 @@ def _queue_worker(
                 # Fast-skip heuristic: HEVC sources already at low bitrate
                 # are extremely unlikely to compress further — skip the 10s
                 # test encode and mark low_savings immediately.
-                # Threshold is 1500 kbps normalised to 1080p @ 25fps so that
+                # Threshold is 500 kbps normalised to 1080p @ 25fps so that
                 # 4K/60fps sources are treated fairly.  A 4K 50fps file at
                 # 4446 kbps normalises to ~556 kbps — correctly fast-skipped.
-                _HEVC_FASTSKIP_KBPS = 1500
+                _HEVC_FASTSKIP_KBPS = 500
                 _src_codec   = (db_rec.get("codec") or "").upper()
                 _src_bitrate = db_rec.get("bitrate_kbps")
                 if (_src_codec == "HEVC"

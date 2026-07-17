@@ -7,6 +7,7 @@ The format is based on Keep a Changelog.
 ## [Unreleased]
 
 - #4 Normalize changelog format to one bullet line per issue (remove Added/Changed/Fixed grouping).
+- #6 Improve savings accuracy by using per-segment source-vs-encoded estimator samples, lower HEVC fast-skip to 500 kbps (normalized), and update OCR prepass row chips per-file as each OCR result completes.
 
 ## [0.0.001] - 2026-06-13
 

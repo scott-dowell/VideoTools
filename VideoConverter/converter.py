@@ -1138,42 +1138,58 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
 
     try:
         sample_ratios: list[float] = []
-        src_clip_bytes = src_size * (clip_secs / duration)
-        if src_clip_bytes <= 0:
-            return {"error": "Duration calculation error"}
 
         for idx, seek in sample_specs:
-            tmp_path = os.path.join(
-                config.LOCAL_TEMP_DIR,
-                f"_est_{Path(input_path).stem}_{idx}.mkv",
-            )
+            src_tmp = os.path.join(config.LOCAL_TEMP_DIR, f"_est_src_{Path(input_path).stem}_{idx}.mkv")
+            enc_tmp = os.path.join(config.LOCAL_TEMP_DIR, f"_est_enc_{Path(input_path).stem}_{idx}.mkv")
 
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+            # Clean up any leftover files from previous interrupted runs
+            for p in (src_tmp, enc_tmp):
+                if os.path.exists(p):
+                    try: os.remove(p)
+                    except OSError: pass
 
-            cmd = [
+            # 1. Extract 10s source segment (copy mode)
+            # Use -map 0 to match the full stream set so size comparison is fair.
+            sp_result = subprocess.run([
                 "ffmpeg", "-y",
                 "-ss", str(seek),
                 "-t",  str(clip_secs),
-            ] + hw_args + [
                 "-i",  input_path,
+                "-map", "0",
+                "-c",   "copy",
+                "-f",   "matroska",
+                src_tmp
+            ], capture_output=True, timeout=60)
+
+            if sp_result.returncode != 0 or not os.path.exists(src_tmp):
+                continue
+            
+            src_seg_bytes = os.path.getsize(src_tmp)
+            if src_seg_bytes == 0:
+                continue
+
+            # 2. Encode extracted segment
+            # We encode the segment file directly to ensure perfect alignment with what we measured.
+            cmd = [
+                "ffmpeg", "-y",
+            ] + hw_args + [
+                "-i",  src_tmp,
                 "-c:v", "hevc_qsv",
                 "-global_quality", str(quality),
-                "-c:a", "copy",  # passthrough audio so sample size includes audio bytes
+                "-c:a", "copy",
+                "-c:s", "copy",
                 "-f", "matroska",
-                tmp_path,
+                enc_tmp,
             ]
             result = subprocess.run(
                 cmd, capture_output=True, timeout=120,
             )
-            if result.returncode != 0 or not os.path.exists(tmp_path):
+            if result.returncode != 0 or not os.path.exists(enc_tmp):
                 continue
 
-            enc_size = os.path.getsize(tmp_path)
-            sample_ratios.append(enc_size / src_clip_bytes)
+            enc_seg_size = os.path.getsize(enc_tmp)
+            sample_ratios.append(enc_seg_size / src_seg_bytes)
 
         if not sample_ratios:
             return {"error": "ffmpeg encode failed"}
@@ -1225,15 +1241,16 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
         return {"error": str(e)}
     finally:
         for idx in range(1, _SAMPLE_COUNT + 1):
-            tmp_path = os.path.join(
-                config.LOCAL_TEMP_DIR,
-                f"_est_{Path(input_path).stem}_{idx}.mkv",
-            )
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+            for prefix in ("_est_src_", "_est_enc_", "_est_"):
+                tmp_path = os.path.join(
+                    config.LOCAL_TEMP_DIR,
+                    f"{prefix}{Path(input_path).stem}_{idx}.mkv",
+                )
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
 
 
 # ---------------------------------------------------------------------------

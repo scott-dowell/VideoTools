@@ -39,6 +39,7 @@ let _streamReplaceConfirmModal = null;
 let _engStereoReplaceConfirmModal = null;
 let _subtitleLikelyCache = {};     // key: "<full_path>|<stream_index>" -> detection payload
 let _subtitleLikelyPending = new Set();
+let _detailsProbePending = new Set();
 const _QUEUE_COL_COUNT = 18;
 
 // Estimation background task state
@@ -1994,27 +1995,27 @@ function viewDetails(index) {
 
   let html = `
     <h6 class="details-section-head"><i class="bi bi-camera-video me-2"></i>Video Stream</h6>
-    <table class="table table-sm details-table mb-3">
-      <tr><td>Codec</td><td>${v ? codecBadge + hdrBadge : '—'}</td></tr>
-      <tr><td>Profile / Level</td><td>${v ? v.profile + ' / L' + v.level : '—'}</td></tr>
-      <tr><td>Resolution</td><td>${v ? v.resolution : '—'}</td></tr>
-      <tr><td>Frame rate</td><td>${v ? v.fps + ' fps' : '—'}</td></tr>
-      <tr><td>Bitrate</td><td>${v ? v.bitrate : '—'}</td></tr>
-      <tr><td>Pixel format</td><td>${v ? v.color : '—'}</td></tr>
-    </table>`;
+    <div class="details-kv-grid mb-3">
+      <div class="details-kv-item"><div class="details-kv-label">Codec</div><div class="details-kv-value">${v ? codecBadge + hdrBadge : '—'}</div></div>
+      <div class="details-kv-item"><div class="details-kv-label">Profile / Level</div><div class="details-kv-value">${v ? v.profile + ' / L' + v.level : '—'}</div></div>
+      <div class="details-kv-item"><div class="details-kv-label">Resolution</div><div class="details-kv-value">${v ? v.resolution : '—'}</div></div>
+      <div class="details-kv-item"><div class="details-kv-label">Frame rate</div><div class="details-kv-value">${v ? v.fps + ' fps' : '—'}</div></div>
+      <div class="details-kv-item"><div class="details-kv-label">Bitrate</div><div class="details-kv-value">${v ? v.bitrate : '—'}</div></div>
+      <div class="details-kv-item"><div class="details-kv-label">Pixel format</div><div class="details-kv-value">${v ? v.color : '—'}</div></div>
+    </div>`;
 
   // ---- File info ----
   html += `
     <h6 class="details-section-head"><i class="bi bi-file-earmark me-2"></i>File</h6>
-    <table class="table table-sm details-table mb-3">
-      <tr><td>Filename</td><td class="fw-semibold">${f.name}</td></tr>
-      <tr><td>Folder</td><td>${f.folder || '<span class="text-secondary">(root)</span>'}</td></tr>
-      <tr><td>File size</td><td>${f.size} MB</td></tr>
-      <tr><td>Duration</td><td>${f.duration || '—'}</td></tr>
-      ${f.est_pct != null ? `<tr><td>Estimate</td><td>${_estimateHtml(f)}</td></tr>` : ''}
-      ${f.status === 'done' ? `<tr><td>Output size</td><td>${f.output} MB</td></tr>
-      <tr><td>Space saved</td><td class="text-success fw-semibold">${f.saved} MB (${f.pct}%)</td></tr>` : ''}
-    </table>`;
+    <div class="details-kv-grid mb-3">
+      <div class="details-kv-item"><div class="details-kv-label">Filename</div><div class="details-kv-value fw-semibold">${f.name}</div></div>
+      <div class="details-kv-item"><div class="details-kv-label">Folder</div><div class="details-kv-value">${f.folder || '<span class="text-secondary">(root)</span>'}</div></div>
+      <div class="details-kv-item"><div class="details-kv-label">File size</div><div class="details-kv-value">${f.size} MB</div></div>
+      <div class="details-kv-item"><div class="details-kv-label">Duration</div><div class="details-kv-value">${f.duration || '—'}</div></div>
+      ${f.est_pct != null ? `<div class="details-kv-item"><div class="details-kv-label">Estimate</div><div class="details-kv-value">${_estimateHtml(f)}</div></div>` : ''}
+      ${f.status === 'done' ? `<div class="details-kv-item"><div class="details-kv-label">Output size</div><div class="details-kv-value">${f.output} MB</div></div>
+      <div class="details-kv-item"><div class="details-kv-label">Space saved</div><div class="details-kv-value text-success fw-semibold">${f.saved} MB (${f.pct}%)</div></div>` : ''}
+    </div>`;
 
   // ---- Audio tracks ----
   const audioTracks = s ? s.audio : [];
@@ -2090,6 +2091,9 @@ function viewDetails(index) {
   refreshStreamEditStatus();
   refreshEngStereoStatus();
   refreshLikelySubtitleLanguages(index);
+  if (!s) {
+    probeStreams(index, {silent: true});
+  }
 }
 
 function _likelyLangCellId(fileIndex, streamIndex) {
@@ -2788,20 +2792,30 @@ async function dropPgsFolder(folder) {
   }).catch(err => addLog('drop_pgs_bulk fetch error: ' + err, 'error'));
 }
 
-function probeStreams(index) {
+function probeStreams(index, opts) {
   const f = _files[index];
   if (!f) return;
+  if (f.streams) return;
+  const key = String(f.full_path || '');
+  if (!key) return;
+  if (_detailsProbePending.has(key)) return;
+  const options = opts || {};
+  _detailsProbePending.add(key);
   fetch('/api/probe_streams?' + new URLSearchParams({path: f.full_path}))
     .then(r => r.json())
     .then(data => {
+      _detailsProbePending.delete(key);
       if (data.ok) {
         f.streams = data.streams;
         viewDetails(index);
       } else {
-        addLog('probe_streams error: ' + (data.error || 'unknown'), 'error');
+        if (!options.silent) addLog('probe_streams error: ' + (data.error || 'unknown'), 'error');
       }
     })
-    .catch(err => addLog('probe_streams fetch error: ' + err, 'error'));
+    .catch(err => {
+      _detailsProbePending.delete(key);
+      if (!options.silent) addLog('probe_streams fetch error: ' + err, 'error');
+    });
 }
 
 function diagnoseFile(index) {

@@ -94,6 +94,7 @@ def init_db(db_path: str) -> None:
                 source_duration_secs REAL,
                 source_video_track_count INTEGER,
                 source_audio_track_count INTEGER,
+                source_subtitle_track_count INTEGER,
                 output_path          TEXT,
                 output_size_mb       REAL,
                 output_hash          TEXT,
@@ -122,6 +123,7 @@ def init_db(db_path: str) -> None:
             ("source_duration_secs", "REAL"),
             ("source_video_track_count", "INTEGER"),
             ("source_audio_track_count", "INTEGER"),
+            ("source_subtitle_track_count", "INTEGER"),
             ("output_bitrate_kbps",  "INTEGER"),
             ("force_sw",             "INTEGER DEFAULT 0"),
             ("force_convert",        "INTEGER DEFAULT 0"),
@@ -264,7 +266,8 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             f"""
             SELECT c.id, c.source_path, c.status,
                    c.source_bitrate_kbps, c.source_codec, c.source_duration_secs,
-                   c.source_video_track_count, c.source_audio_track_count,
+                     c.source_video_track_count, c.source_audio_track_count,
+                     c.source_subtitle_track_count,
                    c.output_bitrate_kbps, c.output_size_mb, c.saved_mb, c.saved_pct,
                                      c.force_sw, c.force_convert, c.dropped_streams,
                      c.est_saving_pct, c.est_saving_mb,
@@ -302,6 +305,7 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
             "duration_secs":  row["source_duration_secs"],
             "video_track_count": row["source_video_track_count"],
             "audio_track_count": row["source_audio_track_count"],
+            "subtitle_track_count": row["source_subtitle_track_count"],
             "output_size_mb": row["output_size_mb"],
             "saved_mb":       row["saved_mb"],
             "saved_pct":      row["saved_pct"],
@@ -711,6 +715,7 @@ def save_probe_result(
     duration_secs: float | None,
     video_track_count: int | None = None,
     audio_track_count: int | None = None,
+    subtitle_track_count: int | None = None,
     source_size_bytes: int | None = None,
     source_size_mb: float | None = None,
 ) -> None:
@@ -726,20 +731,21 @@ def save_probe_result(
             INSERT INTO conversions
                 (source_path, source_mtime, source_codec,
                  source_bitrate_kbps, source_duration_secs,
-                 source_video_track_count, source_audio_track_count,
+                 source_video_track_count, source_audio_track_count, source_subtitle_track_count,
                  source_size_bytes, source_size_mb, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
             ON CONFLICT (source_path, source_mtime) DO UPDATE SET
                 source_codec         = COALESCE(conversions.source_codec,         excluded.source_codec),
                 source_bitrate_kbps  = excluded.source_bitrate_kbps,
                 source_duration_secs = excluded.source_duration_secs,
                 source_video_track_count = excluded.source_video_track_count,
                 source_audio_track_count = excluded.source_audio_track_count,
+                source_subtitle_track_count = excluded.source_subtitle_track_count,
                 source_size_bytes    = COALESCE(conversions.source_size_bytes,    excluded.source_size_bytes),
                 source_size_mb       = COALESCE(conversions.source_size_mb,       excluded.source_size_mb)
             """,
             (source_path, source_mtime, codec, bitrate_kbps, duration_secs,
-             video_track_count, audio_track_count,
+             video_track_count, audio_track_count, subtitle_track_count,
              source_size_bytes, source_size_mb),
         )
 

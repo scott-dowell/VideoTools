@@ -439,6 +439,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "bitrate_kbps": cached_bitrate,
                         "video_track_count": db_info.get("video_track_count"),
                         "audio_track_count": db_info.get("audio_track_count"),
+                        "subtitle_track_count": db_info.get("subtitle_track_count"),
                         "is_hi10":      False,
                         "streams":      None,
                         "status":       "done",
@@ -452,7 +453,12 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "est_aggregation": est_agg_val,
                         "ocr_status":   "done" if _has_ocr_sidecar(full_path) else "",
                     })
-                    if cached_bitrate is None:
+                    missing_track_meta = (
+                        db_info.get("video_track_count") is None
+                        or db_info.get("audio_track_count") is None
+                        or db_info.get("subtitle_track_count") is None
+                    )
+                    if cached_bitrate is None or missing_track_meta:
                         record_id = db_info.get("id")
                         if record_id:
                             to_probe_done.append({"full_path": fp, "record_id": record_id})
@@ -480,6 +486,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                 "bitrate_kbps":    cached_bitrate,
                 "video_track_count": db_info.get("video_track_count"),
                 "audio_track_count": db_info.get("audio_track_count"),
+                "subtitle_track_count": db_info.get("subtitle_track_count"),
                 "is_hi10":         False,
                 "streams":         None,
                 "status":          db_status if (db_status and db_status not in ("pending", "queued")) else "pending",
@@ -498,8 +505,13 @@ def walk(root: str) -> Generator[dict, None, None]:
             if not db_info:
                 # No DB record — must hash-check in Phase 2 before deciding to probe
                 to_hash_check.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
-            elif cached_bitrate is None:
-                # Known pending file but never probed — queue for Phase 3 ffprobe
+            elif (
+                cached_bitrate is None
+                or db_info.get("video_track_count") is None
+                or db_info.get("audio_track_count") is None
+                or db_info.get("subtitle_track_count") is None
+            ):
+                # Known file with missing probe-derived metadata — queue for Phase 3 ffprobe
                 to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
             else:
                 # Already probed — queue a size back-fill if DB record lacks it
@@ -589,7 +601,8 @@ def walk(root: str) -> Generator[dict, None, None]:
 
         # Persist probe result (including file size) so future scans skip ffprobe.
         db.save_probe_result(fp, mtime, display_codec, bitrate_kbps, dur_secs,
-                     video_track_count=v_tracks, audio_track_count=a_tracks,
+                 video_track_count=v_tracks, audio_track_count=a_tracks,
+                     subtitle_track_count=s_tracks,
                              source_size_bytes=size_bytes, source_size_mb=size_mb)
 
         yield {
@@ -645,6 +658,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                 dur_secs,
                 video_track_count=v_tracks,
                 audio_track_count=a_tracks,
+                subtitle_track_count=s_tracks,
             )
         except OSError:
             pass

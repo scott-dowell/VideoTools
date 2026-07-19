@@ -39,7 +39,7 @@ let _streamReplaceConfirmModal = null;
 let _engStereoReplaceConfirmModal = null;
 let _subtitleLikelyCache = {};     // key: "<full_path>|<stream_index>" -> detection payload
 let _subtitleLikelyPending = new Set();
-const _QUEUE_COL_COUNT = 17;
+const _QUEUE_COL_COUNT = 18;
 
 // Estimation background task state
 let _estUserPaused  = false;  // user clicked the strip
@@ -189,6 +189,7 @@ function _syncTrackCountsFromStreams(f) {
   if (!f || !f.streams) return;
   f.video_track_count = f.streams.video ? 1 : 0;
   f.audio_track_count = Array.isArray(f.streams.audio) ? f.streams.audio.length : 0;
+  f.subtitle_track_count = Array.isArray(f.streams.subs) ? f.streams.subs.length : 0;
 }
 
 function _sortFiles(files) {
@@ -432,7 +433,13 @@ function buildRow(f, index) {
   tdATracks.textContent = _trackCountText(f.audio_track_count);
   tr.appendChild(tdATracks);
 
-  // col 5b — Est. saving
+  // col 8 — Subtitle tracks
+  const tdSTracks = document.createElement('td');
+  tdSTracks.className = 'text-end text-secondary';
+  tdSTracks.textContent = _trackCountText(f.subtitle_track_count);
+  tr.appendChild(tdSTracks);
+
+  // col 9 — Est. saving
   const tdEst = document.createElement('td');
   tdEst.className = 'text-end';
   tdEst.id = 'est-' + index;
@@ -446,39 +453,39 @@ function buildRow(f, index) {
   }
   tr.appendChild(tdEst);
 
-  // col 6 — Output
+  // col 10 — Output
   const tdOut = document.createElement('td');
   tdOut.className = 'text-end';
   tdOut.textContent = f.output ? f.output + ' MB' : '';
   tr.appendChild(tdOut);
 
-  // col 7 — Saved
+  // col 11 — Saved
   const tdSaved = document.createElement('td');
   tdSaved.className = 'text-end text-success';
   tdSaved.textContent = f.saved ? f.saved + ' MB' : '';
   tr.appendChild(tdSaved);
 
-  // col 8 — %
+  // col 12 — %
   const tdPct = document.createElement('td');
   tdPct.className = 'text-end';
   if (f.pct) tdPct.innerHTML = '<strong>' + f.pct + '%</strong>';
   tr.appendChild(tdPct);
 
-  // col 12 — Conversion speed
+  // col 13 — Conversion speed
   const tdSpeed = document.createElement('td');
   tdSpeed.className = 'text-end text-secondary';
   const speedX = _conversionSpeedX(_parseDuration(f.duration), f.conv_secs || 0);
   tdSpeed.textContent = speedX > 0 ? _formatSpeedX(speedX) : '';
   tr.appendChild(tdSpeed);
 
-  // col 13 — Conversion time
+  // col 14 — Conversion time
   const tdTime = document.createElement('td');
   tdTime.className = 'text-end text-secondary';
   tdTime.style.whiteSpace = 'nowrap';
   tdTime.textContent = f.conv_secs ? _fmtDuration(f.conv_secs) : '';
   tr.appendChild(tdTime);
 
-  // col 14 — Actions
+  // col 15 — Actions
   const tdAct = document.createElement('td');
   tdAct.style.width = '32px';
   const btn = document.createElement('button');
@@ -515,12 +522,13 @@ function _updateRowProbe(idx, f) {
   if (!tr) return;
   const cells = tr.querySelectorAll('td');
   // Column order matches buildRow:
-  // 0=handle 1=folder 2=name 3=size 4=bitrate 5=codec 6=duration 7=status 8=vtracks 9=atracks 10=est …
+  // 0=handle 1=folder 2=name 3=size 4=bitrate 5=codec 6=duration 7=status 8=vtracks 9=atracks 10=stracks 11=est …
   const tdBr    = cells[4];
   const tdCodec = cells[5];
   const tdDur   = cells[6];
   const tdVTracks = cells[8];
   const tdATracks = cells[9];
+  const tdSTracks = cells[10];
   if (tdBr) {
     const br = f.bitrate_kbps || 0;
     tdBr.textContent = br > 0 ? (br >= 1000 ? (br/1000).toFixed(1)+' Mbps' : br+' kbps') : '—';
@@ -540,6 +548,9 @@ function _updateRowProbe(idx, f) {
   }
   if (tdATracks) {
     tdATracks.textContent = _trackCountText(f.audio_track_count);
+  }
+  if (tdSTracks) {
+    tdSTracks.textContent = _trackCountText(f.subtitle_track_count);
   }
   // Scroll to keep the probed row visible (instant — no smooth-scroll jitter)
   if (_probeDone < _probeTotal) {
@@ -950,6 +961,9 @@ function scanFolder(path) {
       f.streams      = msg.streams;
       f.video_track_count = msg.video_track_count;
       f.audio_track_count = msg.audio_track_count;
+      f.subtitle_track_count = (msg.subtitle_track_count != null)
+        ? msg.subtitle_track_count
+        : ((msg.streams && Array.isArray(msg.streams.subs)) ? msg.streams.subs.length : f.subtitle_track_count);
       f.bitrate_kbps = msg.bitrate_kbps || (msg.streams && msg.streams.video
         ? Math.round((msg.streams.video.bitrate || 0) / 1000) : 0);
       _updateRowProbe(idx, f);
@@ -1523,17 +1537,17 @@ function _pollStatus() {
               _lastAutoScrollPath = f.full_path;
             }
           }
-          // Output/Saved/% cells (cols 11, 12, 13)
+          // Output/Saved/% cells (cols 12, 13, 14)
           if (sf.status === 'done') {
-            if (row.cells[11]) row.cells[11].textContent  = sf.output ? sf.output + ' MB' : '';
-            if (row.cells[12]) row.cells[12].textContent = sf.saved  ? sf.saved  + ' MB' : '';
-            if (row.cells[13]) row.cells[13].innerHTML   = sf.pct     ? '<strong>' + sf.pct + '%</strong>' : '';
+            if (row.cells[12]) row.cells[12].textContent  = sf.output ? sf.output + ' MB' : '';
+            if (row.cells[13]) row.cells[13].textContent = sf.saved  ? sf.saved  + ' MB' : '';
+            if (row.cells[14]) row.cells[14].innerHTML   = sf.pct     ? '<strong>' + sf.pct + '%</strong>' : '';
           }
           if (sf.conv_secs !== undefined) {
-            if (row.cells[15]) row.cells[15].textContent = sf.conv_secs ? _fmtDuration(sf.conv_secs) : '';
-            if (row.cells[14]) {
+            if (row.cells[16]) row.cells[16].textContent = sf.conv_secs ? _fmtDuration(sf.conv_secs) : '';
+            if (row.cells[15]) {
               const sx = _conversionSpeedX(_parseDuration(f.duration), sf.conv_secs || 0);
-              row.cells[14].textContent = sx > 0 ? _formatSpeedX(sx) : '';
+              row.cells[15].textContent = sx > 0 ? _formatSpeedX(sx) : '';
             }
           }
           const estCell = document.getElementById('est-' + idx);
@@ -2434,11 +2448,29 @@ function commitStreamEditPreview() {
     _detailsPreviewPath = '';
     f.dropped_streams = [];
     f.status = data.status || 'pending';
-    f.output = null;
-    f.saved = null;
-    f.pct = null;
+    f.output = data.output_mb != null ? _fmtMbVal(data.output_mb) : null;
+    f.saved = data.saved_mb != null ? _fmtMbVal(data.saved_mb) : null;
+    f.pct = data.saved_pct != null ? String(data.saved_pct) : null;
     if (data.new_size_mb != null) {
       f.size = _fmtMbVal(data.new_size_mb);
+    }
+    if (data.bitrate_kbps != null) {
+      f.bitrate_kbps = Number(data.bitrate_kbps) || 0;
+    }
+    if (data.duration) {
+      f.duration = data.duration;
+    }
+    if (data.video_track_count != null) {
+      f.video_track_count = Number(data.video_track_count) || 0;
+    }
+    if (data.audio_track_count != null) {
+      f.audio_track_count = Number(data.audio_track_count) || 0;
+    }
+    if (data.subtitle_track_count != null) {
+      f.subtitle_track_count = Number(data.subtitle_track_count) || 0;
+    }
+    if (data.codec) {
+      f.codec = String(data.codec).toUpperCase();
     }
     if (data.streams) {
       f.streams = data.streams;
@@ -2450,9 +2482,14 @@ function commitStreamEditPreview() {
     _renderRowStatusCell(_detailsFileIndex);
     const row = document.getElementById('row-' + _detailsFileIndex);
     if (row) {
-      row.classList.remove('tr-done', 'tr-failed');
+      row.classList.toggle('tr-done', f.status === 'done');
+      row.classList.toggle('tr-failed', f.status === 'failed');
+      row.classList.toggle('tr-low-savings', f.status === 'low_savings');
       row.cells[3].textContent = (f.size || '0') + ' MB';
       _updateRowProbe(_detailsFileIndex, f);
+      if (row.cells[12]) row.cells[12].textContent = f.output ? f.output + ' MB' : '';
+      if (row.cells[13]) row.cells[13].textContent = f.saved ? f.saved + ' MB' : '';
+      if (row.cells[14]) row.cells[14].textContent = f.pct ? f.pct + ' %' : '';
     }
     updateStats(_files);
     _setDetailsButtonsDisabled(false);
@@ -2593,11 +2630,29 @@ function commitEngStereoPreview() {
 
     _detailsEngStereoPreviewPath = '';
     f.status = data.status || 'pending';
-    f.output = null;
-    f.saved = null;
-    f.pct = null;
+    f.output = data.output_mb != null ? _fmtMbVal(data.output_mb) : null;
+    f.saved = data.saved_mb != null ? _fmtMbVal(data.saved_mb) : null;
+    f.pct = data.saved_pct != null ? String(data.saved_pct) : null;
     if (data.new_size_mb != null) {
       f.size = _fmtMbVal(data.new_size_mb);
+    }
+    if (data.bitrate_kbps != null) {
+      f.bitrate_kbps = Number(data.bitrate_kbps) || 0;
+    }
+    if (data.duration) {
+      f.duration = data.duration;
+    }
+    if (data.video_track_count != null) {
+      f.video_track_count = Number(data.video_track_count) || 0;
+    }
+    if (data.audio_track_count != null) {
+      f.audio_track_count = Number(data.audio_track_count) || 0;
+    }
+    if (data.subtitle_track_count != null) {
+      f.subtitle_track_count = Number(data.subtitle_track_count) || 0;
+    }
+    if (data.codec) {
+      f.codec = String(data.codec).toUpperCase();
     }
     if (data.streams) {
       f.streams = data.streams;
@@ -2609,9 +2664,14 @@ function commitEngStereoPreview() {
     _renderRowStatusCell(_detailsFileIndex);
     const row = document.getElementById('row-' + _detailsFileIndex);
     if (row) {
-      row.classList.remove('tr-done', 'tr-failed');
+      row.classList.toggle('tr-done', f.status === 'done');
+      row.classList.toggle('tr-failed', f.status === 'failed');
+      row.classList.toggle('tr-low-savings', f.status === 'low_savings');
       row.cells[3].textContent = (f.size || '0') + ' MB';
       _updateRowProbe(_detailsFileIndex, f);
+      if (row.cells[12]) row.cells[12].textContent = f.output ? f.output + ' MB' : '';
+      if (row.cells[13]) row.cells[13].textContent = f.saved ? f.saved + ' MB' : '';
+      if (row.cells[14]) row.cells[14].textContent = f.pct ? f.pct + ' %' : '';
     }
     updateStats(_files);
     _setDetailsButtonsDisabled(false);
@@ -2985,11 +3045,11 @@ function resetToPending(index) {
       if (row) {
         row.classList.remove('tr-done', 'tr-failed', 'tr-low-savings', 'tr-skipped', 'tr-converting');
         row.cells[7].innerHTML = _badgeHtml('pending', !!f.force_sw, !!f.force_convert) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
-        if (row.cells[11]) row.cells[11].textContent = '';
         if (row.cells[12]) row.cells[12].textContent = '';
-        if (row.cells[13]) row.cells[13].innerHTML = '';
-        if (row.cells[14]) row.cells[14].textContent = '';
+        if (row.cells[13]) row.cells[13].textContent = '';
+        if (row.cells[14]) row.cells[14].innerHTML = '';
         if (row.cells[15]) row.cells[15].textContent = '';
+        if (row.cells[16]) row.cells[16].textContent = '';
       }
       updateStats(_files);
       applyFilter();

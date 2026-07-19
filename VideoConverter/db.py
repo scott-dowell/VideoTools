@@ -584,7 +584,7 @@ def sync_after_stream_edit(
     source_audio_track_count: int | None,
     content_hash: str | None,
     completed_at: str,
-) -> str:
+) -> dict:
     """Persist file metadata after in-place stream-edit replacement.
 
     If the file has already been converted before, keep the replacement as
@@ -598,14 +598,39 @@ def sync_after_stream_edit(
             "WHERE source_path = ? ORDER BY id DESC LIMIT 1",
             (source_path,),
         ).fetchone()
-        done_exists = conn.execute(
-            "SELECT 1 FROM conversions WHERE source_path = ? AND status = 'done' LIMIT 1",
+        done_row = conn.execute(
+            "SELECT source_size_bytes, source_size_mb FROM conversions "
+            "WHERE source_path = ? AND status = 'done' ORDER BY id DESC LIMIT 1",
             (source_path,),
-        ).fetchone() is not None
+        ).fetchone()
+        done_exists = done_row is not None
         new_status = "done" if done_exists else "pending"
         anime_mode = int(prev["anime_mode"]) if prev else 0
         force_sw = int(prev["force_sw"]) if prev else 0
         force_convert = int(prev["force_convert"]) if prev else 0
+
+        baseline_size_bytes = int(done_row["source_size_bytes"] or 0) if done_row else int(source_size_bytes or 0)
+        baseline_size_mb = float(done_row["source_size_mb"] or 0.0) if done_row else float(source_size_mb or 0.0)
+        current_size_mb = float(source_size_mb or 0.0)
+
+        if new_status == "done":
+            out_path = source_path
+            out_size_mb = current_size_mb
+            out_hash = content_hash
+            out_bitrate = source_bitrate_kbps
+            saved_mb = max(0.0, baseline_size_mb - current_size_mb) if baseline_size_mb > 0 else 0.0
+            saved_pct = int(round((saved_mb / baseline_size_mb) * 100)) if baseline_size_mb > 0 else 0
+            src_size_bytes_store = baseline_size_bytes if baseline_size_bytes > 0 else int(source_size_bytes or 0)
+            src_size_mb_store = baseline_size_mb if baseline_size_mb > 0 else current_size_mb
+        else:
+            out_path = None
+            out_size_mb = None
+            out_hash = None
+            out_bitrate = None
+            saved_mb = None
+            saved_pct = None
+            src_size_bytes_store = int(source_size_bytes or 0)
+            src_size_mb_store = current_size_mb
 
         conn.execute(
             """
@@ -615,9 +640,10 @@ def sync_after_stream_edit(
                 source_video_track_count, source_audio_track_count,
                 status, anime_mode, force_sw, force_convert,
                 output_path, output_size_mb, output_hash, output_bitrate_kbps,
+                saved_mb, saved_pct,
                 encoder_used, completed_at, dropped_streams, error_tail, started_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             ON CONFLICT(source_path, source_mtime) DO UPDATE SET
                 source_size_bytes    = excluded.source_size_bytes,
                 source_size_mb       = excluded.source_size_mb,
@@ -635,6 +661,8 @@ def sync_after_stream_edit(
                 output_size_mb       = excluded.output_size_mb,
                 output_hash          = excluded.output_hash,
                 output_bitrate_kbps  = excluded.output_bitrate_kbps,
+                saved_mb             = excluded.saved_mb,
+                saved_pct            = excluded.saved_pct,
                 encoder_used         = excluded.encoder_used,
                 completed_at         = excluded.completed_at,
                 dropped_streams      = excluded.dropped_streams,
@@ -644,8 +672,8 @@ def sync_after_stream_edit(
             (
                 source_path,
                 source_mtime,
-                source_size_bytes,
-                source_size_mb,
+                src_size_bytes_store,
+                src_size_mb_store,
                 source_codec,
                 content_hash,
                 source_bitrate_kbps,
@@ -656,16 +684,23 @@ def sync_after_stream_edit(
                 anime_mode,
                 force_sw,
                 force_convert,
-                source_path,
-                source_size_mb,
-                content_hash,
-                source_bitrate_kbps,
+                out_path,
+                out_size_mb,
+                out_hash,
+                out_bitrate,
+                saved_mb,
+                saved_pct,
                 "stream_edit_copy",
                 completed_at,
                 _json.dumps([]),
             ),
         )
-    return new_status
+    return {
+        "status": new_status,
+        "output_size_mb": out_size_mb,
+        "saved_mb": saved_mb,
+        "saved_pct": saved_pct,
+    }
 
 
 def save_probe_result(

@@ -140,6 +140,7 @@ def _parse_probe(probe: dict) -> dict:
         "duration_secs": float,
                 "video_track_count": int,
                 "audio_track_count": int,
+            "subtitle_track_count": int,
       }
     """
     video_stream: dict | None = None
@@ -186,6 +187,7 @@ def _parse_probe(probe: dict) -> dict:
             "duration_secs": duration_secs,
             "video_track_count": 0,
             "audio_track_count": len(audio_streams),
+            "subtitle_track_count": len(sub_streams),
         }
 
     codec_name = video_stream.get("codec_name", "")
@@ -220,6 +222,7 @@ def _parse_probe(probe: dict) -> dict:
         "duration_secs": duration_secs,
         "video_track_count": 1,
         "audio_track_count": len(audio_streams),
+        "subtitle_track_count": len(sub_streams),
     }
 
 
@@ -575,6 +578,7 @@ def walk(root: str) -> Generator[dict, None, None]:
         dur_secs      = parsed["duration_secs"]
         v_tracks      = parsed.get("video_track_count", 0)
         a_tracks      = parsed.get("audio_track_count", 0)
+        s_tracks      = parsed.get("subtitle_track_count", 0)
         if not size_bytes:
             try:
                 size_bytes = os.path.getsize(fp)
@@ -598,6 +602,7 @@ def walk(root: str) -> Generator[dict, None, None]:
             "bitrate_kbps": bitrate_kbps,
             "video_track_count": v_tracks,
             "audio_track_count": a_tracks,
+            "subtitle_track_count": s_tracks,
         }
         kept += 1
 
@@ -620,6 +625,7 @@ def walk(root: str) -> Generator[dict, None, None]:
         dur_secs      = parsed["duration_secs"]
         v_tracks      = parsed.get("video_track_count", 0)
         a_tracks      = parsed.get("audio_track_count", 0)
+        s_tracks      = parsed.get("subtitle_track_count", 0)
         try:
             size_bytes = os.path.getsize(fp)
         except OSError:
@@ -652,6 +658,7 @@ def walk(root: str) -> Generator[dict, None, None]:
             "bitrate_kbps": bitrate_kbps,
             "video_track_count": v_tracks,
             "audio_track_count": a_tracks,
+            "subtitle_track_count": s_tracks,
         }
 
     yield {

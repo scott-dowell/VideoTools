@@ -329,6 +329,55 @@ def _is_job_running() -> bool:
         return _job.get("state") == "running"
 
 
+def _sync_post_edit_metadata(path: str, size_bytes: int, size_mb: float, mtime: float) -> dict:
+    """Probe and persist metadata after in-place file replacement."""
+    parsed: dict = {}
+    try:
+        probe = scanner._ffprobe(path)
+        parsed = scanner._parse_probe(probe) if probe else {}
+    except Exception:
+        parsed = {}
+
+    streams = (parsed.get("streams") or None) if parsed else None
+    codec = (parsed.get("codec") or "").upper() if parsed else ""
+    duration_secs = float(parsed.get("duration_secs", 0.0)) if parsed else 0.0
+    video_track_count = int(parsed.get("video_track_count", 0)) if parsed else 0
+    audio_track_count = int(parsed.get("audio_track_count", 0)) if parsed else 0
+    subtitle_track_count = int(parsed.get("subtitle_track_count", 0)) if parsed else 0
+    bitrate_kbps = int(round(size_bytes * 8 / duration_secs / 1000)) if duration_secs > 0 and size_bytes > 0 else 0
+    file_hash = db.hash_file_head(path)
+
+    sync_info = db.sync_after_stream_edit(
+        source_path=path,
+        source_mtime=mtime,
+        source_size_bytes=size_bytes,
+        source_size_mb=size_mb,
+        source_codec=codec or None,
+        source_bitrate_kbps=bitrate_kbps or None,
+        source_duration_secs=duration_secs or None,
+        source_video_track_count=video_track_count,
+        source_audio_track_count=audio_track_count,
+        content_hash=file_hash,
+        completed_at=_utcnow(),
+    )
+
+    return {
+        "status": sync_info.get("status", "pending"),
+        "streams": streams,
+        "codec": codec,
+        "bitrate_kbps": bitrate_kbps,
+        "duration_secs": duration_secs,
+        "duration": scanner._format_duration(duration_secs) if duration_secs > 0 else "",
+        "video_track_count": video_track_count,
+        "audio_track_count": audio_track_count,
+        "subtitle_track_count": subtitle_track_count,
+        "source_hash": file_hash,
+        "output_mb": sync_info.get("output_size_mb"),
+        "saved_mb": sync_info.get("saved_mb"),
+        "saved_pct": sync_info.get("saved_pct"),
+    }
+
+
 def _normalise_lang_code(lang: str) -> str:
     """Normalise mixed language tags (eng/en/EN-us) into compact codes."""
     raw = (lang or "").strip().lower().replace("_", "-")
@@ -2174,39 +2223,27 @@ def api_stream_edit_commit():
 
     # Sync DB metadata for the new file bytes. Preserve done status when the
     # previous record was already done so edited files don't re-queue as pending.
-    status = "pending"
     try:
-        probe = scanner._ffprobe(path)
-        parsed = scanner._parse_probe(probe) if probe else {}
-        codec = (parsed.get("codec") or "").upper() if parsed else ""
-        bitrate = int(((parsed.get("streams") or {}).get("video") or {}).get("bitrate", 0) / 1000) if parsed else 0
-        duration = float(parsed.get("duration_secs", 0.0)) if parsed else 0.0
-        video_track_count = int(parsed.get("video_track_count", 0)) if parsed else 0
-        audio_track_count = int(parsed.get("audio_track_count", 0)) if parsed else 0
-        file_hash = db.hash_file_head(path)
-        status = db.sync_after_stream_edit(
-            source_path=path,
-            source_mtime=mtime,
-            source_size_bytes=size_bytes,
-            source_size_mb=size_mb,
-            source_codec=codec or None,
-            source_bitrate_kbps=bitrate or None,
-            source_duration_secs=duration or None,
-            source_video_track_count=video_track_count,
-            source_audio_track_count=audio_track_count,
-            content_hash=file_hash,
-            completed_at=_utcnow(),
-        )
-        streams = (parsed.get("streams") or None) if parsed else None
-    except Exception:
-        streams = None
+        meta = _sync_post_edit_metadata(path, size_bytes, size_mb, mtime)
+    except Exception as exc:
+        return jsonify({"error": f"metadata sync failed: {exc}"}), 500
 
     return jsonify({
         "ok": True,
         "path": path,
         "new_size_mb": size_mb,
-        "status": status,
-        "streams": streams,
+        "status": meta["status"],
+        "streams": meta["streams"],
+        "codec": meta["codec"],
+        "bitrate_kbps": meta["bitrate_kbps"],
+        "duration_secs": meta["duration_secs"],
+        "duration": meta["duration"],
+        "video_track_count": meta["video_track_count"],
+        "audio_track_count": meta["audio_track_count"],
+        "subtitle_track_count": meta["subtitle_track_count"],
+        "output_mb": meta["output_mb"],
+        "saved_mb": meta["saved_mb"],
+        "saved_pct": meta["saved_pct"],
     })
 
 
@@ -2358,40 +2395,28 @@ def api_eng_stereo_commit():
         size_bytes = 0
         mtime = time.time()
 
-    status = "pending"
     try:
-        probe = scanner._ffprobe(path)
-        parsed = scanner._parse_probe(probe) if probe else {}
-        codec = (parsed.get("codec") or "").upper() if parsed else ""
-        bitrate = int(((parsed.get("streams") or {}).get("video") or {}).get("bitrate", 0) / 1000) if parsed else 0
-        duration = float(parsed.get("duration_secs", 0.0)) if parsed else 0.0
-        video_track_count = int(parsed.get("video_track_count", 0)) if parsed else 0
-        audio_track_count = int(parsed.get("audio_track_count", 0)) if parsed else 0
-        file_hash = db.hash_file_head(path)
-        status = db.sync_after_stream_edit(
-            source_path=path,
-            source_mtime=mtime,
-            source_size_bytes=size_bytes,
-            source_size_mb=size_mb,
-            source_codec=codec or None,
-            source_bitrate_kbps=bitrate or None,
-            source_duration_secs=duration or None,
-            source_video_track_count=video_track_count,
-            source_audio_track_count=audio_track_count,
-            content_hash=file_hash,
-            completed_at=_utcnow(),
-        )
-        streams = (parsed.get("streams") or None) if parsed else None
-    except Exception:
-        streams = None
+        meta = _sync_post_edit_metadata(path, size_bytes, size_mb, mtime)
+    except Exception as exc:
+        return jsonify({"error": f"metadata sync failed: {exc}"}), 500
 
     return jsonify({
         "ok": True,
         "path": path,
         "backup_path": backup,
         "new_size_mb": size_mb,
-        "status": status,
-        "streams": streams,
+        "status": meta["status"],
+        "streams": meta["streams"],
+        "codec": meta["codec"],
+        "bitrate_kbps": meta["bitrate_kbps"],
+        "duration_secs": meta["duration_secs"],
+        "duration": meta["duration"],
+        "video_track_count": meta["video_track_count"],
+        "audio_track_count": meta["audio_track_count"],
+        "subtitle_track_count": meta["subtitle_track_count"],
+        "output_mb": meta["output_mb"],
+        "saved_mb": meta["saved_mb"],
+        "saved_pct": meta["saved_pct"],
     })
 
 

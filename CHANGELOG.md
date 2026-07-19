@@ -7,6 +7,7 @@ The format is based on Keep a Changelog.
 ## [Unreleased]
 
 - #4 Normalize changelog format to one bullet line per issue (remove Added/Changed/Fixed grouping).
+- #5 Refresh DB/UI metadata immediately after stream-edit accepts (including Output/Saved/%), fail fast on metadata-sync errors, and add subtitle track count as an S column in the queue table.
 - #6 Improve savings accuracy by using per-segment source-vs-encoded estimator samples, lower HEVC fast-skip to 500 kbps (normalized), update OCR prepass row chips per-file as each OCR result completes, mark rows as OCR-done at scan time when prior .pgs*.srt sidecars already exist, and remove OCR-generated .pgsN.srt sidecars after successful remux.
 
 ## [0.0.001] - 2026-06-13

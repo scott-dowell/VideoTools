@@ -21,7 +21,7 @@ let _filterDurMin  = ''; let _filterDurMax  = '';
 let _filterCodec   = '';
 let _appState     = 'idle';  // idle | scanning | ready | running | done | stopped
 let _dragSrcIndex = null;
-let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'duration' | 'est_saving' | 'est_saving_mb'
+let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'path' | 'duration' | 'video_tracks' | 'audio_tracks' | 'subtitle_tracks' | 'est_saving' | 'est_saving_mb'
 let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
 let _lastAutoScrollPath = null; // path of row last auto-scrolled to; prevents re-scroll on every poll
@@ -196,11 +196,18 @@ function _syncTrackCountsFromStreams(f) {
 function _sortFiles(files) {
   const arr = [...files];
   const mul = _sortDir === 'asc' ? -1 : 1;
+  const _num = v => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
   if (_sortBy === 'bitrate') arr.sort((a, b) => (_fileBitrate(b) - _fileBitrate(a)) * mul);
   else if (_sortBy === 'size') arr.sort((a, b) => ((parseFloat((b.size||'0').replace(/,/g,''))||0) - (parseFloat((a.size||'0').replace(/,/g,''))||0)) * mul);
   else if (_sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name) * mul);
   else if (_sortBy === 'path') arr.sort((a, b) => (a.full_path || '').localeCompare(b.full_path || '') * mul);
   else if (_sortBy === 'duration') arr.sort((a, b) => (_parseDuration(b.duration) - _parseDuration(a.duration)) * mul);
+  else if (_sortBy === 'video_tracks') arr.sort((a, b) => (_num(b.video_track_count) - _num(a.video_track_count)) * mul);
+  else if (_sortBy === 'audio_tracks') arr.sort((a, b) => (_num(b.audio_track_count) - _num(a.audio_track_count)) * mul);
+  else if (_sortBy === 'subtitle_tracks') arr.sort((a, b) => (_num(b.subtitle_track_count) - _num(a.subtitle_track_count)) * mul);
   else if (_sortBy === 'est_saving')    arr.sort((a, b) => ((b.est_pct || 0) - (a.est_pct || 0)) * mul);
   else if (_sortBy === 'est_saving_mb') arr.sort((a, b) => ((b.est_mb  || 0) - (a.est_mb  || 0)) * mul);
   return arr;

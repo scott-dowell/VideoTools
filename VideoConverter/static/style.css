@@ -219,23 +219,34 @@ tr.drag-over > td { background-color: rgba(29,109,224,.15) !important;
 .details-kv-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: .45rem .75rem;
+  gap: .35rem .65rem;
 }
 .details-kv-item {
   border: 1px solid var(--bs-border-color);
   border-radius: .35rem;
-  padding: .4rem .55rem;
+  padding: .33rem .5rem;
   min-width: 0;
+}
+.details-kv-line {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:.55rem;
+  min-width:0;
 }
 .details-kv-label {
   color:#8b949e;
-  font-size:.72rem;
+  font-size:.67rem;
   text-transform:uppercase;
   letter-spacing:.04em;
-  margin-bottom:.15rem;
+  margin-bottom:0;
+  flex:0 0 auto;
 }
 .details-kv-value {
-  font-size:.86rem;
+  font-size:.84rem;
+  text-align:right;
+  line-height:1.2;
+  min-width:0;
   overflow-wrap:anywhere;
 }
 @media (max-width: 768px) {

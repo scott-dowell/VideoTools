@@ -1996,25 +1996,25 @@ function viewDetails(index) {
   let html = `
     <h6 class="details-section-head"><i class="bi bi-camera-video me-2"></i>Video Stream</h6>
     <div class="details-kv-grid mb-3">
-      <div class="details-kv-item"><div class="details-kv-label">Codec</div><div class="details-kv-value">${v ? codecBadge + hdrBadge : '—'}</div></div>
-      <div class="details-kv-item"><div class="details-kv-label">Profile / Level</div><div class="details-kv-value">${v ? v.profile + ' / L' + v.level : '—'}</div></div>
-      <div class="details-kv-item"><div class="details-kv-label">Resolution</div><div class="details-kv-value">${v ? v.resolution : '—'}</div></div>
-      <div class="details-kv-item"><div class="details-kv-label">Frame rate</div><div class="details-kv-value">${v ? v.fps + ' fps' : '—'}</div></div>
-      <div class="details-kv-item"><div class="details-kv-label">Bitrate</div><div class="details-kv-value">${v ? v.bitrate : '—'}</div></div>
-      <div class="details-kv-item"><div class="details-kv-label">Pixel format</div><div class="details-kv-value">${v ? v.color : '—'}</div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Codec</span><span class="details-kv-value">${v ? codecBadge + hdrBadge : '—'}</span></div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Profile / Level</span><span class="details-kv-value">${v ? v.profile + ' / L' + v.level : '—'}</span></div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Resolution</span><span class="details-kv-value">${v ? v.resolution : '—'}</span></div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Frame rate</span><span class="details-kv-value">${v ? v.fps + ' fps' : '—'}</span></div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Bitrate</span><span class="details-kv-value">${v ? v.bitrate : '—'}</span></div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Pixel format</span><span class="details-kv-value">${v ? v.color : '—'}</span></div></div>
     </div>`;
 
   // ---- File info ----
   html += `
     <h6 class="details-section-head"><i class="bi bi-file-earmark me-2"></i>File</h6>
     <div class="details-kv-grid mb-3">
-      <div class="details-kv-item"><div class="details-kv-label">Filename</div><div class="details-kv-value fw-semibold">${f.name}</div></div>
-      <div class="details-kv-item"><div class="details-kv-label">Folder</div><div class="details-kv-value">${f.folder || '<span class="text-secondary">(root)</span>'}</div></div>
-      <div class="details-kv-item"><div class="details-kv-label">File size</div><div class="details-kv-value">${f.size} MB</div></div>
-      <div class="details-kv-item"><div class="details-kv-label">Duration</div><div class="details-kv-value">${f.duration || '—'}</div></div>
-      ${f.est_pct != null ? `<div class="details-kv-item"><div class="details-kv-label">Estimate</div><div class="details-kv-value">${_estimateHtml(f)}</div></div>` : ''}
-      ${f.status === 'done' ? `<div class="details-kv-item"><div class="details-kv-label">Output size</div><div class="details-kv-value">${f.output} MB</div></div>
-      <div class="details-kv-item"><div class="details-kv-label">Space saved</div><div class="details-kv-value text-success fw-semibold">${f.saved} MB (${f.pct}%)</div></div>` : ''}
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Filename</span><span class="details-kv-value fw-semibold">${f.name}</span></div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Folder</span><span class="details-kv-value">${f.folder || '<span class="text-secondary">(root)</span>'}</span></div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">File size</span><span class="details-kv-value">${f.size} MB</span></div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Duration</span><span class="details-kv-value">${f.duration || '—'}</span></div></div>
+      ${f.est_pct != null ? `<div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Estimate</span><span class="details-kv-value">${_estimateHtml(f)}</span></div></div>` : ''}
+      ${f.status === 'done' ? `<div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Output size</span><span class="details-kv-value">${f.output} MB</span></div></div>
+      <div class="details-kv-item"><div class="details-kv-line"><span class="details-kv-label">Space saved</span><span class="details-kv-value text-success fw-semibold">${f.saved} MB (${f.pct}%)</span></div></div>` : ''}
     </div>`;
 
   // ---- Audio tracks ----

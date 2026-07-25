@@ -512,3 +512,159 @@ def test_batch_edit_plan_create_and_get(client, tmp_path):
     reasons = {f["source_path"]: (f["match_state"], f.get("match_reason") or "") for f in data2["files"]}
     assert reasons[str(peer_bad).replace("\\", "/")][0] == "excluded"
     assert "audio channels mismatch" in reasons[str(peer_bad).replace("\\", "/")][1]
+
+
+def test_batch_edit_plan_build_previews_resolves_drop_selectors_per_file(client, tmp_path):
+    folder = tmp_path / "season"
+    folder.mkdir()
+    rep = folder / "ep01.mkv"
+    peer = folder / "ep02.mkv"
+    rep.write_bytes(b"\x00")
+    peer.write_bytes(b"\x00")
+
+    rep_sig = {
+        "path": str(rep),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 10, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [{"index": 20, "track": 0, "codec": "pgs", "language": "ja", "title_norm": "full"}],
+    }
+    peer_sig = {
+        "path": str(peer),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 11, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [{"index": 21, "track": 0, "codec": "pgs", "language": "ja", "title_norm": "full"}],
+    }
+    sig_map = {
+        str(rep): rep_sig,
+        str(peer): peer_sig,
+    }
+
+    with patch("app._collect_folder_video_paths", return_value=[str(rep), str(peer)]), \
+         patch("app._build_stream_signature", side_effect=lambda p: sig_map.get(str(p))), \
+         patch("app.db.get_dropped_streams", return_value=[10]):
+        create_resp = client.post("/api/batch_edit_plan/create", json={
+            "path": str(rep),
+            "scope_mode": "matching_folder",
+            "include_eng_stereo": False,
+        })
+
+    assert create_resp.status_code == 200
+    plan_id = create_resp.get_json()["plan_id"]
+
+    class _ImmediateThread:
+        def __init__(self, target=None, args=(), kwargs=None, **_):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            if self._target:
+                self._target(*self._args, **self._kwargs)
+
+    seen = []
+
+    def _fake_stream_preview(path, dropped_indices, persist_selection=True):
+        seen.append((path, list(dropped_indices), persist_selection))
+        return True, ""
+
+    with patch("app.threading.Thread", side_effect=lambda *a, **k: _ImmediateThread(*a, **k)), \
+         patch("app._build_stream_signature", side_effect=lambda p: sig_map.get(str(p))), \
+         patch("app._create_stream_edit_preview", side_effect=_fake_stream_preview):
+        build_resp = client.post(f"/api/batch_edit_plan/{plan_id}/build_previews", json={})
+
+    assert build_resp.status_code == 200
+    assert build_resp.get_json()["ok"] is True
+    assert len(seen) == 2
+
+    seen_map = {Path(p).name: dropped for p, dropped, _persist in seen}
+    assert seen_map["ep01.mkv"] == [10]
+    assert seen_map["ep02.mkv"] == [11]
+
+    status_resp = client.get(f"/api/batch_edit_plan/{plan_id}/build_previews/status")
+    assert status_resp.status_code == 200
+    status_data = status_resp.get_json()
+    assert status_data["summary"]["preview_ready"] == 2
+    assert status_data["summary"]["preview_failed"] == 0
+    assert status_data["worker"]["state"] == "done"
+
+
+def test_batch_edit_plan_build_previews_records_failures(client, tmp_path):
+    folder = tmp_path / "season"
+    folder.mkdir()
+    rep = folder / "ep01.mkv"
+    peer = folder / "ep02.mkv"
+    rep.write_bytes(b"\x00")
+    peer.write_bytes(b"\x00")
+
+    rep_sig = {
+        "path": str(rep),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 10, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [],
+    }
+    peer_sig = {
+        "path": str(peer),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 11, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [],
+    }
+    sig_map = {
+        str(rep): rep_sig,
+        str(peer): peer_sig,
+    }
+
+    with patch("app._collect_folder_video_paths", return_value=[str(rep), str(peer)]), \
+         patch("app._build_stream_signature", side_effect=lambda p: sig_map.get(str(p))), \
+         patch("app.db.get_dropped_streams", return_value=[10]):
+        create_resp = client.post("/api/batch_edit_plan/create", json={
+            "path": str(rep),
+            "scope_mode": "matching_folder",
+            "include_eng_stereo": True,
+        })
+
+    assert create_resp.status_code == 200
+    plan_id = create_resp.get_json()["plan_id"]
+
+    class _ImmediateThread:
+        def __init__(self, target=None, args=(), kwargs=None, **_):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            if self._target:
+                self._target(*self._args, **self._kwargs)
+
+    def _fake_eng_preview(path):
+        if Path(path).name == "ep02.mkv":
+            return False, "No English audio track found"
+        return True, ""
+
+    with patch("app.threading.Thread", side_effect=lambda *a, **k: _ImmediateThread(*a, **k)), \
+         patch("app._build_stream_signature", side_effect=lambda p: sig_map.get(str(p))), \
+         patch("app._create_stream_edit_preview", return_value=(True, "")), \
+         patch("app._create_eng_stereo_preview", side_effect=_fake_eng_preview):
+        build_resp = client.post(f"/api/batch_edit_plan/{plan_id}/build_previews", json={})
+
+    assert build_resp.status_code == 200
+
+    get_resp = client.get(f"/api/batch_edit_plan/{plan_id}")
+    assert get_resp.status_code == 200
+    payload = get_resp.get_json()
+    assert payload["summary"]["preview_ready"] == 1
+    assert payload["summary"]["preview_failed"] == 1
+
+    rows = {Path(f["source_path"]).name: f for f in payload["files"]}
+    assert rows["ep01.mkv"]["preview_state"] == "ready"
+    assert rows["ep02.mkv"]["preview_state"] == "failed"
+    assert "eng stereo preview" in (rows["ep02.mkv"].get("preview_error") or "")
+
+
+def test_batch_edit_plan_build_previews_missing_plan_returns_404(client):
+    r = client.post("/api/batch_edit_plan/999999/build_previews", json={})
+    assert r.status_code == 404
+    assert "error" in r.get_json()

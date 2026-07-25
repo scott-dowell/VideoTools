@@ -69,6 +69,10 @@ _PROCESS_ALL_ACCESS = 0x1F0FFF
 _session_started_at: float = 0.0   # set when /api/start is called
 _ESTIMATE_VERSION = 3  # bump when estimate methodology/output semantics change
 
+# Batch preview worker state keyed by plan id.
+_batch_preview_lock = threading.Lock()
+_batch_preview_jobs: dict[int, dict] = {}
+
 
 def _as_float(value, default: float = 0.0) -> float:
     try:
@@ -544,6 +548,262 @@ def _build_drop_selectors(rep_sig: dict, dropped_indices: list[int]) -> list[dic
                 "title_norm": s.get("title_norm") or "",
             })
     return selectors
+
+
+def _resolve_drop_indices_for_signature(sig: dict, selectors: list[dict]) -> tuple[list[int], list[str]]:
+    """Resolve logical drop selectors to concrete stream indices for one file signature."""
+    resolved: list[int] = []
+    errors: list[str] = []
+
+    audio = sig.get("audio") or []
+    subs = sig.get("subs") or []
+
+    def _find_match(items: list[dict], selector: dict) -> dict | None:
+        kind = selector.get("kind")
+        ordinal = int(selector.get("ordinal") or 0)
+        by_ord = next((it for it in items if int(it.get("track") or -1) == ordinal), None)
+
+        def _matches(item: dict) -> bool:
+            if kind == "audio":
+                return (
+                    str(item.get("codec") or "") == str(selector.get("codec") or "")
+                    and str(item.get("language") or "") == str(selector.get("language") or "")
+                    and int(item.get("channels") or 0) == int(selector.get("channels") or 0)
+                )
+            return (
+                str(item.get("codec") or "") == str(selector.get("codec") or "")
+                and str(item.get("language") or "") == str(selector.get("language") or "")
+            )
+
+        if by_ord and _matches(by_ord):
+            return by_ord
+
+        for item in items:
+            if _matches(item):
+                return item
+        return None
+
+    for selector in selectors or []:
+        kind = str(selector.get("kind") or "").strip().lower()
+        if kind not in {"audio", "subtitle"}:
+            errors.append(f"unsupported selector kind '{kind or 'unknown'}'")
+            continue
+
+        pool = audio if kind == "audio" else subs
+        matched = _find_match(pool, selector)
+        if not matched or matched.get("index") is None:
+            errors.append(f"could not resolve {kind} selector at ordinal {int(selector.get('ordinal') or 0)}")
+            continue
+
+        try:
+            resolved.append(int(matched.get("index")))
+        except Exception:
+            errors.append(f"invalid resolved index for {kind} selector at ordinal {int(selector.get('ordinal') or 0)}")
+
+    return sorted(set(resolved)), errors
+
+
+def _create_stream_edit_preview(path: str, dropped_indices: list[int], *, persist_selection: bool = True) -> tuple[bool, str]:
+    """Create/overwrite a stream-copy preview file for one source path."""
+    preview = _stream_preview_path(path)
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-i", path,
+        "-map", "0",
+    ]
+    for idx in sorted(set(int(i) for i in dropped_indices)):
+        cmd += ["-map", f"-0:{idx}"]
+    cmd += ["-c", "copy", preview]
+
+    try:
+        proc = _sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60 * 60,
+        )
+    except Exception as exc:
+        return False, f"ffmpeg launch failed: {exc}"
+
+    if proc.returncode != 0 or not os.path.isfile(preview):
+        err = (proc.stderr or "").strip()
+        tail = "\n".join(err.splitlines()[-25:]) if err else "stream-copy failed"
+        return False, tail
+
+    if persist_selection:
+        db.set_dropped_streams(path, sorted(set(int(i) for i in dropped_indices)))
+
+    return True, ""
+
+
+def _create_eng_stereo_preview(path: str) -> tuple[bool, str]:
+    """Create/overwrite an English AAC stereo preview while preserving other audio tracks."""
+    audio_streams = _probe_audio_streams(path)
+    eng_index = next((s["index"] for s in audio_streams if s.get("language") == "eng"), None)
+    if eng_index is None:
+        return False, "No English audio track found"
+
+    other_audio_indices = [s["index"] for s in audio_streams if s.get("index") != eng_index]
+    preview = _eng_stereo_preview_path(path)
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-i", path,
+        "-map", "0:v",
+        "-map", f"0:{eng_index}",
+    ]
+    for audio_index in other_audio_indices:
+        cmd += ["-map", f"0:{audio_index}"]
+    cmd += [
+        "-map", "0:s?",
+        "-map", "0:t?",
+        "-c:v", "copy",
+        "-c:a", "copy",
+        "-c:s", "copy",
+        "-c:t", "copy",
+        "-c:a:0", "aac",
+        "-ac:a:0", "2",
+        "-b:a:0", "192k",
+        "-disposition:a:0", "default",
+        "-metadata:s:a:0", "language=eng",
+        "-metadata:s:a:0", "title=English Stereo Test",
+        preview,
+    ]
+
+    try:
+        proc = _sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60 * 60,
+        )
+    except Exception as exc:
+        return False, f"ffmpeg launch failed: {exc}"
+
+    if proc.returncode != 0 or not os.path.isfile(preview):
+        err = (proc.stderr or "").strip()
+        tail = "\n".join(err.splitlines()[-25:]) if err else "english stereo build failed"
+        return False, tail
+
+    return True, ""
+
+
+def _set_batch_preview_job(plan_id: int, **fields) -> dict:
+    """Upsert in-memory worker status for one batch preview plan."""
+    with _batch_preview_lock:
+        state = dict(_batch_preview_jobs.get(plan_id) or {"plan_id": plan_id})
+        state.update(fields)
+        _batch_preview_jobs[plan_id] = state
+        return dict(state)
+
+
+def _run_batch_preview_build(plan_id: int, source_paths: list[str]) -> None:
+    """Worker: build requested previews for compatible files in one plan."""
+    started_at = _utcnow()
+    total = len(source_paths)
+    _set_batch_preview_job(
+        plan_id,
+        state="running",
+        started_at=started_at,
+        finished_at=None,
+        total=total,
+        done=0,
+        ready=0,
+        failed=0,
+        error="",
+    )
+
+    try:
+        plan = db.get_batch_edit_plan(plan_id)
+        if not plan:
+            _set_batch_preview_job(
+                plan_id,
+                state="failed",
+                finished_at=_utcnow(),
+                error="Plan not found",
+            )
+            return
+
+        plan_json = plan.get("plan_json") or {}
+        selectors = plan_json.get("drop_selectors") if isinstance(plan_json.get("drop_selectors"), list) else []
+        include_eng_stereo = bool(plan_json.get("include_eng_stereo", False))
+        build_stream_preview = bool(selectors)
+
+        done = 0
+        ready = 0
+        failed = 0
+
+        for source_path in source_paths:
+            now = _utcnow()
+            db.update_batch_edit_plan_file_state(
+                plan_id,
+                source_path,
+                preview_state="building",
+                preview_error="",
+                updated_at=now,
+            )
+
+            errors: list[str] = []
+            sig = _build_stream_signature(source_path)
+            if not sig:
+                errors.append("missing probe metadata")
+
+            dropped_indices: list[int] = []
+            if not errors and build_stream_preview:
+                dropped_indices, resolve_errors = _resolve_drop_indices_for_signature(sig, selectors)
+                if resolve_errors:
+                    errors.extend(resolve_errors)
+
+            if not errors and build_stream_preview:
+                ok, err = _create_stream_edit_preview(source_path, dropped_indices, persist_selection=True)
+                if not ok:
+                    errors.append(f"stream preview: {err}")
+
+            if not errors and include_eng_stereo:
+                ok, err = _create_eng_stereo_preview(source_path)
+                if not ok:
+                    errors.append(f"eng stereo preview: {err}")
+
+            if errors:
+                failed += 1
+                db.update_batch_edit_plan_file_state(
+                    plan_id,
+                    source_path,
+                    preview_state="failed",
+                    preview_error=" | ".join(errors),
+                    updated_at=_utcnow(),
+                )
+            else:
+                ready += 1
+                db.update_batch_edit_plan_file_state(
+                    plan_id,
+                    source_path,
+                    preview_state="ready",
+                    preview_error="",
+                    updated_at=_utcnow(),
+                )
+
+            done += 1
+            _set_batch_preview_job(plan_id, done=done, ready=ready, failed=failed)
+
+        _set_batch_preview_job(
+            plan_id,
+            state="done",
+            finished_at=_utcnow(),
+            done=done,
+            ready=ready,
+            failed=failed,
+        )
+    except Exception as exc:
+        _set_batch_preview_job(
+            plan_id,
+            state="failed",
+            finished_at=_utcnow(),
+            error=str(exc),
+        )
 
 
 def _subtitle_payload_text(srt_text: str) -> str:
@@ -2297,35 +2557,11 @@ def api_stream_edit_preview():
     else:
         return jsonify({"error": "dropped must be a list of integers"}), 400
 
+    ok, err = _create_stream_edit_preview(path, dropped_indices, persist_selection=True)
+    if not ok:
+        return jsonify({"error": err}), 500
+
     preview = _stream_preview_path(path)
-    cmd = [
-        "ffmpeg", "-y", "-v", "error",
-        "-i", path,
-        "-map", "0",
-    ]
-    for idx in dropped_indices:
-        cmd += ["-map", f"-0:{idx}"]
-    cmd += ["-c", "copy", preview]
-
-    try:
-        proc = _sp.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60 * 60,
-        )
-    except Exception as exc:
-        return jsonify({"error": f"ffmpeg launch failed: {exc}"}), 500
-
-    if proc.returncode != 0 or not os.path.isfile(preview):
-        err = (proc.stderr or "").strip()
-        tail = "\n".join(err.splitlines()[-25:]) if err else "stream-copy failed"
-        return jsonify({"error": tail}), 500
-
-    # Persist latest dropped-stream selection to DB for consistency.
-    db.set_dropped_streams(path, dropped_indices)
 
     return jsonify({
         "ok": True,
@@ -2455,53 +2691,12 @@ def api_eng_stereo_preview():
     if not os.path.isfile(path):
         return jsonify({"error": "File not found"}), 404
 
-    audio_streams = _probe_audio_streams(path)
-    eng_index = next((s["index"] for s in audio_streams if s.get("language") == "eng"), None)
-    if eng_index is None:
-        return jsonify({"error": "No English audio track found"}), 400
+    ok, err = _create_eng_stereo_preview(path)
+    if not ok:
+        status = 400 if "No English audio track found" in err else 500
+        return jsonify({"error": err}), status
 
-    other_audio_indices = [s["index"] for s in audio_streams if s.get("index") != eng_index]
     preview = _eng_stereo_preview_path(path)
-    cmd = [
-        "ffmpeg", "-y", "-v", "error",
-        "-i", path,
-        "-map", "0:v",
-        "-map", f"0:{eng_index}",
-    ]
-    for audio_index in other_audio_indices:
-        cmd += ["-map", f"0:{audio_index}"]
-    cmd += [
-        "-map", "0:s?",
-        "-map", "0:t?",
-        "-c:v", "copy",
-        "-c:a", "copy",
-        "-c:s", "copy",
-        "-c:t", "copy",
-        "-c:a:0", "aac",
-        "-ac:a:0", "2",
-        "-b:a:0", "192k",
-        "-disposition:a:0", "default",
-        "-metadata:s:a:0", "language=eng",
-        "-metadata:s:a:0", "title=English Stereo Test",
-        preview,
-    ]
-
-    try:
-        proc = _sp.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60 * 60,
-        )
-    except Exception as exc:
-        return jsonify({"error": f"ffmpeg launch failed: {exc}"}), 500
-
-    if proc.returncode != 0 or not os.path.isfile(preview):
-        err = (proc.stderr or "").strip()
-        tail = "\n".join(err.splitlines()[-25:]) if err else "english stereo build failed"
-        return jsonify({"error": tail}), 500
 
     return jsonify({
         "ok": True,
@@ -2710,6 +2905,11 @@ def api_batch_edit_plan_get(plan_id: int):
     excluded_n = sum(1 for f in files if f.get("match_state") == "excluded")
     preview_ready_n = sum(1 for f in files if f.get("preview_state") == "ready")
     preview_failed_n = sum(1 for f in files if f.get("preview_state") == "failed")
+    preview_queued_n = sum(1 for f in files if f.get("preview_state") == "queued")
+    preview_building_n = sum(1 for f in files if f.get("preview_state") == "building")
+
+    with _batch_preview_lock:
+        worker = dict(_batch_preview_jobs.get(plan_id) or {})
 
     return jsonify({
         "ok": True,
@@ -2721,7 +2921,129 @@ def api_batch_edit_plan_get(plan_id: int):
             "excluded": excluded_n,
             "preview_ready": preview_ready_n,
             "preview_failed": preview_failed_n,
+            "preview_queued": preview_queued_n,
+            "preview_building": preview_building_n,
         },
+        "build_worker": worker,
+    })
+
+
+@app.route("/api/batch_edit_plan/<int:plan_id>/build_previews", methods=["POST"])
+def api_batch_edit_plan_build_previews(plan_id: int):
+    """Start a background worker that builds previews for compatible files in a plan."""
+    if _is_job_running():
+        return jsonify({"error": "Cannot build previews while conversion is running"}), 409
+
+    plan = db.get_batch_edit_plan(plan_id)
+    if not plan:
+        return jsonify({"error": "Plan not found"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    subset = data.get("source_paths")
+
+    files = db.list_batch_edit_plan_files(plan_id)
+    compatible_paths = {
+        os.path.normpath(str(f.get("source_path") or ""))
+        for f in files
+        if f.get("match_state") == "compatible" and f.get("source_path")
+    }
+
+    if subset is None:
+        selected = sorted(compatible_paths, key=lambda p: p.lower())
+    else:
+        if not isinstance(subset, list):
+            return jsonify({"error": "source_paths must be a list when provided"}), 400
+        wanted = {os.path.normpath(str(p)) for p in subset if str(p).strip()}
+        selected = sorted([p for p in wanted if p in compatible_paths], key=lambda p: p.lower())
+
+    if not selected:
+        return jsonify({"error": "No compatible files selected for preview build"}), 400
+
+    with _batch_preview_lock:
+        worker = _batch_preview_jobs.get(plan_id) or {}
+        if worker.get("state") == "running":
+            return jsonify({"error": "Preview build already running for this plan"}), 409
+
+    now = _utcnow()
+    for source_path in selected:
+        db.update_batch_edit_plan_file_state(
+            plan_id,
+            source_path,
+            preview_state="queued",
+            preview_error="",
+            updated_at=now,
+        )
+
+    _set_batch_preview_job(
+        plan_id,
+        state="queued",
+        started_at=None,
+        finished_at=None,
+        total=len(selected),
+        done=0,
+        ready=0,
+        failed=0,
+        error="",
+    )
+
+    threading.Thread(
+        target=_run_batch_preview_build,
+        args=(plan_id, selected),
+        daemon=True,
+        name=f"batch-preview-{plan_id}",
+    ).start()
+
+    return jsonify({
+        "ok": True,
+        "plan_id": plan_id,
+        "accepted": len(selected),
+        "summary": {
+            "queued": len(selected),
+            "total_compatible": len(compatible_paths),
+        },
+    })
+
+
+@app.route("/api/batch_edit_plan/<int:plan_id>/build_previews/status")
+def api_batch_edit_plan_build_previews_status(plan_id: int):
+    """Return background build progress and persisted per-file preview states."""
+    plan = db.get_batch_edit_plan(plan_id)
+    if not plan:
+        return jsonify({"error": "Plan not found"}), 404
+
+    files = db.list_batch_edit_plan_files(plan_id)
+    summary = {
+        "total_files": len(files),
+        "compatible": sum(1 for f in files if f.get("match_state") == "compatible"),
+        "excluded": sum(1 for f in files if f.get("match_state") == "excluded"),
+        "preview_none": sum(1 for f in files if f.get("preview_state") == "none"),
+        "preview_queued": sum(1 for f in files if f.get("preview_state") == "queued"),
+        "preview_building": sum(1 for f in files if f.get("preview_state") == "building"),
+        "preview_ready": sum(1 for f in files if f.get("preview_state") == "ready"),
+        "preview_failed": sum(1 for f in files if f.get("preview_state") == "failed"),
+    }
+
+    with _batch_preview_lock:
+        worker = dict(_batch_preview_jobs.get(plan_id) or {})
+
+    if not worker:
+        worker = {
+            "plan_id": plan_id,
+            "state": "idle",
+            "total": summary["compatible"],
+            "done": summary["preview_ready"] + summary["preview_failed"],
+            "ready": summary["preview_ready"],
+            "failed": summary["preview_failed"],
+            "started_at": None,
+            "finished_at": None,
+            "error": "",
+        }
+
+    return jsonify({
+        "ok": True,
+        "plan_id": plan_id,
+        "worker": worker,
+        "summary": summary,
     })
 
 

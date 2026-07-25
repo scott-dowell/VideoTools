@@ -35,6 +35,8 @@ let _detailsFileIndex = null;     // index currently shown in Video Details moda
 let _detailsPreviewPath = '';      // preview copy path for details modal file
 let _detailsEngStereoPreviewPath = ''; // english-stereo preview path for details modal file
 let _detailsBusy = false;          // prevent duplicate stream-edit actions
+let _detailsBatchPlanId = null;    // active batch plan id for details modal session
+let _detailsBatchPollTimer = null; // interval id for batch status polling
 let _streamReplaceConfirmModal = null;
 let _engStereoReplaceConfirmModal = null;
 let _subtitleLikelyCache = {};     // key: "<full_path>|<stream_index>" -> detection payload
@@ -299,6 +301,9 @@ function setButtonStates(state) {
   const detailsEngPlayBtn = document.getElementById('detailsEngStereoPlayBtn');
   const detailsEngDiscardBtn = document.getElementById('detailsEngStereoDiscardBtn');
   const detailsEngCommitBtn = document.getElementById('detailsEngStereoCommitBtn');
+  const detailsBatchCreateBtn = document.getElementById('detailsBatchCreateBtn');
+  const detailsBatchBuildBtn = document.getElementById('detailsBatchBuildBtn');
+  const detailsBatchRefreshBtn = document.getElementById('detailsBatchRefreshBtn');
   if (detailsCreateBtn) detailsCreateBtn.disabled = state === 'running' || _detailsBusy;
   if (detailsPlayBtn) detailsPlayBtn.disabled = state === 'running' || _detailsBusy || !_detailsPreviewPath;
   if (detailsDiscardBtn) detailsDiscardBtn.disabled = state === 'running' || _detailsBusy || !_detailsPreviewPath;
@@ -307,6 +312,9 @@ function setButtonStates(state) {
   if (detailsEngPlayBtn) detailsEngPlayBtn.disabled = state === 'running' || _detailsBusy || !_detailsEngStereoPreviewPath;
   if (detailsEngDiscardBtn) detailsEngDiscardBtn.disabled = state === 'running' || _detailsBusy || !_detailsEngStereoPreviewPath;
   if (detailsEngCommitBtn) detailsEngCommitBtn.disabled = state === 'running' || _detailsBusy || !_detailsEngStereoPreviewPath;
+  if (detailsBatchCreateBtn) detailsBatchCreateBtn.disabled = state === 'running' || _detailsBusy;
+  if (detailsBatchBuildBtn) detailsBatchBuildBtn.disabled = state === 'running' || _detailsBusy || _detailsBatchPlanId == null;
+  if (detailsBatchRefreshBtn) detailsBatchRefreshBtn.disabled = state === 'running' || _detailsBatchPlanId == null;
   // Enable drag handles only when queue is ready and not running
   const canDrag = (state === 'ready');
   document.querySelectorAll('#queueBody tr[id^="row-"]').forEach(tr => {
@@ -1988,6 +1996,11 @@ function viewErrorLog(index) {
 function viewDetails(index) {
   const f = _files[index];
   _detailsFileIndex = index;
+  if (_detailsBatchPollTimer) {
+    clearInterval(_detailsBatchPollTimer);
+    _detailsBatchPollTimer = null;
+  }
+  _detailsBatchPlanId = null;
   const body = document.getElementById('detailsModalBody');
   const titleEl = document.getElementById('detailsModalTitle');
   if (titleEl) titleEl.textContent = f.name;
@@ -2137,6 +2150,31 @@ function viewDetails(index) {
           </div>
         </div>
       </div>
+      <div class="col-12">
+        <div class="card">
+          <div class="card-header py-2 small"><i class="bi bi-layers me-1"></i>Batch Matching Folder</div>
+          <div class="card-body p-3">
+            <p class="text-secondary small mb-2">Use this file as representative, match compatible files in the same folder, and build previews across that set.</p>
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="detailsBatchIncludeEng" checked>
+              <label class="form-check-label small" for="detailsBatchIncludeEng">Include English stereo test in batch plan</label>
+            </div>
+            <div id="detailsBatchStatus" class="small text-secondary mb-2">No batch plan created yet</div>
+            <div id="detailsBatchSummary" class="small text-secondary mb-3">Compatible: 0 | Excluded: 0 | Ready: 0 | Failed: 0</div>
+            <div class="d-flex flex-wrap gap-2">
+              <button type="button" class="btn btn-outline-primary btn-sm" id="detailsBatchCreateBtn" onclick="createBatchEditPlan()">
+                <i class="bi bi-diagram-3 me-1"></i>Apply Same Edits
+              </button>
+              <button type="button" class="btn btn-outline-primary btn-sm" id="detailsBatchBuildBtn" onclick="buildBatchPreviews()" disabled>
+                <i class="bi bi-hammer me-1"></i>Build Batch Previews
+              </button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="detailsBatchRefreshBtn" onclick="refreshBatchBuildStatus()" disabled>
+                <i class="bi bi-arrow-repeat me-1"></i>Open Batch Results
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>`;
 
   body.innerHTML = html;
@@ -2146,8 +2184,15 @@ function viewDetails(index) {
     existing = new bootstrap.Modal(modalEl);
   }
   existing.show();
+  modalEl.addEventListener('hidden.bs.modal', () => {
+    _stopBatchStatusPolling();
+    _detailsBatchPlanId = null;
+  }, {once: true});
   refreshStreamEditStatus();
   refreshEngStereoStatus();
+  _setBatchStatusText('No batch plan created yet');
+  _setBatchSummaryText('Compatible: 0 | Excluded: 0 | Ready: 0 | Failed: 0');
+  _setBatchButtonsDisabled(_detailsBusy || _appState === 'running', true);
   refreshLikelySubtitleLanguages(index);
   if (!s) {
     probeStreams(index, {silent: true});
@@ -2299,6 +2344,8 @@ function _setDetailsButtonsDisabled(disabled) {
   const engPlayBtn = document.getElementById('detailsEngStereoPlayBtn');
   const engDiscardBtn = document.getElementById('detailsEngStereoDiscardBtn');
   const engCommitBtn = document.getElementById('detailsEngStereoCommitBtn');
+  const batchCreateBtn = document.getElementById('detailsBatchCreateBtn');
+  const batchBuildBtn = document.getElementById('detailsBatchBuildBtn');
   if (createBtn) createBtn.disabled = disabled;
   if (playBtn) playBtn.disabled = disabled || !_detailsPreviewPath;
   if (discardBtn) discardBtn.disabled = disabled || !_detailsPreviewPath;
@@ -2307,6 +2354,8 @@ function _setDetailsButtonsDisabled(disabled) {
   if (engPlayBtn) engPlayBtn.disabled = disabled || !_detailsEngStereoPreviewPath;
   if (engDiscardBtn) engDiscardBtn.disabled = disabled || !_detailsEngStereoPreviewPath;
   if (engCommitBtn) engCommitBtn.disabled = disabled || !_detailsEngStereoPreviewPath;
+  if (batchCreateBtn) batchCreateBtn.disabled = disabled;
+  if (batchBuildBtn) batchBuildBtn.disabled = disabled || _detailsBatchPlanId == null;
 }
 
 function _setDetailsStatusText(text) {
@@ -2317,6 +2366,158 @@ function _setDetailsStatusText(text) {
 function _setEngStereoStatusText(text) {
   const statusEl = document.getElementById('detailsEngStereoStatus');
   if (statusEl) statusEl.textContent = text || '';
+}
+
+function _setBatchStatusText(text) {
+  const statusEl = document.getElementById('detailsBatchStatus');
+  if (statusEl) statusEl.textContent = text || '';
+}
+
+function _setBatchSummaryText(text) {
+  const summaryEl = document.getElementById('detailsBatchSummary');
+  if (summaryEl) summaryEl.textContent = text || '';
+}
+
+function _setBatchButtonsDisabled(disabled, noPlanYet) {
+  const createBtn = document.getElementById('detailsBatchCreateBtn');
+  const buildBtn = document.getElementById('detailsBatchBuildBtn');
+  const refreshBtn = document.getElementById('detailsBatchRefreshBtn');
+  if (createBtn) createBtn.disabled = !!disabled;
+  if (buildBtn) buildBtn.disabled = !!disabled || !!noPlanYet;
+  if (refreshBtn) refreshBtn.disabled = !!disabled || !!noPlanYet;
+}
+
+function createBatchEditPlan() {
+  if (_detailsFileIndex == null) return;
+  const f = _files[_detailsFileIndex];
+  if (!f) return;
+
+  const includeEng = !!(document.getElementById('detailsBatchIncludeEng') || {}).checked;
+  _setBatchButtonsDisabled(true, true);
+  _setBatchStatusText('Creating batch plan...');
+
+  fetch('/api/batch_edit_plan/create', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      path: f.full_path,
+      scope_mode: 'matching_folder',
+      dropped_streams: f.dropped_streams || [],
+      include_eng_stereo: includeEng,
+    }),
+  }).then(r => r.json()).then(data => {
+    if (!data.ok) {
+      _setBatchStatusText('Plan creation failed');
+      _setBatchButtonsDisabled(false, true);
+      addLog('Batch plan create failed: ' + (data.error || 'unknown error'), 'err');
+      return;
+    }
+
+    _detailsBatchPlanId = data.plan_id;
+    _setBatchStatusText('Plan #' + data.plan_id + ' created');
+    _setBatchButtonsDisabled(false, false);
+    addLog('Batch plan created for ' + f.name + ' (' + data.summary.compatible + ' compatible).', 'ok');
+    refreshBatchBuildStatus();
+  }).catch(err => {
+    _setBatchStatusText('Plan creation failed');
+    _setBatchButtonsDisabled(false, true);
+    addLog('Batch plan create failed: ' + err, 'err');
+  });
+}
+
+function _startBatchStatusPolling() {
+  if (_detailsBatchPollTimer) clearInterval(_detailsBatchPollTimer);
+  _detailsBatchPollTimer = setInterval(() => {
+    if (_detailsBatchPlanId == null) return;
+    refreshBatchBuildStatus({silent: true});
+  }, 1500);
+}
+
+function _stopBatchStatusPolling() {
+  if (_detailsBatchPollTimer) {
+    clearInterval(_detailsBatchPollTimer);
+    _detailsBatchPollTimer = null;
+  }
+}
+
+function buildBatchPreviews() {
+  if (_detailsBatchPlanId == null) {
+    createBatchEditPlan();
+    return;
+  }
+
+  _setBatchButtonsDisabled(true, false);
+  _setBatchStatusText('Queueing batch preview build...');
+
+  fetch('/api/batch_edit_plan/' + _detailsBatchPlanId + '/build_previews', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({}),
+  }).then(r => r.json()).then(data => {
+    if (!data.ok) {
+      _setBatchStatusText('Batch preview start failed');
+      _setBatchButtonsDisabled(false, false);
+      addLog('Batch preview start failed: ' + (data.error || 'unknown error'), 'err');
+      return;
+    }
+
+    _setBatchStatusText('Batch preview build running...');
+    _setBatchButtonsDisabled(false, false);
+    _startBatchStatusPolling();
+    refreshBatchBuildStatus({silent: true});
+  }).catch(err => {
+    _setBatchStatusText('Batch preview start failed');
+    _setBatchButtonsDisabled(false, false);
+    addLog('Batch preview start failed: ' + err, 'err');
+  });
+}
+
+function refreshBatchBuildStatus(opts) {
+  if (_detailsBatchPlanId == null) return;
+  const options = opts || {};
+
+  fetch('/api/batch_edit_plan/' + _detailsBatchPlanId + '/build_previews/status')
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) {
+        _setBatchStatusText('Could not read batch status');
+        if (!options.silent) addLog('Batch status failed: ' + (data.error || 'unknown error'), 'err');
+        return;
+      }
+
+      const s = data.summary || {};
+      const w = data.worker || {};
+      const state = (w.state || 'idle');
+      const done = Number(w.done || 0);
+      const total = Number(w.total || 0);
+
+      _setBatchSummaryText(
+        'Compatible: ' + (s.compatible || 0)
+        + ' | Excluded: ' + (s.excluded || 0)
+        + ' | Ready: ' + (s.preview_ready || 0)
+        + ' | Failed: ' + (s.preview_failed || 0)
+      );
+
+      if (state === 'running' || state === 'queued') {
+        _setBatchStatusText('Building previews: ' + done + '/' + total);
+        _setBatchButtonsDisabled(false, false);
+      } else if (state === 'done') {
+        _setBatchStatusText('Build complete: ' + (s.preview_ready || 0) + ' ready, ' + (s.preview_failed || 0) + ' failed');
+        _setBatchButtonsDisabled(false, false);
+        _stopBatchStatusPolling();
+      } else if (state === 'failed') {
+        _setBatchStatusText('Build failed: ' + (w.error || 'unknown error'));
+        _setBatchButtonsDisabled(false, false);
+        _stopBatchStatusPolling();
+      } else {
+        _setBatchStatusText('Plan ready. Build previews when ready.');
+        _setBatchButtonsDisabled(false, false);
+      }
+    })
+    .catch(err => {
+      _setBatchStatusText('Could not read batch status');
+      if (!options.silent) addLog('Batch status failed: ' + err, 'err');
+    });
 }
 
 function _renderRowStatusCell(fileIndex) {

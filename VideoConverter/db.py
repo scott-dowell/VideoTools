@@ -112,6 +112,35 @@ def init_db(db_path: str) -> None:
 
             CREATE UNIQUE INDEX IF NOT EXISTS ux_conversions_path_mtime
                 ON conversions (source_path, source_mtime);
+
+            CREATE TABLE IF NOT EXISTS batch_edit_plans (
+                id                INTEGER PRIMARY KEY,
+                representative_path TEXT    NOT NULL,
+                scope_root        TEXT      NOT NULL,
+                scope_mode        TEXT      NOT NULL,
+                signature_version INTEGER   NOT NULL DEFAULT 1,
+                plan_json         TEXT      NOT NULL,
+                created_at        TEXT,
+                updated_at        TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS batch_edit_plan_files (
+                id                INTEGER PRIMARY KEY,
+                plan_id           INTEGER   NOT NULL,
+                source_path       TEXT      NOT NULL,
+                match_state       TEXT      NOT NULL DEFAULT 'pending',
+                match_reason      TEXT,
+                preview_state     TEXT      NOT NULL DEFAULT 'none',
+                preview_error     TEXT,
+                replace_state     TEXT      NOT NULL DEFAULT 'not_started',
+                backup_path       TEXT,
+                updated_at        TEXT,
+                FOREIGN KEY(plan_id) REFERENCES batch_edit_plans(id) ON DELETE CASCADE,
+                UNIQUE(plan_id, source_path)
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_batch_plan_files_plan_id
+                ON batch_edit_plan_files(plan_id);
         """)
         # Migration: add columns to existing databases that pre-date them.
         existing = {row[1] for row in conn.execute("PRAGMA table_info(conversions)")}
@@ -825,3 +854,181 @@ def batch_update_sizes(items: list) -> None:
             """,
             [(size_bytes, size_mb, record_id) for record_id, size_bytes, size_mb in items],
         )
+
+
+def create_batch_edit_plan(
+    representative_path: str,
+    scope_root: str,
+    scope_mode: str,
+    plan_data: dict,
+    signature_version: int = 1,
+    created_at: str | None = None,
+) -> int:
+    """Create and return a batch edit plan id."""
+    rep_norm = _norm(representative_path) or ""
+    root_norm = _norm(scope_root) or ""
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO batch_edit_plans (
+                representative_path,
+                scope_root,
+                scope_mode,
+                signature_version,
+                plan_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rep_norm,
+                root_norm,
+                scope_mode,
+                int(signature_version),
+                _json.dumps(plan_data or {}),
+                created_at,
+                created_at,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def get_batch_edit_plan(plan_id: int) -> dict | None:
+    """Return one batch edit plan with decoded plan_json, or None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM batch_edit_plans WHERE id = ?",
+            (plan_id,),
+        ).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    try:
+        result["plan_json"] = _json.loads(result.get("plan_json") or "{}")
+    except Exception:
+        result["plan_json"] = {}
+    return result
+
+
+def update_batch_edit_plan(plan_id: int, plan_data: dict, updated_at: str | None = None) -> int:
+    """Update plan_json for an existing batch plan. Returns affected row count."""
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE batch_edit_plans
+               SET plan_json = ?,
+                   updated_at = COALESCE(?, updated_at)
+             WHERE id = ?
+            """,
+            (_json.dumps(plan_data or {}), updated_at, plan_id),
+        )
+        return int(cur.rowcount)
+
+
+def replace_batch_edit_plan_files(plan_id: int, entries: list[dict], updated_at: str | None = None) -> int:
+    """Replace all per-file rows for a batch plan and insert the provided entries."""
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM batch_edit_plan_files WHERE plan_id = ?",
+            (plan_id,),
+        )
+        if not entries:
+            return 0
+
+        rows = []
+        for entry in entries:
+            rows.append((
+                plan_id,
+                _norm(entry.get("source_path")) or "",
+                entry.get("match_state") or "pending",
+                entry.get("match_reason"),
+                entry.get("preview_state") or "none",
+                entry.get("preview_error"),
+                entry.get("replace_state") or "not_started",
+                _norm(entry.get("backup_path")) if entry.get("backup_path") else None,
+                updated_at,
+            ))
+
+        conn.executemany(
+            """
+            INSERT INTO batch_edit_plan_files (
+                plan_id,
+                source_path,
+                match_state,
+                match_reason,
+                preview_state,
+                preview_error,
+                replace_state,
+                backup_path,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        return len(rows)
+
+
+def list_batch_edit_plan_files(plan_id: int) -> list[dict]:
+    """Return all file-state rows for a plan, ordered by source_path."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+              FROM batch_edit_plan_files
+             WHERE plan_id = ?
+             ORDER BY source_path ASC
+            """,
+            (plan_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_batch_edit_plan_file_state(
+    plan_id: int,
+    source_path: str,
+    *,
+    match_state: str | None = None,
+    match_reason: str | None = None,
+    preview_state: str | None = None,
+    preview_error: str | None = None,
+    replace_state: str | None = None,
+    backup_path: str | None = None,
+    updated_at: str | None = None,
+) -> int:
+    """Update selected fields on one per-file state row. Returns affected rows."""
+    updates = []
+    params: list = []
+    if match_state is not None:
+        updates.append("match_state = ?")
+        params.append(match_state)
+    if match_reason is not None:
+        updates.append("match_reason = ?")
+        params.append(match_reason)
+    if preview_state is not None:
+        updates.append("preview_state = ?")
+        params.append(preview_state)
+    if preview_error is not None:
+        updates.append("preview_error = ?")
+        params.append(preview_error)
+    if replace_state is not None:
+        updates.append("replace_state = ?")
+        params.append(replace_state)
+    if backup_path is not None:
+        updates.append("backup_path = ?")
+        params.append(_norm(backup_path))
+    if updated_at is not None:
+        updates.append("updated_at = ?")
+        params.append(updated_at)
+
+    if not updates:
+        return 0
+
+    params.extend([plan_id, _norm(source_path)])
+    with _connect() as conn:
+        cur = conn.execute(
+            f"UPDATE batch_edit_plan_files SET {', '.join(updates)} WHERE plan_id = ? AND source_path = ?",
+            params,
+        )
+        return int(cur.rowcount)

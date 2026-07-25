@@ -252,3 +252,164 @@ def test_get_record_by_fingerprint_ignores_non_done(fresh_db):
     )
     row = db.get_record_by_fingerprint(1_700_000_000.0, 417_333_248)
     assert row is None
+
+
+# ---------------------------------------------------------------------------
+# batch_edit_plans / batch_edit_plan_files
+# ---------------------------------------------------------------------------
+
+def test_db_init_creates_batch_tables(fresh_db):
+    import sqlite3
+    conn = sqlite3.connect(fresh_db)
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    conn.close()
+    assert "batch_edit_plans" in tables
+    assert "batch_edit_plan_files" in tables
+
+
+def test_create_and_get_batch_edit_plan(fresh_db):
+    plan_id = db.create_batch_edit_plan(
+        representative_path=r"C:\Videos\Show\ep01.mkv",
+        scope_root=r"C:\Videos\Show",
+        scope_mode="matching_folder",
+        signature_version=2,
+        plan_data={"drop_audio": [{"ordinal": 0, "language": "eng", "channels": 6}]},
+        created_at="2026-07-26T10:00:00Z",
+    )
+
+    assert isinstance(plan_id, int)
+    assert plan_id > 0
+
+    plan = db.get_batch_edit_plan(plan_id)
+    assert plan is not None
+    assert plan["representative_path"] == "C:/Videos/Show/ep01.mkv"
+    assert plan["scope_root"] == "C:/Videos/Show"
+    assert plan["scope_mode"] == "matching_folder"
+    assert plan["signature_version"] == 2
+    assert plan["plan_json"]["drop_audio"][0]["language"] == "eng"
+
+
+def test_update_batch_edit_plan_rewrites_plan_json(fresh_db):
+    plan_id = db.create_batch_edit_plan(
+        representative_path="/videos/ep01.mkv",
+        scope_root="/videos",
+        scope_mode="matching_folder",
+        plan_data={"drop_subs": []},
+    )
+
+    changed = db.update_batch_edit_plan(
+        plan_id,
+        {"drop_subs": [{"ordinal": 1, "codec": "PGS"}], "eng_stereo": True},
+        updated_at="2026-07-26T11:00:00Z",
+    )
+    assert changed == 1
+
+    plan = db.get_batch_edit_plan(plan_id)
+    assert plan is not None
+    assert plan["plan_json"]["eng_stereo"] is True
+    assert plan["updated_at"] == "2026-07-26T11:00:00Z"
+
+
+def test_replace_and_list_batch_plan_files(fresh_db):
+    plan_id = db.create_batch_edit_plan(
+        representative_path="/videos/ep01.mkv",
+        scope_root="/videos",
+        scope_mode="matching_folder",
+        plan_data={},
+    )
+
+    inserted = db.replace_batch_edit_plan_files(plan_id, [
+        {
+            "source_path": r"C:\Videos\Show\ep01.mkv",
+            "match_state": "compatible",
+            "preview_state": "ready",
+            "replace_state": "not_started",
+        },
+        {
+            "source_path": r"C:\Videos\Show\special01.mkv",
+            "match_state": "excluded",
+            "match_reason": "audio layout mismatch",
+            "preview_state": "none",
+            "replace_state": "not_started",
+        },
+    ], updated_at="2026-07-26T12:00:00Z")
+
+    assert inserted == 2
+
+    rows = db.list_batch_edit_plan_files(plan_id)
+    assert len(rows) == 2
+    assert rows[0]["source_path"] == "C:/Videos/Show/ep01.mkv"
+    assert rows[0]["preview_state"] == "ready"
+    assert rows[1]["match_state"] == "excluded"
+    assert rows[1]["match_reason"] == "audio layout mismatch"
+
+
+def test_replace_batch_plan_files_overwrites_prior_set(fresh_db):
+    plan_id = db.create_batch_edit_plan(
+        representative_path="/videos/ep01.mkv",
+        scope_root="/videos",
+        scope_mode="matching_folder",
+        plan_data={},
+    )
+    db.replace_batch_edit_plan_files(plan_id, [
+        {"source_path": "/videos/ep01.mkv", "match_state": "compatible"},
+        {"source_path": "/videos/ep02.mkv", "match_state": "compatible"},
+    ])
+
+    inserted = db.replace_batch_edit_plan_files(plan_id, [
+        {"source_path": "/videos/ep03.mkv", "match_state": "compatible"},
+    ])
+    assert inserted == 1
+
+    rows = db.list_batch_edit_plan_files(plan_id)
+    assert len(rows) == 1
+    assert rows[0]["source_path"] == "/videos/ep03.mkv"
+
+
+def test_update_batch_plan_file_state_updates_selected_fields(fresh_db):
+    plan_id = db.create_batch_edit_plan(
+        representative_path="/videos/ep01.mkv",
+        scope_root="/videos",
+        scope_mode="matching_folder",
+        plan_data={},
+    )
+    db.replace_batch_edit_plan_files(plan_id, [
+        {
+            "source_path": "/videos/ep01.mkv",
+            "match_state": "compatible",
+            "preview_state": "building",
+            "replace_state": "not_started",
+        }
+    ])
+
+    changed = db.update_batch_edit_plan_file_state(
+        plan_id,
+        "/videos/ep01.mkv",
+        preview_state="failed",
+        preview_error="ffmpeg timeout",
+        updated_at="2026-07-26T12:30:00Z",
+    )
+    assert changed == 1
+
+    row = db.list_batch_edit_plan_files(plan_id)[0]
+    assert row["preview_state"] == "failed"
+    assert row["preview_error"] == "ffmpeg timeout"
+    assert row["replace_state"] == "not_started"
+    assert row["updated_at"] == "2026-07-26T12:30:00Z"
+
+
+def test_update_batch_plan_file_state_noop_when_no_fields(fresh_db):
+    plan_id = db.create_batch_edit_plan(
+        representative_path="/videos/ep01.mkv",
+        scope_root="/videos",
+        scope_mode="matching_folder",
+        plan_data={},
+    )
+    db.replace_batch_edit_plan_files(plan_id, [
+        {"source_path": "/videos/ep01.mkv", "match_state": "compatible"}
+    ])
+
+    changed = db.update_batch_edit_plan_file_state(plan_id, "/videos/ep01.mkv")
+    assert changed == 0

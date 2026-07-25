@@ -406,6 +406,146 @@ def _normalise_lang_code(lang: str) -> str:
     return iso3_to_iso2.get(base, base)
 
 
+def _normalise_track_title(title: str) -> str:
+    """Return a compact, stable title token string for stream signature matching."""
+    raw = (title or "").strip().lower()
+    if not raw:
+        return ""
+    raw = re.sub(r"[^a-z0-9]+", " ", raw)
+    tokens = [t for t in raw.split() if t]
+    return " ".join(tokens)
+
+
+def _build_stream_signature(path: str) -> dict | None:
+    """Build a deterministic per-file signature for batch edit compatibility checks."""
+    probe = scanner._ffprobe(path)
+    if not probe:
+        return None
+    parsed = scanner._parse_probe(probe)
+    streams = parsed.get("streams") or {}
+    video = streams.get("video") or {}
+    audio = streams.get("audio") or []
+    subs = streams.get("subs") or []
+
+    return {
+        "path": path,
+        "ext": os.path.splitext(path)[1].lower(),
+        "video": {
+            "codec": str(video.get("codec", "")).lower(),
+            "profile": str(video.get("profile", "")).lower(),
+            "resolution": str(video.get("resolution", "")).lower(),
+        },
+        "audio": [
+            {
+                "index": a.get("index"),
+                "track": a.get("track"),
+                "codec": str(a.get("codec", "")).lower(),
+                "language": _normalise_lang_code(str(a.get("language", "und"))),
+                "channels": int(a.get("channels") or 0),
+                "title_norm": _normalise_track_title(str(a.get("title", ""))),
+            }
+            for a in audio
+        ],
+        "subs": [
+            {
+                "index": s.get("index"),
+                "track": s.get("track"),
+                "codec": str(s.get("codec", "")).lower(),
+                "language": _normalise_lang_code(str(s.get("language", "und"))),
+                "title_norm": _normalise_track_title(str(s.get("title", ""))),
+            }
+            for s in subs
+        ],
+    }
+
+
+def _match_stream_signatures(rep: dict, cand: dict) -> tuple[bool, str]:
+    """Return compatibility and reason for a candidate file against representative signature."""
+    rep_vid = rep.get("video") or {}
+    cand_vid = cand.get("video") or {}
+    if rep.get("ext") != cand.get("ext"):
+        return False, "container extension mismatch"
+    if rep_vid.get("codec") != cand_vid.get("codec"):
+        return False, "video codec mismatch"
+    if rep_vid.get("resolution") != cand_vid.get("resolution"):
+        return False, "video resolution mismatch"
+
+    rep_audio = rep.get("audio") or []
+    cand_audio = cand.get("audio") or []
+    if len(rep_audio) != len(cand_audio):
+        return False, "audio track count mismatch"
+    for i, (ra, ca) in enumerate(zip(rep_audio, cand_audio)):
+        if ra.get("codec") != ca.get("codec"):
+            return False, f"audio codec mismatch at track {i}"
+        if ra.get("language") != ca.get("language"):
+            return False, f"audio language mismatch at track {i}"
+        if int(ra.get("channels") or 0) != int(ca.get("channels") or 0):
+            return False, f"audio channels mismatch at track {i}"
+
+    rep_subs = rep.get("subs") or []
+    cand_subs = cand.get("subs") or []
+    if len(rep_subs) != len(cand_subs):
+        return False, "subtitle track count mismatch"
+
+    subtitle_title_mismatch = False
+    for i, (rs, cs) in enumerate(zip(rep_subs, cand_subs)):
+        if rs.get("codec") != cs.get("codec"):
+            return False, f"subtitle codec mismatch at track {i}"
+        if rs.get("language") != cs.get("language"):
+            return False, f"subtitle language mismatch at track {i}"
+        if (rs.get("title_norm") or "") != (cs.get("title_norm") or ""):
+            subtitle_title_mismatch = True
+
+    if subtitle_title_mismatch:
+        return True, "warning: subtitle title mismatch"
+    return True, ""
+
+
+def _collect_folder_video_paths(folder_path: str) -> list[str]:
+    """Return sorted video file paths directly under a folder."""
+    paths: list[str] = []
+    try:
+        for name in os.listdir(folder_path):
+            p = os.path.join(folder_path, name)
+            if not os.path.isfile(p):
+                continue
+            if os.path.splitext(name)[1].lower() not in scanner.VIDEO_EXTENSIONS:
+                continue
+            paths.append(os.path.normpath(p))
+    except Exception:
+        return []
+    paths.sort(key=lambda x: x.lower())
+    return paths
+
+
+def _build_drop_selectors(rep_sig: dict, dropped_indices: list[int]) -> list[dict]:
+    """Translate representative dropped stream indices into logical selectors."""
+    selectors: list[dict] = []
+    audio_map = {int(a.get("index")): a for a in (rep_sig.get("audio") or []) if a.get("index") is not None}
+    sub_map = {int(s.get("index")): s for s in (rep_sig.get("subs") or []) if s.get("index") is not None}
+    for idx in sorted(set(int(i) for i in dropped_indices)):
+        if idx in audio_map:
+            a = audio_map[idx]
+            selectors.append({
+                "kind": "audio",
+                "ordinal": int(a.get("track") or 0),
+                "codec": a.get("codec"),
+                "language": a.get("language"),
+                "channels": int(a.get("channels") or 0),
+                "title_norm": a.get("title_norm") or "",
+            })
+        elif idx in sub_map:
+            s = sub_map[idx]
+            selectors.append({
+                "kind": "subtitle",
+                "ordinal": int(s.get("track") or 0),
+                "codec": s.get("codec"),
+                "language": s.get("language"),
+                "title_norm": s.get("title_norm") or "",
+            })
+    return selectors
+
+
 def _subtitle_payload_text(srt_text: str) -> str:
     """Strip cue numbers and timestamps, keeping only dialogue text."""
     kept: list[str] = []
@@ -2457,6 +2597,132 @@ def api_eng_stereo_discard():
             return jsonify({"error": f"Could not remove preview: {exc}"}), 500
 
     return jsonify({"ok": True, "path": path})
+
+
+@app.route("/api/batch_edit_plan/create", methods=["POST"])
+def api_batch_edit_plan_create():
+    """Create a persisted batch edit plan from one representative file."""
+    data = request.get_json(force=True, silent=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    scope_mode = str(data.get("scope_mode") or "matching_folder").strip().lower()
+    if scope_mode != "matching_folder":
+        return jsonify({"error": "scope_mode must be 'matching_folder' for phase 1"}), 400
+
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    rep_sig = _build_stream_signature(path)
+    if not rep_sig:
+        return jsonify({"error": "Could not probe representative file"}), 500
+
+    scope_root = os.path.dirname(path)
+    candidates = _collect_folder_video_paths(scope_root)
+    if path not in candidates:
+        candidates.append(path)
+        candidates.sort(key=lambda x: x.lower())
+
+    dropped = data.get("dropped_streams")
+    if dropped is None:
+        dropped_indices = db.get_dropped_streams(path)
+    elif isinstance(dropped, list):
+        try:
+            dropped_indices = sorted(set(int(i) for i in dropped))
+        except Exception:
+            return jsonify({"error": "dropped_streams must be a list of integers"}), 400
+    else:
+        return jsonify({"error": "dropped_streams must be a list of integers"}), 400
+
+    include_eng_stereo = bool(data.get("include_eng_stereo", False))
+    signature_version = int(data.get("signature_version") or 1)
+    now = _utcnow()
+
+    plan_data = {
+        "representative_path": path.replace("\\", "/"),
+        "scope_root": scope_root.replace("\\", "/"),
+        "scope_mode": scope_mode,
+        "signature_version": signature_version,
+        "dropped_streams": dropped_indices,
+        "drop_selectors": _build_drop_selectors(rep_sig, dropped_indices),
+        "include_eng_stereo": include_eng_stereo,
+    }
+
+    entries: list[dict] = []
+    for candidate in candidates:
+        sig = _build_stream_signature(candidate)
+        if not sig:
+            entries.append({
+                "source_path": candidate,
+                "match_state": "excluded",
+                "match_reason": "missing probe metadata",
+                "preview_state": "none",
+                "replace_state": "not_started",
+            })
+            continue
+
+        ok, reason = _match_stream_signatures(rep_sig, sig)
+        entries.append({
+            "source_path": candidate,
+            "match_state": "compatible" if ok else "excluded",
+            "match_reason": reason,
+            "preview_state": "none",
+            "replace_state": "not_started",
+        })
+
+    plan_id = db.create_batch_edit_plan(
+        representative_path=path,
+        scope_root=scope_root,
+        scope_mode=scope_mode,
+        signature_version=signature_version,
+        plan_data=plan_data,
+        created_at=now,
+    )
+    db.replace_batch_edit_plan_files(plan_id, entries, updated_at=now)
+
+    compatible_n = sum(1 for e in entries if e.get("match_state") == "compatible")
+    excluded_n = sum(1 for e in entries if e.get("match_state") == "excluded")
+
+    return jsonify({
+        "ok": True,
+        "plan_id": plan_id,
+        "summary": {
+            "scope_root": scope_root.replace("\\", "/"),
+            "scope_mode": scope_mode,
+            "total_files": len(entries),
+            "compatible": compatible_n,
+            "excluded": excluded_n,
+        },
+    })
+
+
+@app.route("/api/batch_edit_plan/<int:plan_id>")
+def api_batch_edit_plan_get(plan_id: int):
+    """Return one batch edit plan and its per-file states."""
+    plan = db.get_batch_edit_plan(plan_id)
+    if not plan:
+        return jsonify({"error": "Plan not found"}), 404
+
+    files = db.list_batch_edit_plan_files(plan_id)
+    compatible_n = sum(1 for f in files if f.get("match_state") == "compatible")
+    excluded_n = sum(1 for f in files if f.get("match_state") == "excluded")
+    preview_ready_n = sum(1 for f in files if f.get("preview_state") == "ready")
+    preview_failed_n = sum(1 for f in files if f.get("preview_state") == "failed")
+
+    return jsonify({
+        "ok": True,
+        "plan": plan,
+        "files": files,
+        "summary": {
+            "total_files": len(files),
+            "compatible": compatible_n,
+            "excluded": excluded_n,
+            "preview_ready": preview_ready_n,
+            "preview_failed": preview_failed_n,
+        },
+    })
 
 
 @app.route("/api/diagnose")

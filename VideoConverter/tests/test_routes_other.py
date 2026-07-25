@@ -44,6 +44,16 @@ def isolated_settings(tmp_path):
     flask_app._SETTINGS_PATH = orig
 
 
+@pytest.fixture(autouse=True)
+def isolated_db(tmp_path):
+    """Point db helpers at a temp sqlite file for this test module."""
+    orig = flask_app.DB_PATH
+    test_db = str(tmp_path / "routes_other.db")
+    flask_app.db.init_db(test_db)
+    yield
+    flask_app.db.init_db(orig)
+
+
 # ---------------------------------------------------------------------------
 # /api/browse — root (drives)
 # ---------------------------------------------------------------------------
@@ -424,3 +434,81 @@ def test_eng_stereo_preview_preserves_other_audio_tracks(client, tmp_path):
     assert ["-c:a:0", "aac"] in [cmd[i:i+2] for i in range(len(cmd) - 1)]
     assert ["-ac:a:0", "2"] in [cmd[i:i+2] for i in range(len(cmd) - 1)]
     assert ["-metadata:s:a:0", "title=English Stereo Test"] in [cmd[i:i+2] for i in range(len(cmd) - 1)]
+
+
+# ---------------------------------------------------------------------------
+# /api/batch_edit_plan
+# ---------------------------------------------------------------------------
+
+def test_batch_edit_plan_create_missing_path_returns_400(client):
+    r = client.post("/api/batch_edit_plan/create", json={})
+    assert r.status_code == 400
+    assert "error" in r.get_json()
+
+
+def test_batch_edit_plan_create_and_get(client, tmp_path):
+    folder = tmp_path / "season"
+    folder.mkdir()
+    rep = folder / "ep01.mkv"
+    peer_ok = folder / "ep02.mkv"
+    peer_bad = folder / "special.mkv"
+    rep.write_bytes(b"\x00")
+    peer_ok.write_bytes(b"\x00")
+    peer_bad.write_bytes(b"\x00")
+
+    rep_sig = {
+        "path": str(rep),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 10, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [{"index": 20, "track": 0, "codec": "pgs", "language": "ja", "title_norm": "full"}],
+    }
+    ok_sig = {
+        "path": str(peer_ok),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 11, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [{"index": 21, "track": 0, "codec": "pgs", "language": "ja", "title_norm": "different title"}],
+    }
+    bad_sig = {
+        "path": str(peer_bad),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 12, "track": 0, "codec": "aac", "language": "en", "channels": 2, "title_norm": "main"}],
+        "subs": [{"index": 22, "track": 0, "codec": "pgs", "language": "ja", "title_norm": "full"}],
+    }
+    sig_map = {
+        str(rep): rep_sig,
+        str(peer_ok): ok_sig,
+        str(peer_bad): bad_sig,
+    }
+
+    with patch("app._collect_folder_video_paths", return_value=[str(rep), str(peer_ok), str(peer_bad)]), \
+         patch("app._build_stream_signature", side_effect=lambda p: sig_map.get(str(p))), \
+         patch("app.db.get_dropped_streams", return_value=[10]):
+        r = client.post("/api/batch_edit_plan/create", json={
+            "path": str(rep),
+            "scope_mode": "matching_folder",
+            "include_eng_stereo": True,
+        })
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert data["summary"]["total_files"] == 3
+    assert data["summary"]["compatible"] == 2
+    assert data["summary"]["excluded"] == 1
+
+    plan_id = data["plan_id"]
+    r2 = client.get(f"/api/batch_edit_plan/{plan_id}")
+    assert r2.status_code == 200
+    data2 = r2.get_json()
+    assert data2["ok"] is True
+    assert data2["summary"]["compatible"] == 2
+    assert data2["summary"]["excluded"] == 1
+    assert data2["plan"]["plan_json"]["include_eng_stereo"] is True
+    assert len(data2["plan"]["plan_json"]["drop_selectors"]) == 1
+
+    reasons = {f["source_path"]: (f["match_state"], f.get("match_reason") or "") for f in data2["files"]}
+    assert reasons[str(peer_bad).replace("\\", "/")][0] == "excluded"
+    assert "audio channels mismatch" in reasons[str(peer_bad).replace("\\", "/")][1]

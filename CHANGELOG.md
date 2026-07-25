@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #15 Implement phase-1 batch workflow foundation: persisted batch plan/file-state tables, stream-signature matching helpers, and initial create/get batch plan APIs with unit and route coverage.
 - #14 Require phase-by-phase unit test gates in the batch workflow plan, blocking progression to the next phase until current phase tests pass.
 - #13 Add a reviewed implementation checklist for multi-file Video Details batch workflow with preview-first apply-same-edits, persistent batch states, and explicit replacement safety constraints.
 - #12 Move the Video Details preview actions into a dedicated workflow section and make English stereo test copies keep the other audio tracks while replacing the first English track with a stereo test track.

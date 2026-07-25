@@ -668,3 +668,166 @@ def test_batch_edit_plan_build_previews_missing_plan_returns_404(client):
     r = client.post("/api/batch_edit_plan/999999/build_previews", json={})
     assert r.status_code == 404
     assert "error" in r.get_json()
+
+
+def test_batch_edit_plan_discard_previews_marks_discarded(client, tmp_path):
+    folder = tmp_path / "season"
+    folder.mkdir()
+    rep = folder / "ep01.mkv"
+    peer = folder / "ep02.mkv"
+    rep.write_bytes(b"\x00")
+    peer.write_bytes(b"\x00")
+
+    rep_sig = {
+        "path": str(rep),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 10, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [],
+    }
+    peer_sig = {
+        "path": str(peer),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 11, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [],
+    }
+    sig_map = {str(rep): rep_sig, str(peer): peer_sig}
+
+    with patch("app._collect_folder_video_paths", return_value=[str(rep), str(peer)]), \
+         patch("app._build_stream_signature", side_effect=lambda p: sig_map.get(str(p))), \
+         patch("app.db.get_dropped_streams", return_value=[10]):
+        created = client.post("/api/batch_edit_plan/create", json={
+            "path": str(rep),
+            "scope_mode": "matching_folder",
+            "include_eng_stereo": False,
+        })
+
+    plan_id = created.get_json()["plan_id"]
+    flask_app.db.update_batch_edit_plan_file_state(plan_id, str(rep), preview_state="ready", updated_at="2026-07-26T00:00:00Z")
+    flask_app.db.update_batch_edit_plan_file_state(plan_id, str(peer), preview_state="ready", updated_at="2026-07-26T00:00:00Z")
+
+    with patch("app._discard_stream_edit_preview", return_value=(True, "")), \
+         patch("app._discard_eng_stereo_preview", return_value=(True, "")):
+        r = client.post(f"/api/batch_edit_plan/{plan_id}/discard_previews", json={"all_ready": True})
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["summary"]["selected"] == 2
+    assert data["summary"]["discarded"] == 2
+    assert data["summary"]["failed"] == 0
+
+    got = client.get(f"/api/batch_edit_plan/{plan_id}").get_json()
+    assert got["summary"]["preview_ready"] == 0
+    rows = {Path(f["source_path"]).name: f for f in got["files"]}
+    assert rows["ep01.mkv"]["preview_state"] == "discarded"
+    assert rows["ep02.mkv"]["preview_state"] == "discarded"
+
+
+def test_batch_edit_plan_accept_preview_replaces_one_ready_file(client, tmp_path):
+    folder = tmp_path / "season"
+    folder.mkdir()
+    rep = folder / "ep01.mkv"
+    peer = folder / "ep02.mkv"
+    rep.write_bytes(b"\x00")
+    peer.write_bytes(b"\x00")
+
+    rep_sig = {
+        "path": str(rep),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 10, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [],
+    }
+    peer_sig = {
+        "path": str(peer),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 11, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [],
+    }
+    sig_map = {str(rep): rep_sig, str(peer): peer_sig}
+
+    with patch("app._collect_folder_video_paths", return_value=[str(rep), str(peer)]), \
+         patch("app._build_stream_signature", side_effect=lambda p: sig_map.get(str(p))), \
+         patch("app.db.get_dropped_streams", return_value=[10]):
+        created = client.post("/api/batch_edit_plan/create", json={
+            "path": str(rep),
+            "scope_mode": "matching_folder",
+            "include_eng_stereo": False,
+        })
+
+    plan_id = created.get_json()["plan_id"]
+    flask_app.db.update_batch_edit_plan_file_state(plan_id, str(rep), preview_state="ready", updated_at="2026-07-26T00:00:00Z")
+
+    with patch("app._accept_plan_preview_for_source", return_value=(True, {"workflow": "stream_edit", "backup_path": ""})):
+        r = client.post(f"/api/batch_edit_plan/{plan_id}/accept_preview", json={"source_path": str(rep)})
+
+    assert r.status_code == 200
+    out = r.get_json()
+    assert out["ok"] is True
+    assert out["workflow"] == "stream_edit"
+
+    got = client.get(f"/api/batch_edit_plan/{plan_id}").get_json()
+    rows = {Path(f["source_path"]).name: f for f in got["files"]}
+    assert rows["ep01.mkv"]["replace_state"] == "replaced"
+    assert rows["ep01.mkv"]["preview_state"] == "none"
+
+
+def test_batch_edit_plan_accept_all_ready_mixed_results(client, tmp_path):
+    folder = tmp_path / "season"
+    folder.mkdir()
+    rep = folder / "ep01.mkv"
+    peer = folder / "ep02.mkv"
+    rep.write_bytes(b"\x00")
+    peer.write_bytes(b"\x00")
+
+    rep_sig = {
+        "path": str(rep),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 10, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [],
+    }
+    peer_sig = {
+        "path": str(peer),
+        "ext": ".mkv",
+        "video": {"codec": "h264", "profile": "high", "resolution": "1920x1080"},
+        "audio": [{"index": 11, "track": 0, "codec": "aac", "language": "en", "channels": 6, "title_norm": "main"}],
+        "subs": [],
+    }
+    sig_map = {str(rep): rep_sig, str(peer): peer_sig}
+
+    with patch("app._collect_folder_video_paths", return_value=[str(rep), str(peer)]), \
+         patch("app._build_stream_signature", side_effect=lambda p: sig_map.get(str(p))), \
+         patch("app.db.get_dropped_streams", return_value=[10]):
+        created = client.post("/api/batch_edit_plan/create", json={
+            "path": str(rep),
+            "scope_mode": "matching_folder",
+            "include_eng_stereo": False,
+        })
+
+    plan_id = created.get_json()["plan_id"]
+    flask_app.db.update_batch_edit_plan_file_state(plan_id, str(rep), preview_state="ready", updated_at="2026-07-26T00:00:00Z")
+    flask_app.db.update_batch_edit_plan_file_state(plan_id, str(peer), preview_state="ready", updated_at="2026-07-26T00:00:00Z")
+
+    def _accept_side_effect(path):
+        if Path(path).name == "ep02.mkv":
+            return False, {"error": "replace failed", "status": 500}
+        return True, {"workflow": "stream_edit", "backup_path": ""}
+
+    with patch("app._accept_plan_preview_for_source", side_effect=_accept_side_effect):
+        r = client.post(f"/api/batch_edit_plan/{plan_id}/accept_all_ready", json={})
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["summary"]["selected"] == 2
+    assert data["summary"]["replaced"] == 1
+    assert data["summary"]["failed"] == 1
+    assert len(data["failures"]) == 1
+
+    got = client.get(f"/api/batch_edit_plan/{plan_id}").get_json()
+    rows = {Path(f["source_path"]).name: f for f in got["files"]}
+    assert rows["ep01.mkv"]["replace_state"] == "replaced"
+    assert rows["ep02.mkv"]["replace_state"] == "failed"
+    assert "replace failed" in (rows["ep02.mkv"].get("preview_error") or "")

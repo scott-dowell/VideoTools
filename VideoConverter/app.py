@@ -691,6 +691,178 @@ def _create_eng_stereo_preview(path: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _commit_stream_edit_preview(path: str) -> tuple[bool, dict]:
+    """Replace source with stream-edit preview and sync metadata."""
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return False, {"error": "File not found", "status": 404}
+
+    preview = _stream_preview_path(path)
+    if not os.path.isfile(preview):
+        return False, {"error": "No preview copy exists for this file", "status": 404}
+
+    try:
+        os.replace(preview, path)
+    except Exception as exc:
+        return False, {"error": f"replace failed: {exc}", "status": 500}
+
+    db.set_dropped_streams(path, [])
+
+    try:
+        stat = os.stat(path)
+        size_mb = round(stat.st_size / (1024 * 1024), 2)
+        size_bytes = int(stat.st_size)
+        mtime = stat.st_mtime
+    except Exception:
+        size_mb = 0.0
+        size_bytes = 0
+        mtime = time.time()
+
+    try:
+        meta = _sync_post_edit_metadata(path, size_bytes, size_mb, mtime)
+    except Exception as exc:
+        return False, {"error": f"metadata sync failed: {exc}", "status": 500}
+
+    return True, {
+        "path": path,
+        "new_size_mb": size_mb,
+        "status": meta["status"],
+        "streams": meta["streams"],
+        "codec": meta["codec"],
+        "bitrate_kbps": meta["bitrate_kbps"],
+        "duration_secs": meta["duration_secs"],
+        "duration": meta["duration"],
+        "video_track_count": meta["video_track_count"],
+        "audio_track_count": meta["audio_track_count"],
+        "subtitle_track_count": meta["subtitle_track_count"],
+        "output_mb": meta["output_mb"],
+        "saved_mb": meta["saved_mb"],
+        "saved_pct": meta["saved_pct"],
+    }
+
+
+def _discard_stream_edit_preview(path: str) -> tuple[bool, str]:
+    """Delete an existing stream-edit preview for a file path if present."""
+    preview = _stream_preview_path(os.path.normpath(path))
+    if os.path.isfile(preview):
+        try:
+            os.remove(preview)
+        except Exception as exc:
+            return False, f"Could not remove preview: {exc}"
+    return True, ""
+
+
+def _commit_eng_stereo_preview(path: str) -> tuple[bool, dict]:
+    """Replace source with accepted English-stereo preview and sync metadata."""
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return False, {"error": "File not found", "status": 404}
+
+    preview = _eng_stereo_preview_path(path)
+    if not os.path.isfile(preview):
+        return False, {"error": "No English-stereo preview exists for this file", "status": 404}
+
+    backup = _original_backup_path(path)
+    if os.path.exists(backup):
+        root, ext = os.path.splitext(path)
+        backup = f"{root}.original-backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+
+    try:
+        shutil.copy2(path, backup)
+    except Exception as exc:
+        return False, {"error": f"backup failed: {exc}", "status": 500}
+
+    try:
+        os.replace(preview, path)
+    except Exception as exc:
+        return False, {"error": f"replace failed: {exc}", "status": 500}
+
+    try:
+        stat = os.stat(path)
+        size_mb = round(stat.st_size / (1024 * 1024), 2)
+        size_bytes = int(stat.st_size)
+        mtime = stat.st_mtime
+    except Exception:
+        size_mb = 0.0
+        size_bytes = 0
+        mtime = time.time()
+
+    try:
+        meta = _sync_post_edit_metadata(path, size_bytes, size_mb, mtime)
+    except Exception as exc:
+        return False, {"error": f"metadata sync failed: {exc}", "status": 500}
+
+    return True, {
+        "path": path,
+        "backup_path": backup,
+        "new_size_mb": size_mb,
+        "status": meta["status"],
+        "streams": meta["streams"],
+        "codec": meta["codec"],
+        "bitrate_kbps": meta["bitrate_kbps"],
+        "duration_secs": meta["duration_secs"],
+        "duration": meta["duration"],
+        "video_track_count": meta["video_track_count"],
+        "audio_track_count": meta["audio_track_count"],
+        "subtitle_track_count": meta["subtitle_track_count"],
+        "output_mb": meta["output_mb"],
+        "saved_mb": meta["saved_mb"],
+        "saved_pct": meta["saved_pct"],
+    }
+
+
+def _discard_eng_stereo_preview(path: str) -> tuple[bool, str]:
+    """Delete an existing English-stereo preview for a file path if present."""
+    preview = _eng_stereo_preview_path(os.path.normpath(path))
+    if os.path.isfile(preview):
+        try:
+            os.remove(preview)
+        except Exception as exc:
+            return False, f"Could not remove preview: {exc}"
+    return True, ""
+
+
+def _accept_plan_preview_for_source(path: str) -> tuple[bool, dict]:
+    """Accept available previews for one source file, including combined workflow."""
+    source = os.path.normpath(path)
+    has_stream_preview = os.path.isfile(_stream_preview_path(source))
+    has_eng_preview = os.path.isfile(_eng_stereo_preview_path(source))
+    if not has_stream_preview and not has_eng_preview:
+        return False, {"error": "No ready preview exists for this file", "status": 404}
+
+    workflow = "eng_stereo" if has_eng_preview and not has_stream_preview else "stream_edit"
+    backup_path = ""
+
+    if has_stream_preview:
+        ok, payload = _commit_stream_edit_preview(source)
+        if not ok:
+            return False, payload
+
+    if has_eng_preview:
+        if has_stream_preview:
+            # Any prebuilt English-stereo preview is now stale after stream replacement.
+            ok, err = _discard_eng_stereo_preview(source)
+            if not ok:
+                return False, {"error": err, "status": 500}
+
+            ok, err = _create_eng_stereo_preview(source)
+            if not ok:
+                status = 400 if "No English audio track found" in err else 500
+                return False, {"error": err, "status": status}
+            workflow = "combined"
+
+        ok, payload = _commit_eng_stereo_preview(source)
+        if not ok:
+            return False, payload
+        backup_path = payload.get("backup_path") or ""
+
+    return True, {
+        "path": source,
+        "workflow": workflow,
+        "backup_path": backup_path,
+    }
+
+
 def _set_batch_preview_job(plan_id: int, **fields) -> dict:
     """Upsert in-memory worker status for one batch preview plan."""
     with _batch_preview_lock:
@@ -2583,55 +2755,13 @@ def api_stream_edit_commit():
     if not path:
         return jsonify({"error": "No path provided"}), 400
 
-    path = os.path.normpath(path)
-    if not os.path.isfile(path):
-        return jsonify({"error": "File not found"}), 404
-
-    preview = _stream_preview_path(path)
-    if not os.path.isfile(preview):
-        return jsonify({"error": "No preview copy exists for this file"}), 404
-
-    try:
-        os.replace(preview, path)
-    except Exception as exc:
-        return jsonify({"error": f"replace failed: {exc}"}), 500
-
-    # Dropped streams are now baked into the source; clear the override list.
-    db.set_dropped_streams(path, [])
-
-    try:
-        stat = os.stat(path)
-        size_mb = round(stat.st_size / (1024 * 1024), 2)
-        size_bytes = int(stat.st_size)
-        mtime = stat.st_mtime
-    except Exception:
-        size_mb = 0.0
-        size_bytes = 0
-        mtime = time.time()
-
-    # Sync DB metadata for the new file bytes. Preserve done status when the
-    # previous record was already done so edited files don't re-queue as pending.
-    try:
-        meta = _sync_post_edit_metadata(path, size_bytes, size_mb, mtime)
-    except Exception as exc:
-        return jsonify({"error": f"metadata sync failed: {exc}"}), 500
+    ok, payload = _commit_stream_edit_preview(path)
+    if not ok:
+        return jsonify({"error": payload.get("error", "replace failed")}), int(payload.get("status") or 500)
 
     return jsonify({
         "ok": True,
-        "path": path,
-        "new_size_mb": size_mb,
-        "status": meta["status"],
-        "streams": meta["streams"],
-        "codec": meta["codec"],
-        "bitrate_kbps": meta["bitrate_kbps"],
-        "duration_secs": meta["duration_secs"],
-        "duration": meta["duration"],
-        "video_track_count": meta["video_track_count"],
-        "audio_track_count": meta["audio_track_count"],
-        "subtitle_track_count": meta["subtitle_track_count"],
-        "output_mb": meta["output_mb"],
-        "saved_mb": meta["saved_mb"],
-        "saved_pct": meta["saved_pct"],
+        **payload,
     })
 
 
@@ -2643,15 +2773,11 @@ def api_stream_edit_discard():
     if not path:
         return jsonify({"error": "No path provided"}), 400
 
-    path = os.path.normpath(path)
-    preview = _stream_preview_path(path)
-    if os.path.isfile(preview):
-        try:
-            os.remove(preview)
-        except Exception as exc:
-            return jsonify({"error": f"Could not remove preview: {exc}"}), 500
+    ok, err = _discard_stream_edit_preview(path)
+    if not ok:
+        return jsonify({"error": err}), 500
 
-    return jsonify({"ok": True, "path": path})
+    return jsonify({"ok": True, "path": os.path.normpath(path)})
 
 
 @app.route("/api/eng_stereo_status")
@@ -2717,61 +2843,13 @@ def api_eng_stereo_commit():
     if not path:
         return jsonify({"error": "No path provided"}), 400
 
-    path = os.path.normpath(path)
-    if not os.path.isfile(path):
-        return jsonify({"error": "File not found"}), 404
-
-    preview = _eng_stereo_preview_path(path)
-    if not os.path.isfile(preview):
-        return jsonify({"error": "No English-stereo preview exists for this file"}), 404
-
-    backup = _original_backup_path(path)
-    if os.path.exists(backup):
-        root, ext = os.path.splitext(path)
-        backup = f"{root}.original-backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
-
-    try:
-        shutil.copy2(path, backup)
-    except Exception as exc:
-        return jsonify({"error": f"backup failed: {exc}"}), 500
-
-    try:
-        os.replace(preview, path)
-    except Exception as exc:
-        return jsonify({"error": f"replace failed: {exc}"}), 500
-
-    try:
-        stat = os.stat(path)
-        size_mb = round(stat.st_size / (1024 * 1024), 2)
-        size_bytes = int(stat.st_size)
-        mtime = stat.st_mtime
-    except Exception:
-        size_mb = 0.0
-        size_bytes = 0
-        mtime = time.time()
-
-    try:
-        meta = _sync_post_edit_metadata(path, size_bytes, size_mb, mtime)
-    except Exception as exc:
-        return jsonify({"error": f"metadata sync failed: {exc}"}), 500
+    ok, payload = _commit_eng_stereo_preview(path)
+    if not ok:
+        return jsonify({"error": payload.get("error", "replace failed")}), int(payload.get("status") or 500)
 
     return jsonify({
         "ok": True,
-        "path": path,
-        "backup_path": backup,
-        "new_size_mb": size_mb,
-        "status": meta["status"],
-        "streams": meta["streams"],
-        "codec": meta["codec"],
-        "bitrate_kbps": meta["bitrate_kbps"],
-        "duration_secs": meta["duration_secs"],
-        "duration": meta["duration"],
-        "video_track_count": meta["video_track_count"],
-        "audio_track_count": meta["audio_track_count"],
-        "subtitle_track_count": meta["subtitle_track_count"],
-        "output_mb": meta["output_mb"],
-        "saved_mb": meta["saved_mb"],
-        "saved_pct": meta["saved_pct"],
+        **payload,
     })
 
 
@@ -2783,15 +2861,11 @@ def api_eng_stereo_discard():
     if not path:
         return jsonify({"error": "No path provided"}), 400
 
-    path = os.path.normpath(path)
-    preview = _eng_stereo_preview_path(path)
-    if os.path.isfile(preview):
-        try:
-            os.remove(preview)
-        except Exception as exc:
-            return jsonify({"error": f"Could not remove preview: {exc}"}), 500
+    ok, err = _discard_eng_stereo_preview(path)
+    if not ok:
+        return jsonify({"error": err}), 500
 
-    return jsonify({"ok": True, "path": path})
+    return jsonify({"ok": True, "path": os.path.normpath(path)})
 
 
 @app.route("/api/batch_edit_plan/create", methods=["POST"])
@@ -3044,6 +3118,226 @@ def api_batch_edit_plan_build_previews_status(plan_id: int):
         "plan_id": plan_id,
         "worker": worker,
         "summary": summary,
+    })
+
+
+@app.route("/api/batch_edit_plan/<int:plan_id>/discard_previews", methods=["POST"])
+def api_batch_edit_plan_discard_previews(plan_id: int):
+    """Discard one or more previews for a batch plan and persist discarded state."""
+    if _is_job_running():
+        return jsonify({"error": "Cannot discard previews while conversion is running"}), 409
+
+    plan = db.get_batch_edit_plan(plan_id)
+    if not plan:
+        return jsonify({"error": "Plan not found"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    one_path = str(data.get("source_path") or "").strip()
+    subset = data.get("source_paths")
+    all_ready = bool(data.get("all_ready", False))
+
+    files = db.list_batch_edit_plan_files(plan_id)
+    by_path = {
+        os.path.normpath(str(f.get("source_path") or "")): f
+        for f in files
+        if f.get("source_path")
+    }
+
+    if one_path:
+        selected = [os.path.normpath(one_path)]
+    elif isinstance(subset, list):
+        selected = sorted({os.path.normpath(str(p)) for p in subset if str(p).strip()}, key=lambda p: p.lower())
+    elif all_ready:
+        selected = sorted(
+            [
+                p for p, f in by_path.items()
+                if f.get("match_state") == "compatible" and f.get("preview_state") in {"ready", "failed", "queued", "building"}
+            ],
+            key=lambda p: p.lower(),
+        )
+    else:
+        selected = sorted(
+            [p for p, f in by_path.items() if f.get("match_state") == "compatible" and f.get("preview_state") == "ready"],
+            key=lambda p: p.lower(),
+        )
+
+    if not selected:
+        return jsonify({"error": "No files selected for preview discard"}), 400
+
+    discarded = 0
+    failed = 0
+    for source_path in selected:
+        row = by_path.get(source_path)
+        if not row or row.get("match_state") != "compatible":
+            continue
+
+        err_parts: list[str] = []
+        ok, err = _discard_stream_edit_preview(source_path)
+        if not ok:
+            err_parts.append(err)
+        ok, err = _discard_eng_stereo_preview(source_path)
+        if not ok:
+            err_parts.append(err)
+
+        if err_parts:
+            failed += 1
+            db.update_batch_edit_plan_file_state(
+                plan_id,
+                source_path,
+                preview_state="failed",
+                preview_error=" | ".join(err_parts),
+                updated_at=_utcnow(),
+            )
+        else:
+            discarded += 1
+            db.update_batch_edit_plan_file_state(
+                plan_id,
+                source_path,
+                preview_state="discarded",
+                preview_error="",
+                updated_at=_utcnow(),
+            )
+
+    return jsonify({
+        "ok": True,
+        "plan_id": plan_id,
+        "summary": {
+            "selected": len(selected),
+            "discarded": discarded,
+            "failed": failed,
+        },
+    })
+
+
+@app.route("/api/batch_edit_plan/<int:plan_id>/accept_preview", methods=["POST"])
+def api_batch_edit_plan_accept_preview(plan_id: int):
+    """Accept and replace originals for one ready batch-preview file."""
+    if _is_job_running():
+        return jsonify({"error": "Cannot replace previews while conversion is running"}), 409
+
+    plan = db.get_batch_edit_plan(plan_id)
+    if not plan:
+        return jsonify({"error": "Plan not found"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    source_path = str(data.get("source_path") or "").strip()
+    if not source_path:
+        return jsonify({"error": "source_path is required"}), 400
+
+    source = os.path.normpath(source_path)
+    row = next(
+        (
+            f for f in db.list_batch_edit_plan_files(plan_id)
+            if os.path.normpath(str(f.get("source_path") or "")) == source
+        ),
+        None,
+    )
+    if not row:
+        return jsonify({"error": "source_path is not part of this plan"}), 404
+    if row.get("match_state") != "compatible":
+        return jsonify({"error": "source_path is excluded and cannot be accepted"}), 400
+    if row.get("preview_state") != "ready":
+        return jsonify({"error": "preview_state must be 'ready' before acceptance"}), 400
+
+    ok, payload = _accept_plan_preview_for_source(source)
+    if not ok:
+        db.update_batch_edit_plan_file_state(
+            plan_id,
+            source,
+            replace_state="failed",
+            preview_error=payload.get("error", "accept failed"),
+            updated_at=_utcnow(),
+        )
+        return jsonify({"error": payload.get("error", "accept failed")}), int(payload.get("status") or 500)
+
+    db.update_batch_edit_plan_file_state(
+        plan_id,
+        source,
+        preview_state="none",
+        preview_error="",
+        replace_state="replaced",
+        backup_path=payload.get("backup_path") or None,
+        updated_at=_utcnow(),
+    )
+
+    return jsonify({
+        "ok": True,
+        "plan_id": plan_id,
+        "source_path": source.replace("\\", "/"),
+        "workflow": payload.get("workflow") or "",
+        "backup_path": payload.get("backup_path") or "",
+    })
+
+
+@app.route("/api/batch_edit_plan/<int:plan_id>/accept_all_ready", methods=["POST"])
+def api_batch_edit_plan_accept_all_ready(plan_id: int):
+    """Accept and replace all ready previews in a plan or optional subset."""
+    if _is_job_running():
+        return jsonify({"error": "Cannot replace previews while conversion is running"}), 409
+
+    plan = db.get_batch_edit_plan(plan_id)
+    if not plan:
+        return jsonify({"error": "Plan not found"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    subset = data.get("source_paths")
+    allowed: set[str] | None = None
+    if subset is not None:
+        if not isinstance(subset, list):
+            return jsonify({"error": "source_paths must be a list when provided"}), 400
+        allowed = {os.path.normpath(str(p)) for p in subset if str(p).strip()}
+
+    files = db.list_batch_edit_plan_files(plan_id)
+    ready_rows = [
+        f for f in files
+        if f.get("match_state") == "compatible"
+        and f.get("preview_state") == "ready"
+        and (allowed is None or os.path.normpath(str(f.get("source_path") or "")) in allowed)
+    ]
+
+    if not ready_rows:
+        return jsonify({"error": "No ready previews selected for acceptance"}), 400
+
+    replaced = 0
+    failed = 0
+    failures: list[dict] = []
+
+    for row in ready_rows:
+        source = os.path.normpath(str(row.get("source_path") or ""))
+        ok, payload = _accept_plan_preview_for_source(source)
+        if ok:
+            replaced += 1
+            db.update_batch_edit_plan_file_state(
+                plan_id,
+                source,
+                preview_state="none",
+                preview_error="",
+                replace_state="replaced",
+                backup_path=payload.get("backup_path") or None,
+                updated_at=_utcnow(),
+            )
+            continue
+
+        failed += 1
+        msg = payload.get("error", "accept failed")
+        failures.append({"source_path": source.replace("\\", "/"), "error": msg})
+        db.update_batch_edit_plan_file_state(
+            plan_id,
+            source,
+            replace_state="failed",
+            preview_error=msg,
+            updated_at=_utcnow(),
+        )
+
+    return jsonify({
+        "ok": True,
+        "plan_id": plan_id,
+        "summary": {
+            "selected": len(ready_rows),
+            "replaced": replaced,
+            "failed": failed,
+        },
+        "failures": failures,
     })
 
 

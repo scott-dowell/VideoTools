@@ -9,6 +9,7 @@ Run:  pytest VideoConverter/tests/test_scanner.py -v
 
 import os
 import shutil
+import sqlite3
 import sys
 
 import pytest
@@ -249,6 +250,47 @@ def test_walk_requeues_replaced_file(tmp_path, fresh_db):
     assert len(files) == 1
     assert files[0]["name"] == "h264_short.mkv"
     assert files[0]["status"] == "done"
+
+
+def test_walk_hash_matches_done_and_cleans_stale_pending(tmp_path, fresh_db):
+    """Pending rows shadowing a hash-matched done record are resolved and deleted."""
+    dest = tmp_path / "h264_short.mkv"
+    shutil.copy(FIXTURES_DIR / "h264_short.mkv", dest)
+
+    old_mtime = dest.stat().st_mtime
+    rec_done = db.upsert_pending(str(dest), old_mtime)
+    db.mark_running(rec_done, "2026-01-01T00:00:00Z")
+    db.mark_done(
+        rec_done,
+        str(tmp_path / "converted" / "h264_short.mp4"),
+        output_size_mb=0.5,
+        saved_mb=0.7,
+        saved_pct=58,
+        completed_at="2026-01-01T00:01:00Z",
+        output_hash=db.hash_file_head(str(dest)),
+    )
+
+    new_mtime = old_mtime + 1.0
+    os.utime(str(dest), (new_mtime, new_mtime))
+    db.upsert_pending(str(dest), new_mtime)
+
+    folders, done, _, _ = _collect(tmp_path)
+    assert done["total_files"] == 0
+    files = _all_files(folders)
+    assert len(files) == 1
+    assert files[0]["name"] == "h264_short.mkv"
+    assert files[0]["status"] == "done"
+
+    conn = sqlite3.connect(fresh_db)
+    try:
+        rows = conn.execute(
+            "SELECT id, status FROM conversions WHERE source_path = ? ORDER BY id",
+            (str(dest).replace('\\', '/'),),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [(row[0], row[1]) for row in rows] == [(rec_done, "done")]
 
 
 def test_walk_running_emits_warning(tmp_path, fresh_db):

@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #11 Recognize hash-matched done records during scans, clean up shadow pending rows for that path, and update done-row probe metadata in place so converted files do not reappear as pending.
 - #4 Normalize changelog format to one bullet line per issue (remove Added/Changed/Fixed grouping).
 - #5 Refresh DB/UI metadata immediately after stream-edit accepts (including Output/Saved/%), fail fast on metadata-sync errors, and add subtitle track count as an S column in the queue table.
 - #7 Compact the Video Details modal using two-column Video Stream/File sections and auto-probe stream metadata on modal open for faster track editing.

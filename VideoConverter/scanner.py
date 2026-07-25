@@ -388,6 +388,32 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "saved_pct":     fallback_rec.get("saved_pct"),
                     }
                     db.update_source_path(fallback_rec["id"], full_path)
+                elif db_status in ("pending", "queued"):
+                    file_hash = db.hash_file_head(full_path)
+                    if file_hash:
+                        hash_rec = db.get_record_by_hash(file_hash)
+                        if hash_rec:
+                            db_status = hash_rec["status"]
+                            db_info = {
+                                "id":            hash_rec["id"],
+                                "status":        db_status,
+                                "bitrate_kbps":  hash_rec.get("output_bitrate_kbps") or hash_rec.get("source_bitrate_kbps"),
+                                "codec":         hash_rec.get("source_codec"),
+                                "duration_secs": hash_rec.get("source_duration_secs"),
+                                "video_track_count": hash_rec.get("source_video_track_count"),
+                                "audio_track_count": hash_rec.get("source_audio_track_count"),
+                                "subtitle_track_count": hash_rec.get("source_subtitle_track_count"),
+                                "output_size_mb": hash_rec.get("output_size_mb"),
+                                "saved_mb":      hash_rec.get("saved_mb"),
+                                "saved_pct":     hash_rec.get("saved_pct"),
+                                "est_saving_pct": hash_rec.get("est_saving_pct"),
+                                "est_saving_mb": hash_rec.get("est_saving_mb"),
+                                "est_sample_cv_pct": hash_rec.get("est_sample_cv_pct"),
+                                "est_high_variance": hash_rec.get("est_high_variance"),
+                                "est_aggregation": hash_rec.get("est_aggregation"),
+                            }
+                            db.update_source_path(hash_rec["id"], full_path)
+                            db.delete_pending_records_by_path(full_path, keep_id=hash_rec["id"])
 
             if db_status in ("done", "low_savings", "no_saving"):
                 # If sidecar subtitle files exist alongside the file, reset to
@@ -646,22 +672,18 @@ def walk(root: str) -> Generator[dict, None, None]:
         bitrate_kbps  = round(size_bytes * 8 / dur_secs / 1000) if (dur_secs > 0 and size_bytes > 0) else 0
         if bitrate_kbps:
             db.update_output_bitrate(record_id, bitrate_kbps)
-        # Also persist duration so it shows correctly on future scans
-        # (save_probe_result updates source_duration_secs which is reused for done rows)
-        try:
-            mtime = os.stat(fp).st_mtime
-            db.save_probe_result(
-                fp,
-                mtime,
-                display_codec,
-                bitrate_kbps,
-                dur_secs,
-                video_track_count=v_tracks,
-                audio_track_count=a_tracks,
-                subtitle_track_count=s_tracks,
-            )
-        except OSError:
-            pass
+        source_size_mb = (size_bytes / (1024 * 1024)) if size_bytes > 0 else None
+        db.update_probe_result(
+            record_id,
+            display_codec,
+            bitrate_kbps or None,
+            dur_secs,
+            video_track_count=v_tracks,
+            audio_track_count=a_tracks,
+            subtitle_track_count=s_tracks,
+            source_size_bytes=size_bytes or None,
+            source_size_mb=source_size_mb,
+        )
         yield {
             "type":        "probe",
             "full_path":   fp,

@@ -552,6 +552,23 @@ def delete_records_by_path(source_path: str) -> int:
         return cur.rowcount
 
 
+def delete_pending_records_by_path(source_path: str, keep_id: int | None = None) -> int:
+    """Delete pending/queued rows for a path, optionally preserving one record id."""
+    source_path = _norm(source_path)
+    with _connect() as conn:
+        if keep_id is None:
+            cur = conn.execute(
+                "DELETE FROM conversions WHERE source_path = ? AND status IN ('pending', 'queued')",
+                (source_path,),
+            )
+        else:
+            cur = conn.execute(
+                "DELETE FROM conversions WHERE source_path = ? AND status IN ('pending', 'queued') AND id != ?",
+                (source_path, keep_id),
+            )
+        return cur.rowcount
+
+
 def get_dropped_streams(source_path: str) -> list[int]:
     """Return the list of ffprobe stream indices marked as dropped for this path."""
     source_path = _norm(source_path)
@@ -747,6 +764,46 @@ def save_probe_result(
             (source_path, source_mtime, codec, bitrate_kbps, duration_secs,
              video_track_count, audio_track_count, subtitle_track_count,
              source_size_bytes, source_size_mb),
+        )
+
+
+def update_probe_result(
+    record_id: int,
+    codec: str | None,
+    bitrate_kbps: int | None,
+    duration_secs: float | None,
+    video_track_count: int | None = None,
+    audio_track_count: int | None = None,
+    subtitle_track_count: int | None = None,
+    source_size_bytes: int | None = None,
+    source_size_mb: float | None = None,
+) -> None:
+    """Update probe-derived metadata on an existing record without changing its status."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE conversions
+               SET source_codec = COALESCE(?, source_codec),
+                   source_bitrate_kbps = COALESCE(?, source_bitrate_kbps),
+                   source_duration_secs = COALESCE(?, source_duration_secs),
+                   source_video_track_count = COALESCE(?, source_video_track_count),
+                   source_audio_track_count = COALESCE(?, source_audio_track_count),
+                   source_subtitle_track_count = COALESCE(?, source_subtitle_track_count),
+                   source_size_bytes = COALESCE(?, source_size_bytes),
+                   source_size_mb = COALESCE(?, source_size_mb)
+             WHERE id = ?
+            """,
+            (
+                codec,
+                bitrate_kbps,
+                duration_secs,
+                video_track_count,
+                audio_track_count,
+                subtitle_track_count,
+                source_size_bytes,
+                source_size_mb,
+                record_id,
+            ),
         )
 
 

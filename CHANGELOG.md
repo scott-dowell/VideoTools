@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #18 Wire batch accept/discard endpoints into the Details modal UI with collapsible results panel, per-file action controls, and client handlers for single-file and batch-wide operations.
 - #17 Add batch preview discard/accept-all actions with shared single-file commit/discard helpers, persisted replace-state transitions, and mixed-result failure reporting for batch replacements.
 - #16 Add phase-1 batch preview orchestration with per-plan background build/status APIs, persisted preview state transitions, selector-resolution-based per-file apply behavior, and Details modal batch workflow wiring.
 - #15 Implement phase-1 batch workflow foundation: persisted batch plan/file-state tables, stream-signature matching helpers, and initial create/get batch plan APIs with unit and route coverage.

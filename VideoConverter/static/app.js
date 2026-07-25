@@ -2161,7 +2161,7 @@ function viewDetails(index) {
             </div>
             <div id="detailsBatchStatus" class="small text-secondary mb-2">No batch plan created yet</div>
             <div id="detailsBatchSummary" class="small text-secondary mb-3">Compatible: 0 | Excluded: 0 | Ready: 0 | Failed: 0</div>
-            <div class="d-flex flex-wrap gap-2">
+            <div class="d-flex flex-wrap gap-2 mb-3">
               <button type="button" class="btn btn-outline-primary btn-sm" id="detailsBatchCreateBtn" onclick="createBatchEditPlan()">
                 <i class="bi bi-diagram-3 me-1"></i>Apply Same Edits
               </button>
@@ -2169,8 +2169,19 @@ function viewDetails(index) {
                 <i class="bi bi-hammer me-1"></i>Build Batch Previews
               </button>
               <button type="button" class="btn btn-outline-secondary btn-sm" id="detailsBatchRefreshBtn" onclick="refreshBatchBuildStatus()" disabled>
-                <i class="bi bi-arrow-repeat me-1"></i>Open Batch Results
+                <i class="bi bi-arrow-repeat me-1"></i>Refresh Status
               </button>
+            </div>
+            <div id="detailsBatchResults" class="d-none">
+              <div class="d-flex flex-wrap gap-2 mb-2 pb-2 border-bottom">
+                <button type="button" class="btn btn-success btn-sm" id="detailsBatchAcceptAllBtn" onclick="acceptAllBatchReady()" disabled>
+                  <i class="bi bi-check-circle me-1"></i>Accept All Ready
+                </button>
+                <button type="button" class="btn btn-warning btn-sm" id="detailsBatchDiscardAllBtn" onclick="discardAllBatchPreviews()" disabled>
+                  <i class="bi bi-trash3 me-1"></i>Discard All
+                </button>
+              </div>
+              <div id="detailsBatchFilesList" class="small" style="max-height:300px;overflow-y:auto"></div>
             </div>
           </div>
         </div>
@@ -2387,6 +2398,11 @@ function _setBatchButtonsDisabled(disabled, noPlanYet) {
   if (refreshBtn) refreshBtn.disabled = !!disabled || !!noPlanYet;
 }
 
+function _showBatchResultsPanel() {
+  const resultsEl = document.getElementById('detailsBatchResults');
+  if (resultsEl) resultsEl.classList.remove('d-none');
+}
+
 function createBatchEditPlan() {
   if (_detailsFileIndex == null) return;
   const f = _files[_detailsFileIndex];
@@ -2501,10 +2517,17 @@ function refreshBatchBuildStatus(opts) {
       if (state === 'running' || state === 'queued') {
         _setBatchStatusText('Building previews: ' + done + '/' + total);
         _setBatchButtonsDisabled(false, false);
+        _showBatchResultsPanel();
       } else if (state === 'done') {
         _setBatchStatusText('Build complete: ' + (s.preview_ready || 0) + ' ready, ' + (s.preview_failed || 0) + ' failed');
         _setBatchButtonsDisabled(false, false);
         _stopBatchStatusPolling();
+        _showBatchResultsPanel();
+        _renderBatchFilesList();
+        const acceptBtn = document.getElementById('detailsBatchAcceptAllBtn');
+        const discardBtn = document.getElementById('detailsBatchDiscardAllBtn');
+        if (acceptBtn) acceptBtn.disabled = (s.preview_ready || 0) === 0;
+        if (discardBtn) discardBtn.disabled = (s.preview_ready || 0) === 0 && (s.preview_failed || 0) === 0;
       } else if (state === 'failed') {
         _setBatchStatusText('Build failed: ' + (w.error || 'unknown error'));
         _setBatchButtonsDisabled(false, false);
@@ -2512,12 +2535,188 @@ function refreshBatchBuildStatus(opts) {
       } else {
         _setBatchStatusText('Plan ready. Build previews when ready.');
         _setBatchButtonsDisabled(false, false);
+        _showBatchResultsPanel();
+        _renderBatchFilesList();
       }
     })
     .catch(err => {
       _setBatchStatusText('Could not read batch status');
       if (!options.silent) addLog('Batch status failed: ' + err, 'err');
     });
+}
+
+function _renderBatchFilesList() {
+  if (_detailsFileIndex == null || _detailsBatchPlanId == null) return;
+
+  fetch('/api/batch_edit_plan/' + _detailsBatchPlanId)
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) return;
+      const files = data.files || [];
+      const filesEl = document.getElementById('detailsBatchFilesList');
+      if (!filesEl) return;
+
+      if (!files.length) {
+        filesEl.innerHTML = '<p class="text-secondary mb-0">No files in plan.</p>';
+        return;
+      }
+
+      const rows = files.map((f, idx) => {
+        const name = f.source_path ? f.source_path.split(/[\\/]/).pop() : '(unknown)';
+        const match = f.match_state === 'compatible' ? 'Compatible' : 'Excluded';
+        const prevState = f.preview_state || 'none';
+        const replaceState = f.replace_state || 'not_started';
+        const error = f.preview_error ? (' - ' + f.preview_error.substring(0, 60)) : '';
+
+        let statBadge = '';
+        if (prevState === 'ready') statBadge = '<span class="badge bg-success">Ready</span>';
+        else if (prevState === 'failed') statBadge = '<span class="badge bg-danger">Failed' + error + '</span>';
+        else if (prevState === 'building') statBadge = '<span class="badge bg-info">Building</span>';
+        else if (prevState === 'queued') statBadge = '<span class="badge bg-secondary">Queued</span>';
+        else if (prevState === 'discarded') statBadge = '<span class="badge bg-secondary">Discarded</span>';
+        else statBadge = '<span class="badge bg-light text-dark">None</span>';
+
+        let replaceBadge = '';
+        if (replaceState === 'replaced') replaceBadge = '<span class="badge bg-success ms-1">✓ Accepted</span>';
+        else if (replaceState === 'failed') replaceBadge = '<span class="badge bg-danger ms-1">✗ Accept Failed</span>';
+
+        let controls = '';
+        if (f.match_state === 'compatible' && prevState === 'ready' && replaceState !== 'replaced') {
+          controls = '<button class="btn btn-xs btn-success ms-2" onclick="acceptOneBatchPreview(\'' + f.source_path.replace(/'/g, '&apos;') + '\')"><i class="bi bi-check"></i>Accept</button>' +
+                     '<button class="btn btn-xs btn-warning ms-1" onclick="discardOneBatchPreview(\'' + f.source_path.replace(/'/g, '&apos;') + '\')"><i class="bi bi-trash"></i>Discard</button>';
+        }
+
+        return '<div class="py-2 border-bottom small" style="display:flex;justify-content:space-between;align-items:center">' +
+               '<div><strong>' + name + '</strong> <span class="text-secondary">(' + match + ')</span><br>' + statBadge + replaceBadge + '</div>' +
+               '<div>' + controls + '</div>' +
+               '</div>';
+      }).join('');
+
+      filesEl.innerHTML = rows;
+    })
+    .catch(() => {});
+}
+
+function acceptOneBatchPreview(sourcePath) {
+  if (_detailsBatchPlanId == null) return;
+  _detailsBusy = true;
+  _setBatchButtonsDisabled(true, false);
+
+  fetch('/api/batch_edit_plan/' + _detailsBatchPlanId + '/accept_preview', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({source_path: sourcePath}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    if (data.ok) {
+      addLog('Accepted batch preview for ' + (sourcePath.split(/[\\/]/).pop() || 'file'), 'ok');
+      _setBatchButtonsDisabled(false, false);
+      _renderBatchFilesList();
+    } else {
+      _setBatchButtonsDisabled(false, false);
+      addLog('Accept batch preview failed: ' + (data.error || 'unknown error'), 'err');
+    }
+  }).catch(err => {
+    _detailsBusy = false;
+    _setBatchButtonsDisabled(false, false);
+    addLog('Accept batch preview failed: ' + err, 'err');
+  });
+}
+
+function discardOneBatchPreview(sourcePath) {
+  if (_detailsBatchPlanId == null) return;
+  _detailsBusy = true;
+  _setBatchButtonsDisabled(true, false);
+
+  fetch('/api/batch_edit_plan/' + _detailsBatchPlanId + '/discard_previews', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({source_path: sourcePath}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    if (data.ok) {
+      addLog('Discarded batch preview for ' + (sourcePath.split(/[\\/]/).pop() || 'file'), 'info');
+      _setBatchButtonsDisabled(false, false);
+      _renderBatchFilesList();
+    } else {
+      _setBatchButtonsDisabled(false, false);
+      addLog('Discard batch preview failed: ' + (data.error || 'unknown error'), 'err');
+    }
+  }).catch(err => {
+    _detailsBusy = false;
+    _setBatchButtonsDisabled(false, false);
+    addLog('Discard batch preview failed: ' + err, 'err');
+  });
+}
+
+function acceptAllBatchReady() {
+  if (_detailsBatchPlanId == null) return;
+  _detailsBusy = true;
+  _setBatchButtonsDisabled(true, false);
+  const acceptBtn = document.getElementById('detailsBatchAcceptAllBtn');
+  if (acceptBtn) acceptBtn.textContent = 'Accepting...';
+
+  fetch('/api/batch_edit_plan/' + _detailsBatchPlanId + '/accept_all_ready', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    const replaced = data.summary ? data.summary.replaced || 0 : 0;
+    const failed = data.summary ? data.summary.failed || 0 : 0;
+    if (data.ok) {
+      addLog('Accepted all ready batch previews: ' + replaced + ' replaced, ' + failed + ' failed', replaced > 0 ? 'ok' : 'warn');
+      _setBatchButtonsDisabled(false, false);
+      if (acceptBtn) acceptBtn.textContent = 'Accept All Ready';
+      _renderBatchFilesList();
+      refreshBatchBuildStatus();
+    } else {
+      _setBatchButtonsDisabled(false, false);
+      if (acceptBtn) acceptBtn.textContent = 'Accept All Ready';
+      addLog('Accept all batch previews failed: ' + (data.error || 'unknown error'), 'err');
+    }
+  }).catch(err => {
+    _detailsBusy = false;
+    _setBatchButtonsDisabled(false, false);
+    const acceptBtn = document.getElementById('detailsBatchAcceptAllBtn');
+    if (acceptBtn) acceptBtn.textContent = 'Accept All Ready';
+    addLog('Accept all batch previews failed: ' + err, 'err');
+  });
+}
+
+function discardAllBatchPreviews() {
+  if (_detailsBatchPlanId == null) return;
+  _detailsBusy = true;
+  _setBatchButtonsDisabled(true, false);
+  const discardBtn = document.getElementById('detailsBatchDiscardAllBtn');
+  if (discardBtn) discardBtn.textContent = 'Discarding...';
+
+  fetch('/api/batch_edit_plan/' + _detailsBatchPlanId + '/discard_previews', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({all_ready: true}),
+  }).then(r => r.json()).then(data => {
+    _detailsBusy = false;
+    const discarded = data.summary ? data.summary.discarded || 0 : 0;
+    const failed = data.summary ? data.summary.failed || 0 : 0;
+    if (data.ok) {
+      addLog('Discarded all batch previews: ' + discarded + ' discarded, ' + failed + ' failed', discarded > 0 ? 'ok' : 'info');
+      _setBatchButtonsDisabled(false, false);
+      if (discardBtn) discardBtn.textContent = 'Discard All';
+      _renderBatchFilesList();
+      refreshBatchBuildStatus();
+    } else {
+      _setBatchButtonsDisabled(false, false);
+      if (discardBtn) discardBtn.textContent = 'Discard All';
+      addLog('Discard all batch previews failed: ' + (data.error || 'unknown error'), 'err');
+    }
+  }).catch(err => {
+    _detailsBusy = false;
+    _setBatchButtonsDisabled(false, false);
+    const discardBtn = document.getElementById('detailsBatchDiscardAllBtn');
+    if (discardBtn) discardBtn.textContent = 'Discard All';
+    addLog('Discard all batch previews failed: ' + err, 'err');
+  });
 }
 
 function _renderRowStatusCell(fileIndex) {

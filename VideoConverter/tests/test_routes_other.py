@@ -14,6 +14,7 @@ Run:  pytest VideoConverter/tests/test_routes_other.py -v
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -382,3 +383,44 @@ def test_open_folder_action_for_directory(client, tmp_path):
         r = client.get(f"/api/open?path={tmp_path}&action=folder")
     assert r.status_code == 200
     mock_sf.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# /api/eng_stereo_preview
+# ---------------------------------------------------------------------------
+
+def test_eng_stereo_preview_preserves_other_audio_tracks(client, tmp_path):
+    """English stereo preview should keep non-target audio tracks and replace the first English track."""
+    video = tmp_path / "video.mkv"
+    video.write_bytes(b"\x00" * 16)
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        Path(cmd[-1]).write_bytes(b"preview")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    with patch("app._probe_audio_streams", return_value=[
+        {"index": 1, "language": "eng"},
+        {"index": 2, "language": "jpn"},
+        {"index": 4, "language": "spa"},
+    ]), patch("app._sp.run", side_effect=fake_run):
+        r = client.post("/api/eng_stereo_preview", json={"path": str(video)})
+
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["ok"] is True
+    assert data["preview_path"].endswith(".__eng_stereo_preview__.mkv")
+
+    cmd = seen["cmd"]
+    assert cmd[:6] == ["ffmpeg", "-y", "-v", "error", "-i", str(video)]
+    assert ["-map", "0:v"] == cmd[6:8]
+    assert "0:1" in cmd
+    assert "0:2" in cmd
+    assert "0:4" in cmd
+    assert cmd.count("-map") >= 5
+    assert ["-c:a", "copy"] in [cmd[i:i+2] for i in range(len(cmd) - 1)]
+    assert ["-c:a:0", "aac"] in [cmd[i:i+2] for i in range(len(cmd) - 1)]
+    assert ["-ac:a:0", "2"] in [cmd[i:i+2] for i in range(len(cmd) - 1)]
+    assert ["-metadata:s:a:0", "title=English Stereo Test"] in [cmd[i:i+2] for i in range(len(cmd) - 1)]

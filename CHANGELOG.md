@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #12 Move the Video Details preview actions into a dedicated workflow section and make English stereo test copies keep the other audio tracks while replacing the first English track with a stereo test track.
 - #11 Recognize hash-matched done records during scans, clean up shadow pending rows for that path, and update done-row probe metadata in place so converted files do not reappear as pending.
 - #4 Normalize changelog format to one bullet line per issue (remove Added/Changed/Fixed grouping).
 - #5 Refresh DB/UI metadata immediately after stream-edit accepts (including Output/Saved/%), fail fast on metadata-sync errors, and add subtitle track count as an S column in the queue table.

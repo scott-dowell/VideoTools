@@ -305,22 +305,34 @@ def _original_backup_path(source_path: str) -> str:
     return f"{root}.original-backup{ext}"
 
 
-def _first_audio_stream_index_for_language(path: str, language: str = "eng") -> int | None:
-    """Return the first ffprobe absolute stream index for the requested audio language."""
+def _probe_audio_streams(path: str) -> list[dict]:
+    """Return probed audio streams with absolute indices and normalized language tags."""
     probe = scanner._ffprobe(path)
     if not probe:
-        return None
-    want = (language or "").strip().lower()
+        return []
+
+    streams: list[dict] = []
     for stream in probe.get("streams", []):
         if (stream.get("codec_type") or "").lower() != "audio":
             continue
+        try:
+            index = int(stream.get("index"))
+        except Exception:
+            continue
         tags = stream.get("tags") or {}
-        lang = (tags.get("language") or "und").lower()
-        if lang == want:
-            try:
-                return int(stream.get("index"))
-            except Exception:
-                continue
+        streams.append({
+            "index": index,
+            "language": (tags.get("language") or "und").lower(),
+        })
+    return streams
+
+
+def _first_audio_stream_index_for_language(path: str, language: str = "eng") -> int | None:
+    """Return the first ffprobe absolute stream index for the requested audio language."""
+    want = (language or "").strip().lower()
+    for stream in _probe_audio_streams(path):
+        if stream.get("language") == want:
+            return stream.get("index")
     return None
 
 
@@ -2290,7 +2302,7 @@ def api_eng_stereo_status():
 
 @app.route("/api/eng_stereo_preview", methods=["POST"])
 def api_eng_stereo_preview():
-    """Create/overwrite an English-only AAC stereo preview copy for test playback."""
+    """Create/overwrite an English AAC stereo preview while preserving other tracks."""
     if _is_job_running():
         return jsonify({"error": "Cannot create preview while conversion is running"}), 409
 
@@ -2303,26 +2315,34 @@ def api_eng_stereo_preview():
     if not os.path.isfile(path):
         return jsonify({"error": "File not found"}), 404
 
-    eng_index = _first_audio_stream_index_for_language(path, "eng")
+    audio_streams = _probe_audio_streams(path)
+    eng_index = next((s["index"] for s in audio_streams if s.get("language") == "eng"), None)
     if eng_index is None:
         return jsonify({"error": "No English audio track found"}), 400
 
+    other_audio_indices = [s["index"] for s in audio_streams if s.get("index") != eng_index]
     preview = _eng_stereo_preview_path(path)
     cmd = [
         "ffmpeg", "-y", "-v", "error",
         "-i", path,
         "-map", "0:v",
         "-map", f"0:{eng_index}",
+    ]
+    for audio_index in other_audio_indices:
+        cmd += ["-map", f"0:{audio_index}"]
+    cmd += [
         "-map", "0:s?",
         "-map", "0:t?",
         "-c:v", "copy",
+        "-c:a", "copy",
         "-c:s", "copy",
         "-c:t", "copy",
-        "-c:a", "aac",
-        "-ac", "2",
-        "-b:a", "192k",
+        "-c:a:0", "aac",
+        "-ac:a:0", "2",
+        "-b:a:0", "192k",
         "-disposition:a:0", "default",
         "-metadata:s:a:0", "language=eng",
+        "-metadata:s:a:0", "title=English Stereo Test",
         preview,
     ]
 

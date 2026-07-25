@@ -2088,6 +2088,57 @@ function viewDetails(index) {
     html += '<p class="text-secondary small mb-0">No subtitle tracks found.</p>';
   }
 
+  html += `
+    <h6 class="details-section-head mt-4"><i class="bi bi-diagram-3 me-2"></i>Workflow</h6>
+    <div class="row g-3">
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-header py-2 small"><i class="bi bi-scissors me-1"></i>Track Edit Preview</div>
+          <div class="card-body p-3">
+            <p class="text-secondary small mb-3">Drop audio or subtitle tracks above, then build a preview copy to verify the result before replacing the original file.</p>
+            <div id="detailsStreamEditStatus" class="small text-secondary mb-3">No preview copy yet</div>
+            <div class="d-flex flex-wrap gap-2">
+              <button type="button" class="btn btn-outline-primary btn-sm" id="detailsPreviewCreateBtn" onclick="createStreamEditPreview()">
+                <i class="bi bi-scissors me-1"></i>Apply Stream Edit
+              </button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="detailsPreviewPlayBtn" onclick="playStreamEditPreview()" disabled>
+                <i class="bi bi-play-circle me-1"></i>Play Preview
+              </button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="detailsPreviewDiscardBtn" onclick="discardStreamEditPreview()" disabled>
+                <i class="bi bi-trash3 me-1"></i>Discard Preview
+              </button>
+              <button type="button" class="btn btn-success btn-sm" id="detailsPreviewCommitBtn" onclick="openCommitStreamEditModal()" disabled>
+                <i class="bi bi-check2-circle me-1"></i>Accept and Replace Original
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card h-100">
+          <div class="card-header py-2 small"><i class="bi bi-volume-down me-1"></i>English Stereo Test</div>
+          <div class="card-body p-3">
+            <p class="text-secondary small mb-3">Build a test copy that converts the first English audio track to AAC stereo, keeps the other audio tracks, and lets you review playback before replacing the original.</p>
+            <div id="detailsEngStereoStatus" class="small text-secondary mb-3">No Eng stereo test copy yet</div>
+            <div class="d-flex flex-wrap gap-2">
+              <button type="button" class="btn btn-outline-primary btn-sm" id="detailsEngStereoCreateBtn" onclick="createEngStereoPreview()">
+                <i class="bi bi-volume-down me-1"></i>Create Eng Stereo Test
+              </button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="detailsEngStereoPlayBtn" onclick="playEngStereoPreview()" disabled>
+                <i class="bi bi-play-circle me-1"></i>Play Eng Test
+              </button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="detailsEngStereoDiscardBtn" onclick="discardEngStereoPreview()" disabled>
+                <i class="bi bi-trash3 me-1"></i>Discard Eng Test
+              </button>
+              <button type="button" class="btn btn-success btn-sm" id="detailsEngStereoCommitBtn" onclick="openCommitEngStereoModal()" disabled>
+                <i class="bi bi-check2-circle me-1"></i>Replace with Eng Stereo
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
   body.innerHTML = html;
   const modalEl = document.getElementById('detailsModal');
   let existing = bootstrap.Modal.getInstance(modalEl);

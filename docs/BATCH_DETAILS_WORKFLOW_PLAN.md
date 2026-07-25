@@ -453,6 +453,17 @@ For batch replacement, the operation summary should clearly report:
 
 ## Phased Delivery
 
+### Global Test Gate
+
+No implementation work may move from one phase to the next until that phase's unit tests are implemented and passing.
+
+Required gate for every phase:
+
+- unit tests for all new phase-specific core logic
+- unit tests for new failure paths introduced in that phase
+- existing relevant test modules remain green
+- phase sign-off only after tests pass in CI/local test run
+
 ### Phase 1: Batch Plan And Preview Management
 
 - add stream signature matching
@@ -460,6 +471,10 @@ For batch replacement, the operation summary should clearly report:
 - add Apply Same Edits for matching files in folder
 - build previews only
 - add batch result panel
+- add unit tests for signature generation and matching decisions
+- add unit tests for plan persistence create/read/update paths
+- add unit tests for selector resolution per compatible file
+- gate: do not start phase 2 until all phase 1 unit tests pass
 
 This phase delivers the core user value while preserving current preview safety.
 
@@ -470,18 +485,31 @@ This phase delivers the core user value while preserving current preview safety.
 - add discard one
 - add discard all
 - add replacement result summary
+- add unit tests for replace-one and replace-all state transitions
+- add unit tests validating stream-edit replacement creates `.original-backup`
+- add unit tests for discard behavior and preview state transitions
+- add unit tests for replacement failure handling and retry-safe outcomes
+- gate: do not start phase 3 until all phase 2 unit tests pass
 
 ### Phase 3: Queue Integration
 
 - add row badges for batch states
 - add filters for preview ready, preview failed, excluded
 - add folder-level resume entry points
+- add unit tests for queue state mapping from persisted batch states
+- add unit tests for filter behavior on mixed batch states
+- add unit tests for resume entry-point state selection logic
+- gate: do not start phase 4 until all phase 3 unit tests pass
 
 ### Phase 4: Advanced Matching And Repair Presets
 
 - add saved repair presets
 - allow fuzzy matching options where safe
 - allow batch English stereo workflows as first-class repair plans
+- add unit tests for preset save/load/apply behavior
+- add unit tests for fuzzy-match guardrails and exclusion logic
+- add unit tests for advanced repair-plan validation paths
+- gate: phase 4 is complete only when all phase 4 unit tests pass
 
 ---
 

@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #14 Require phase-by-phase unit test gates in the batch workflow plan, blocking progression to the next phase until current phase tests pass.
 - #13 Add a reviewed implementation checklist for multi-file Video Details batch workflow with preview-first apply-same-edits, persistent batch states, and explicit replacement safety constraints.
 - #12 Move the Video Details preview actions into a dedicated workflow section and make English stereo test copies keep the other audio tracks while replacing the first English track with a stereo test track.
 - #11 Recognize hash-matched done records during scans, clean up shadow pending rows for that path, and update done-row probe metadata in place so converted files do not reappear as pending.

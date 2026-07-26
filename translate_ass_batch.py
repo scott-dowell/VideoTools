@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from typing import Dict, List, Tuple
 
-from deep_translator import MyMemoryTranslator
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 
 TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}$")
 HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -20,6 +20,12 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         default=r"C:\Users\scott\Downloads\Anime\_Kuttsukiboshi",
         help="Folder containing MKV files",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["google", "mymemory"],
+        default="google",
+        help="Primary translation provider",
     )
     return parser.parse_args()
 
@@ -97,7 +103,59 @@ def write_srt(path: str, cues: List[Tuple[str, str]]) -> None:
         f.write("\n\n".join(out_blocks) + "\n")
 
 
-def translate_cues(cues: List[Tuple[str, str]], translator: MyMemoryTranslator) -> List[Tuple[str, str]]:
+def _make_translator(provider: str):
+    if provider == "google":
+        return GoogleTranslator(source="fr", target="en")
+    if provider == "mymemory":
+        return MyMemoryTranslator(source="fr-FR", target="en-GB")
+    raise ValueError(f"Unsupported provider: {provider}")
+
+
+def _looks_untranslated(chunk: List[str], translated: List[str]) -> bool:
+    if not chunk or len(chunk) != len(translated):
+        return True
+
+    french_markers = re.compile(
+        r"\b(le|la|les|des|de|du|un|une|et|pas|que|qui|dans|pour|avec|bonjour|merci|oui|non)\b",
+        flags=re.IGNORECASE,
+    )
+    likely_french = 0
+    unchanged = 0
+
+    for src, dst in zip(chunk, translated):
+        src_n = normalize_text(src)
+        dst_n = normalize_text(dst)
+        if not src_n:
+            continue
+        if src_n == dst_n:
+            unchanged += 1
+        if french_markers.search(src_n) or any(ch in src_n for ch in "àâçéèêëîïôûùüÿœ"):  # noqa: RUF001
+            likely_french += 1
+
+    # If many lines look French and almost all remained unchanged, treat as provider failure.
+    return likely_french >= 5 and unchanged >= max(5, int(0.9 * len(chunk)))
+
+
+def _translate_chunk(chunk: List[str], primary: str) -> List[str]:
+    providers = [primary, "mymemory" if primary == "google" else "google"]
+    last_error = ""
+    for provider in providers:
+        translator = _make_translator(provider)
+        try:
+            result = translator.translate_batch(chunk)
+            if not isinstance(result, list):
+                result = [result]
+            normalized_result = [normalize_text((line or "").strip()) for line in result]
+            if _looks_untranslated(chunk, normalized_result):
+                raise RuntimeError("provider returned mostly untranslated French text")
+            return normalized_result
+        except Exception as exc:  # pragma: no cover - network/provider dependent
+            last_error = f"{provider}: {exc}"
+
+    raise RuntimeError(f"Translation failed for current chunk ({last_error})")
+
+
+def translate_cues(cues: List[Tuple[str, str]], provider: str) -> List[Tuple[str, str]]:
     unique: List[str] = []
     seen = set()
     for _, txt in cues:
@@ -111,12 +169,7 @@ def translate_cues(cues: List[Tuple[str, str]], translator: MyMemoryTranslator) 
     total = len(unique)
     for i in range(0, total, batch_size):
         chunk = unique[i : i + batch_size]
-        try:
-            result = translator.translate_batch(chunk)
-            if not isinstance(result, list):
-                result = [result]
-        except Exception:
-            result = chunk
+        result = _translate_chunk(chunk, provider)
         for src, dst in zip(chunk, result):
             translations[src] = normalize_text((dst or src).strip())
         print(f"  translated {min(i + batch_size, total)}/{total}", flush=True)
@@ -142,8 +195,6 @@ def main() -> int:
         print("No source MKV files found.")
         return 1
 
-    translator = MyMemoryTranslator(source="fr-FR", target="en-GB")
-
     for mkv_path in mkvs:
         base = os.path.splitext(os.path.basename(mkv_path))[0]
         out_srt = os.path.join(folder, base + ".en.srt")
@@ -154,7 +205,7 @@ def main() -> int:
         try:
             extract_first_subtitle_to_srt(mkv_path, temp_srt)
             cues = parse_srt(temp_srt)
-            translated = translate_cues(cues, translator)
+            translated = translate_cues(cues, args.provider)
             write_srt(out_srt, translated)
             print(f"Saved {out_srt}", flush=True)
         finally:

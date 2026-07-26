@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #20 Fix sidecar subtitle translation reliability by adding provider fallback and fail-fast checks so `.en.srt` generation no longer silently writes untranslated French output.
 - #19 Simplify subtitle translation workflow to produce only `.en.srt` sidecars from source MKV subtitle tracks, plus a quick usage doc for repeatable runs.
 - #18 Wire batch accept/discard endpoints into the Details modal UI with collapsible results panel, per-file action controls, and client handlers for single-file and batch-wide operations.
 - #17 Add batch preview discard/accept-all actions with shared single-file commit/discard helpers, persisted replace-state transitions, and mixed-result failure reporting for batch replacements.

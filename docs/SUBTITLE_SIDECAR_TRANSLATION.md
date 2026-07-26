@@ -35,9 +35,17 @@ c:/VideoTools/.venv/Scripts/python.exe -m pip install deep-translator
 c:/VideoTools/.venv/Scripts/python.exe c:/VideoTools/translate_ass_batch.py "C:\Path\To\Folder"
 ```
 
+Preferred (explicit provider):
+
+```powershell
+c:/VideoTools/.venv/Scripts/python.exe c:/VideoTools/translate_ass_batch.py "C:\Path\To\Folder" --provider google
+```
+
 If folder is omitted, the script uses its built-in default folder.
 
 ## Notes
 
 - The script ignores files with `.with-eng` in the name when choosing source MKVs.
 - If your player has issues with embedded subtitles, use the generated `.en.srt` sidecar directly.
+- The script now fails fast if a provider returns mostly untranslated French text for a chunk.
+- Provider fallback is automatic (`google` <-> `mymemory`) when one provider fails.

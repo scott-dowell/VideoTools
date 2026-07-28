@@ -333,6 +333,46 @@ def test_convert_video_anime_hi10(tmp_path):
     assert result["encoder_used"] in ("hevc_qsv", "libx265")
 
 
+def test_convert_video_anime_retries_without_subtitles_on_duration_mismatch(tmp_path):
+    """Anime mode should retry without subtitle streams when the first output is truncated."""
+    out_dir = str(tmp_path / "out")
+    msgs, log = _logs()
+    stop = threading.Event()
+    output_path = Path(out_dir) / f"{(FIXTURES / 'h264_hi10.mkv').stem}.mp4"
+
+    call_data = []
+
+    def fake_compress_and_remux(*args, **kwargs):
+        os.makedirs(out_dir, exist_ok=True)
+        output_path.write_bytes(b"mp4")
+        call_data.append(kwargs.get("dropped_streams"))
+        return True, "hevc_qsv"
+
+    verify_results = [
+        (False, "duration mismatch: src=100.0s out=80.0s (20.0% off)"),
+        (True, ""),
+    ]
+
+    with patch.object(converter, "compress_and_remux", side_effect=fake_compress_and_remux), \
+         patch.object(converter, "_verify_output", side_effect=lambda *a, **k: verify_results.pop(0)), \
+         patch.object(converter, "_subtitle_stream_indices", return_value=[3, 4]):
+
+        result = converter.convert_video(
+            input_path=str(FIXTURES / "h264_hi10.mkv"),
+            output_dir=out_dir,
+            anime_mode=True,
+            quality=None,
+            progress_cb=None,
+            stop_event=stop,
+            log=log,
+        )
+
+    assert result["ok"] is True, f"Expected retry success; logs: {msgs}; error: {result.get('error')}"
+    assert call_data[0] is None
+    assert call_data[1] == [3, 4]
+    assert any("retrying once without subtitle streams" in m.lower() for m in msgs)
+
+
 # ---------------------------------------------------------------------------
 # Bitmap subtitle (PGS) OCR tests — requires h264_bitmap_sub.mkv fixture
 # ---------------------------------------------------------------------------

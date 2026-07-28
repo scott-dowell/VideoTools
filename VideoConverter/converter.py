@@ -1588,6 +1588,34 @@ def _is_av1(input_path: str) -> bool:
         return False
 
 
+def _subtitle_stream_indices(input_path: str) -> list[int]:
+    """Return subtitle stream indices for the first probeable stream list.
+
+    This is used as a retry escape hatch when anime-mode muxing produces an
+    output that is shorter than the source, which can happen on files with
+    problematic subtitle streams.  The retry drops subtitles entirely rather
+    than failing the conversion.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams",
+                input_path,
+            ],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+        data = json.loads(result.stdout)
+        return [
+            int(s.get("index", -1))
+            for s in data.get("streams", [])
+            if s.get("codec_type") == "subtitle" and str(s.get("index", "")).isdigit()
+        ]
+    except Exception:
+        return []
+
+
 def _is_potentially_english(lang: str, title: str) -> bool:
     """Return True if a subtitle stream should be treated as English.
 
@@ -2903,6 +2931,53 @@ def convert_video(
         output_path  = os.path.join(output_dir, out_name)
         ok_verify, reason = _verify_output(output_path, duration, src_path=input_path, log=log)
         if not ok_verify:
+            if anime_mode and reason.startswith("duration mismatch:"):
+                retry_drops = sorted(set((dropped_streams or []) + _subtitle_stream_indices(input_path)))
+                if retry_drops:
+                    log(
+                        "Integrity check failed due to truncated anime-mode output; "
+                        f"retrying once without subtitle streams: {retry_drops}"
+                    )
+                    try:
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                    except OSError:
+                        pass
+                    ok_retry, encoder_retry = compress_and_remux(
+                        input_path=input_path,
+                        output_dir=output_dir,
+                        log=log,
+                        stop_event=stop_event,
+                        quality=quality,
+                        progress_cb=progress_cb,
+                        pid_holder=pid_holder,
+                        conv_logger=clog,
+                        tmp_holder=tmp_holder,
+                        artifact_holder=_artifact_holder,
+                        force_sw=_anime_force_sw,
+                        dropped_streams=retry_drops,
+                    )
+                    if ok_retry:
+                        ok_verify_retry, reason_retry = _verify_output(output_path, duration, src_path=input_path, log=log)
+                        if ok_verify_retry:
+                            log("Integrity check passed after subtitle-drop retry.")
+                            out_size = os.path.getsize(output_path)
+                            out_mb = out_size / (1024 * 1024)
+                            saved_mb = max(0.0, src_mb - out_mb)
+                            saved_pct = int(saved_mb / src_mb * 100) if src_mb > 0 else 0
+                            clog.success(encoder_retry, saved_pct)
+                            return {
+                                "ok":             True,
+                                "output_path":    output_path,
+                                "output_size_mb": round(out_mb, 2),
+                                "saved_mb":       round(saved_mb, 2),
+                                "saved_pct":      saved_pct,
+                                "encoder_used":   encoder_retry,
+                                "error":          None,
+                                "conv_logger":    clog,
+                                "duration_secs":  duration,
+                            }
+                        log(f"Subtitle-drop retry still failed: {reason_retry}")
             log(f"Integrity check failed: {reason}")
             clog.mark_fail_at(f"integrity check: {reason}")
             if _should_keep_failed_intermediates():

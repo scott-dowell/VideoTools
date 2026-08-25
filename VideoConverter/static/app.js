@@ -970,6 +970,15 @@ function scanFolder(path) {
     } else if (msg.type === 'scan_progress') {
       const found = Number.isFinite(msg.found_files) ? msg.found_files : _files.length;
       _scanStripPhase1(found, msg.current_folder || '', false);
+    } else if (msg.type === 'folder_timing') {
+      const ms = Number(msg.elapsed_ms || 0);
+      if (ms >= 700) {
+        const folder = msg.folder || '(root)';
+        const statMs = Number(msg.stat_ms || 0);
+        const dbMs = Number(msg.db_ms || 0);
+        const loopMs = Number(msg.loop_ms || 0);
+        addLog('Scan timing: ' + folder + ' - ' + ms + ' ms (stat ' + statMs + ', db ' + dbMs + ', loop ' + loopMs + ')', 'info');
+      }
     } else if (msg.type === 'probe') {
       if (_probePhaseTotal === 0) {
         _scanStripPhase2();
@@ -1139,6 +1148,10 @@ function _scanStripPhase1(count, currentFolder = '', force = false) {
 
   strip.classList.remove('d-none', 'scan-probing');
   icon.className = 'bi bi-folder2-open est-strip-icon';
+  if (force || !bar.style.width || bar.style.width === '0%' || bar.style.width === '100%') {
+    bar.style.transition = 'width .25s ease';
+    bar.style.width = '28%';
+  }
   bar.classList.add('scan-bar-indeterminate');
 
   const folderLabel = folder ? (' \u00b7 ' + _scanFolderLabel(folder)) : '';

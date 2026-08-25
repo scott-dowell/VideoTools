@@ -241,6 +241,53 @@ def test_scan_progress_includes_current_folder(tmp_path):
     assert seen_folder, "Expected scan_progress to report current_folder='SeasonA'"
 
 
+def test_walk_phase1_avoids_per_file_fallback_db_queries(tmp_path, fresh_db):
+    """Phase-1 should not do per-file output/fingerprint fallback DB round-trips."""
+    dest = tmp_path / "h264_short.mkv"
+    shutil.copy(FIXTURES_DIR / "h264_short.mkv", dest)
+
+    # Create a pending record to ensure old fallback path would have triggered.
+    mtime = dest.stat().st_mtime
+    db.upsert_pending(str(dest), mtime)
+
+    with patch("scanner.db.get_record_by_output", wraps=db.get_record_by_output) as by_output, \
+         patch("scanner.db.get_record_by_fingerprint", wraps=db.get_record_by_fingerprint) as by_fp:
+        list(scanner.walk(str(tmp_path)))
+
+    assert by_output.call_count == 0
+    assert by_fp.call_count == 0
+
+
+def test_walk_emits_folder_timing_events(tmp_path):
+    """Scanner should emit folder_timing telemetry per scanned folder with candidates."""
+    sub = tmp_path / "BatchA"
+    sub.mkdir()
+    for i in range(3):
+        (sub / f"clip_{i:03d}.mkv").write_bytes(b"\x02")
+
+    fake_probe = {
+        "streams": [{
+            "codec_type": "video",
+            "codec_name": "h264",
+            "width": 640,
+            "height": 360,
+            "r_frame_rate": "24/1",
+            "profile": "",
+            "pix_fmt": "yuv420p",
+            "bits_per_raw_sample": "8",
+        }],
+        "format": {"duration": "4.0", "bit_rate": "1200000"},
+    }
+
+    with patch("scanner._ffprobe", return_value=fake_probe):
+        timings = [e for e in scanner.walk(str(tmp_path)) if e.get("type") == "folder_timing"]
+
+    assert timings, "Expected at least one folder_timing event"
+    t = timings[0]
+    assert t.get("folder") == "BatchA"
+    assert isinstance(t.get("elapsed_ms"), int)
+
+
 # ---------------------------------------------------------------------------
 # scanner.walk — folder event shape
 # ---------------------------------------------------------------------------

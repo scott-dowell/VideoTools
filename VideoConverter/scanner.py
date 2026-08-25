@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Generator
 
@@ -356,6 +357,10 @@ def walk(root: str) -> Generator[dict, None, None]:
         return
 
     for dirpath, dirnames, filenames in walk_gen:
+        folder_t0 = time.perf_counter()
+        stat_ms = 0
+        db_ms = 0
+        loop_ms = 0
         dirnames.sort(key=str.lower)
         rel_folder = os.path.relpath(dirpath, root)
         if rel_folder == ".":
@@ -369,6 +374,7 @@ def walk(root: str) -> Generator[dict, None, None]:
             continue
 
         # Stat all candidates first (fast — no DB, no disk reads beyond metadata)
+        t_stat0 = time.perf_counter()
         stat_results: list[tuple[str, str, float, int]] = []  # (full_path, filename, mtime, size)
         for filename in sorted(candidates, key=str.lower):
             full_path = os.path.join(dirpath, filename)
@@ -394,46 +400,23 @@ def walk(root: str) -> Generator[dict, None, None]:
                     "found_files": phase1_found,
                     "current_folder": rel_folder.replace("\\", "/"),
                 }
+        stat_ms = int((time.perf_counter() - t_stat0) * 1000)
 
         if not stat_results:
             continue
 
         # One batch DB lookup for all paths in this folder
+        t_db0 = time.perf_counter()
         folder_paths = [fp for fp, _, _, _ in stat_results]
         known = db.get_latest_statuses_by_paths(folder_paths)
+        db_ms = int((time.perf_counter() - t_db0) * 1000)
 
         folder_files: list[dict] = []
+        t_loop0 = time.perf_counter()
         for full_path, filename, mtime, size_bytes in stat_results:
             db_info   = known.get(full_path) or {}
             db_status = db_info.get("status")
             stem_lower = os.path.splitext(filename)[0].lower()
-
-            # Cheap per-file fallbacks (no disk I/O):
-            #   1. output_path match — file IS the converted output sitting in-place
-            #   2. fingerprint match — file was moved/renamed (mtime + size preserved)
-            # Run when there is no record OR the record is only pending — a pending
-            # record with a mismatched mtime often means the file is the converted
-            # output whose mtime changed after the in-place replace.
-            if not db_info or db_status in ("pending", "queued"):
-                fallback_rec = (
-                    db.get_record_by_output(full_path)
-                    or db.get_record_by_fingerprint(mtime, size_bytes)
-                )
-                if fallback_rec:
-                    db_status = fallback_rec["status"]
-                    db_info = {
-                        "id":            fallback_rec["id"],
-                        "status":        db_status,
-                        "bitrate_kbps":  fallback_rec.get("source_bitrate_kbps"),
-                        "codec":         fallback_rec.get("source_codec"),
-                        "duration_secs": fallback_rec.get("source_duration_secs"),
-                        "video_track_count": fallback_rec.get("source_video_track_count"),
-                        "audio_track_count": fallback_rec.get("source_audio_track_count"),
-                        "output_size_mb": fallback_rec.get("output_size_mb"),
-                        "saved_mb":      fallback_rec.get("saved_mb"),
-                        "saved_pct":     fallback_rec.get("saved_pct"),
-                    }
-                    db.update_source_path(fallback_rec["id"], full_path)
 
             if db_status in ("done", "low_savings", "no_saving"):
                 # If sidecar subtitle files exist alongside the file, reset to
@@ -559,6 +542,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                 rec_id = db_info.get("id")
                 if rec_id:
                     to_update_size.append((rec_id, size_bytes, size_bytes / (1024 * 1024)))
+        loop_ms = int((time.perf_counter() - t_loop0) * 1000)
 
         if folder_files:
             phase1_found += len(folder_files)
@@ -567,6 +551,17 @@ def walk(root: str) -> Generator[dict, None, None]:
                 "folder": rel_folder.replace("\\", "/"),
                 "files":  folder_files,
             }
+
+        yield {
+            "type": "folder_timing",
+            "folder": rel_folder.replace("\\", "/"),
+            "candidate_files": len(stat_results),
+            "yielded_files": len(folder_files),
+            "elapsed_ms": int((time.perf_counter() - folder_t0) * 1000),
+            "stat_ms": stat_ms,
+            "db_ms": db_ms,
+            "loop_ms": loop_ms,
+        }
 
         # Emit an end-of-folder heartbeat even for uneven folder sizes.
         yield {

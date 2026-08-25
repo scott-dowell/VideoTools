@@ -503,6 +503,73 @@ def test_walk_pending_with_cached_probe_metadata_skips_reprobe(tmp_path, fresh_d
     assert probe_events == []
 
 
+def test_walk_cached_pending_hash_matches_done_and_cleans_shadow_row(tmp_path, fresh_db):
+    """Cached pending rows must still hash-check so in-place done outputs win."""
+    dest = tmp_path / "h264_short.mp4"
+    shutil.copy(FIXTURES_DIR / "h264_short.mkv", dest)
+
+    old_mtime = dest.stat().st_mtime
+    rec_done = db.upsert_pending(str(dest), old_mtime, anime_mode=True)
+    db.mark_running(rec_done, "2026-01-01T00:00:00Z")
+    done_hash = db.hash_file_head(str(dest))
+    db.save_probe_result(
+        str(dest),
+        old_mtime,
+        "H264",
+        1450,
+        120.0,
+        video_track_count=1,
+        audio_track_count=1,
+        subtitle_track_count=1,
+        source_size_bytes=dest.stat().st_size,
+        source_size_mb=dest.stat().st_size / (1024 * 1024),
+    )
+    db.mark_done(
+        rec_done,
+        str(dest),
+        output_size_mb=0.5,
+        saved_mb=0.7,
+        saved_pct=58,
+        completed_at="2026-01-01T00:01:00Z",
+        output_hash=done_hash,
+    )
+
+    new_mtime = old_mtime + 1.0
+    os.utime(str(dest), (new_mtime, new_mtime))
+    rec_pending = db.upsert_pending(str(dest), new_mtime, anime_mode=True)
+    db.save_probe_result(
+        str(dest),
+        new_mtime,
+        "H264",
+        1450,
+        120.0,
+        video_track_count=1,
+        audio_track_count=1,
+        subtitle_track_count=1,
+        source_size_bytes=dest.stat().st_size,
+        source_size_mb=dest.stat().st_size / (1024 * 1024),
+    )
+    db.update_source_hash(rec_pending, done_hash)
+
+    folders, done, _, _ = _collect(tmp_path)
+    assert done["total_files"] == 0
+    files = _all_files(folders)
+    assert len(files) == 1
+    assert files[0]["name"] == "h264_short.mp4"
+    assert files[0]["status"] == "done"
+
+    conn = sqlite3.connect(fresh_db)
+    try:
+        rows = conn.execute(
+            "SELECT id, status FROM conversions WHERE source_path = ? ORDER BY id",
+            (str(dest).replace('\\', '/'),),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [(row[0], row[1]) for row in rows] == [(rec_done, "done")]
+
+
 def test_walk_phase3_uses_batched_probe_result_writes(tmp_path, fresh_db):
     """Phase-3 probing should persist probe metadata via batched DB writes."""
     for i in range(3):

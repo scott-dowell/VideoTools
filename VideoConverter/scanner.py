@@ -537,10 +537,13 @@ def walk(root: str) -> Generator[dict, None, None]:
                 to_hash_check.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes, "needs_probe": True})
             elif db_status in ("pending", "queued"):
                 if has_cached_probe:
-                    # Cached probe metadata is complete; no hash/probe needed.
+                    # Cached probe metadata is complete, but a stale pending row may
+                    # still shadow an already-converted in-place output. Hash-check it
+                    # in Phase 2 and skip Phase 3 ffprobe if no done match is found.
                     rec_id = db_info.get("id")
                     if rec_id:
                         to_update_size.append((rec_id, size_bytes, size_bytes / (1024 * 1024)))
+                    to_hash_check.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes, "needs_probe": False})
                 else:
                     # Pending record without complete probe metadata (or stale pending shadow)
                     # must hash-check first, then probe if no done hash match.

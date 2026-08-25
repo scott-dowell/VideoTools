@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #30 Batch phase-3 probe-result DB writes in a single transaction path so scanning no longer commits probe metadata one file at a time.
 - #29 Fix repeated probing of unchanged pending files by skipping hash/probe when complete probe metadata is already cached for the latest DB record.
 - #28 Batch hash-phase DB lookups and coalesce hash progress/row UI updates so hash matching remains accurate without per-file DB round-trips and constant queue repaint churn.
 - #27 Add per-folder scan timing telemetry, remove phase-1 per-file output/fingerprint DB fallback lookups, and switch scan-strip indeterminate animation to a smooth shimmer to avoid bouncing during large-folder scans.

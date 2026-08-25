@@ -659,6 +659,16 @@ def walk(root: str) -> Generator[dict, None, None]:
     # ----------------------------------------------------------------
     # Phase 3 — ffprobe each file, emit probe / remove events
     # ----------------------------------------------------------------
+    probe_write_batch: list[dict] = []
+    probe_write_batch_size = 100
+
+    def _flush_probe_write_batch() -> None:
+        nonlocal probe_write_batch
+        if not probe_write_batch:
+            return
+        db.batch_save_probe_results(probe_write_batch)
+        probe_write_batch = []
+
     kept = 0
     for entry in to_probe:
         fp         = entry["full_path"]
@@ -690,11 +700,21 @@ def walk(root: str) -> Generator[dict, None, None]:
         size_mb      = size_bytes / (1024 * 1024)
         bitrate_kbps  = round(size_bytes * 8 / dur_secs / 1000) if dur_secs > 0 else 0
 
-        # Persist probe result (including file size) so future scans skip ffprobe.
-        db.save_probe_result(fp, mtime, display_codec, bitrate_kbps, dur_secs,
-                 video_track_count=v_tracks, audio_track_count=a_tracks,
-                     subtitle_track_count=s_tracks,
-                             source_size_bytes=size_bytes, source_size_mb=size_mb)
+        # Buffer probe writes so we avoid one DB transaction per file.
+        probe_write_batch.append({
+            "source_path": fp,
+            "source_mtime": mtime,
+            "codec": display_codec,
+            "bitrate_kbps": bitrate_kbps,
+            "duration_secs": dur_secs,
+            "video_track_count": v_tracks,
+            "audio_track_count": a_tracks,
+            "subtitle_track_count": s_tracks,
+            "source_size_bytes": size_bytes,
+            "source_size_mb": size_mb,
+        })
+        if len(probe_write_batch) >= probe_write_batch_size:
+            _flush_probe_write_batch()
 
         yield {
             "type":        "probe",
@@ -709,6 +729,8 @@ def walk(root: str) -> Generator[dict, None, None]:
             "subtitle_track_count": s_tracks,
         }
         kept += 1
+
+    _flush_probe_write_batch()
 
     # ----------------------------------------------------------------
     # Phase 4 — probe done files with no output bitrate

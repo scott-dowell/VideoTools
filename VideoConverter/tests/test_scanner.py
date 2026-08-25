@@ -503,6 +503,19 @@ def test_walk_pending_with_cached_probe_metadata_skips_reprobe(tmp_path, fresh_d
     assert probe_events == []
 
 
+def test_walk_phase3_uses_batched_probe_result_writes(tmp_path, fresh_db):
+    """Phase-3 probing should persist probe metadata via batched DB writes."""
+    for i in range(3):
+        shutil.copy(FIXTURES_DIR / "h264_short.mkv", tmp_path / f"clip_{i:03d}.mkv")
+
+    with patch("scanner.db.save_probe_result", wraps=db.save_probe_result) as per_file_save, \
+         patch("scanner.db.batch_save_probe_results", wraps=db.batch_save_probe_results) as batch_save:
+        list(scanner.walk(str(tmp_path)))
+
+    assert per_file_save.call_count == 0
+    assert batch_save.call_count >= 1
+
+
 def test_walk_running_emits_warning(tmp_path, fresh_db):
     """File with status='running' in DB emits a warning and is not yielded."""
     dest = tmp_path / "h264_short.mkv"

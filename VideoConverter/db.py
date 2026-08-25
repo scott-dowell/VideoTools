@@ -834,6 +834,49 @@ def save_probe_result(
         )
 
 
+def batch_save_probe_results(rows: list[dict]) -> None:
+    """Batch upsert probe data for many files in a single DB transaction."""
+    if not rows:
+        return
+
+    values = []
+    for r in rows:
+        values.append((
+            _norm(r.get("source_path")),
+            r.get("source_mtime"),
+            r.get("codec"),
+            r.get("bitrate_kbps"),
+            r.get("duration_secs"),
+            r.get("video_track_count"),
+            r.get("audio_track_count"),
+            r.get("subtitle_track_count"),
+            r.get("source_size_bytes"),
+            r.get("source_size_mb"),
+        ))
+
+    with _connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO conversions
+                (source_path, source_mtime, source_codec,
+                 source_bitrate_kbps, source_duration_secs,
+                 source_video_track_count, source_audio_track_count, source_subtitle_track_count,
+                 source_size_bytes, source_size_mb, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            ON CONFLICT (source_path, source_mtime) DO UPDATE SET
+                source_codec         = COALESCE(conversions.source_codec,         excluded.source_codec),
+                source_bitrate_kbps  = excluded.source_bitrate_kbps,
+                source_duration_secs = excluded.source_duration_secs,
+                source_video_track_count = excluded.source_video_track_count,
+                source_audio_track_count = excluded.source_audio_track_count,
+                source_subtitle_track_count = excluded.source_subtitle_track_count,
+                source_size_bytes    = COALESCE(conversions.source_size_bytes,    excluded.source_size_bytes),
+                source_size_mb       = COALESCE(conversions.source_size_mb,       excluded.source_size_mb)
+            """,
+            values,
+        )
+
+
 def update_probe_result(
     record_id: int,
     codec: str | None,

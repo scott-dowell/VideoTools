@@ -212,6 +212,14 @@ def test_folder_actions_require_valid_path_gate():
     assert "const hasFolder = !!_currentScanPath && _currentScanPathValid;" in js
 
 
+def test_folder_browser_uses_single_confirm_button():
+    """Browser list should not render an inline 'Use This Folder' button."""
+    js_path = Path(__file__).resolve().parents[1] / "static" / "app.js"
+    js = js_path.read_text(encoding="utf-8")
+    assert "btn.textContent = 'Use This Folder';" not in js
+    assert "li.addEventListener('click', () => selectFolder(currentPath));" in js
+
+
 # ---------------------------------------------------------------------------
 # /api/settings — GET
 # ---------------------------------------------------------------------------

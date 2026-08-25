@@ -3947,6 +3947,7 @@ function browseTo(path) {
       }
       renderBreadcrumb(data.path, data.parent);
       renderListing(data.dirs, data.path, data.parent);
+      if (data.path) selectFolder(data.path);
     })
     .catch(e => {
       const message = (e && e.message) ? e.message : String(e);
@@ -4010,8 +4011,9 @@ function renderListing(dirs, currentPath, parent) {
   // "Use current folder" highlighted row
   if (currentPath) {
     const li = document.createElement('li');
-    li.className = 'list-group-item d-flex align-items-center gap-2 py-2';
+    li.className = 'list-group-item list-group-item-action d-flex align-items-center gap-2 py-2';
     li.style.background = 'var(--bs-primary-bg-subtle)';
+    li.style.cursor = 'pointer';
 
     const icon = document.createElement('i');
     icon.className = 'bi bi-folder2-open text-warning';
@@ -4020,14 +4022,9 @@ function renderListing(dirs, currentPath, parent) {
     label.className = 'flex-grow-1 fw-semibold';
     label.textContent = currentPath;
 
-    const btn = document.createElement('button');
-    btn.className = 'btn btn-sm btn-primary';
-    btn.textContent = 'Use This Folder';
-    btn.addEventListener('click', () => selectFolder(currentPath));
-
     li.appendChild(icon);
     li.appendChild(label);
-    li.appendChild(btn);
+    li.addEventListener('click', () => selectFolder(currentPath));
     ul.appendChild(li);
   }
 

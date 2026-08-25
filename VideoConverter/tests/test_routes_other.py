@@ -183,6 +183,27 @@ def test_browse_root_ignores_drive_exists_oserror(client):
     assert isinstance(data["dirs"], list)
 
 
+def test_index_folder_modal_is_selection_only_and_actions_are_in_controls(client):
+    """Folder browser modal should only select a folder; actions belong to main controls."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+
+    # Modal keeps only folder selection/confirmation controls.
+    assert 'id="confirmFolderBtn"' in html
+    assert 'id="modalLoadBtn"' not in html
+    assert 'id="modalPrepBtn"' not in html
+    assert 'id="modalAnalyseBtn"' not in html
+    assert 'id="modalCleanupBtn"' not in html
+
+    # Folder actions live in the main controls area.
+    assert 'id="rescanBtn"' in html
+    assert 'id="loadBtn"' in html
+    assert 'id="cleanupBtn"' in html
+    assert 'id="analyseBtn"' in html
+    assert 'id="prepBtn"' in html
+
+
 # ---------------------------------------------------------------------------
 # /api/settings — GET
 # ---------------------------------------------------------------------------

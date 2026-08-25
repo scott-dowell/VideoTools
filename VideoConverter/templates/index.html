@@ -41,12 +41,6 @@
     <div class="card-body py-2 d-flex align-items-center gap-3">
       <i class="bi bi-folder2-open text-warning fs-5"></i>
       <span class="folder-path flex-grow-1" id="folderPath">No folder selected</span>
-      <button class="btn btn-sm btn-outline-secondary" id="rescanBtn" onclick="rescanFolder()" disabled title="Re-scan folder">
-        <i class="bi bi-arrow-clockwise"></i>
-      </button>
-      <button class="btn btn-sm btn-outline-secondary" id="cleanupBtn" onclick="cleanupLegacyFolders()" disabled title="Move files out of hevc/converted subfolders">
-        <i class="bi bi-folder-symlink me-1"></i>Clean up
-      </button>
       <button class="btn btn-sm btn-outline-secondary" onclick="openBrowser()">
         <i class="bi bi-folder me-1"></i>Browse
       </button>
@@ -263,6 +257,37 @@
             <button class="btn btn-hstop" id="hstopBtn" onclick="hardStopConversion()" disabled>
               <i class="bi bi-x-octagon me-1"></i>Hard Stop (kill)
             </button>
+          </div>
+
+          <div class="border-top pt-2 mt-2">
+            <div class="text-secondary small mb-2">Folder Actions</div>
+            <div class="row g-2">
+              <div class="col-6">
+                <button class="btn btn-outline-secondary w-100" id="rescanBtn" onclick="rescanFolder()" disabled title="Scan selected folder">
+                  <i class="bi bi-arrow-clockwise me-1"></i>Scan
+                </button>
+              </div>
+              <div class="col-6">
+                <button class="btn btn-outline-info w-100" id="loadBtn" onclick="loadSelectedFolder()" disabled title="Load existing records from database instantly (no filesystem scan)">
+                  <i class="bi bi-database me-1"></i>Load
+                </button>
+              </div>
+              <div class="col-6">
+                <button class="btn btn-outline-secondary w-100" id="cleanupBtn" onclick="cleanupLegacyFolders()" disabled title="Move files out of hevc/converted subfolders">
+                  <i class="bi bi-folder-symlink me-1"></i>Clean up
+                </button>
+              </div>
+              <div class="col-6">
+                <button class="btn btn-outline-secondary w-100" id="analyseBtn" onclick="analyseSelectedFolder()" disabled title="Analyse folder conversion savings by subfolder">
+                  <i class="bi bi-bar-chart me-1"></i>Analyse
+                </button>
+              </div>
+              <div class="col-12">
+                <button class="btn btn-outline-secondary w-100" id="prepBtn" onclick="prepSelectedFolder()" disabled title="Estimate all pending files and queue one representative per folder">
+                  <i class="bi bi-lightning-charge me-1"></i>Prep
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -701,20 +726,8 @@
       <div class="modal-footer d-flex align-items-center gap-1">
         <div class="flex-grow-1 text-secondary small" id="selectedPathDisplay">No folder selected</div>
         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-outline-secondary btn-sm" id="modalCleanupBtn" onclick="modalActionCleanup()" disabled title="Move files out of hevc/converted subfolders">
-          <i class="bi bi-folder-symlink me-1"></i>Clean up
-        </button>
-        <button type="button" class="btn btn-outline-secondary btn-sm" id="modalAnalyseBtn" onclick="modalActionAnalyse()" disabled title="Analyse folder conversion savings by subfolder">
-          <i class="bi bi-bar-chart me-1"></i>Analyse
-        </button>
-        <button type="button" class="btn btn-outline-secondary btn-sm" id="modalPrepBtn" onclick="modalActionPrep()" disabled title="Estimate all pending files and queue one representative per folder">
-          <i class="bi bi-lightning-charge me-1"></i>Prep
-        </button>
-        <button type="button" class="btn btn-outline-info btn-sm" id="modalLoadBtn" onclick="modalActionLoad()" disabled title="Load existing records from database instantly (no filesystem scan)">
-          <i class="bi bi-database me-1"></i>Load
-        </button>
         <button type="button" class="btn btn-primary btn-sm" id="confirmFolderBtn" onclick="confirmFolder()" disabled>
-          <i class="bi bi-folder-check me-1"></i>Scan
+          <i class="bi bi-folder-check me-1"></i>Use This Folder
         </button>
       </div>
     </div>

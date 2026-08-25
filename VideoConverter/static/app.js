@@ -281,18 +281,21 @@ function setButtonStates(state) {
   document.getElementById('stopBtn').disabled   = !(state === 'running' || state === 'scanning');
   const hstopBtn = document.getElementById('hstopBtn');
   if (hstopBtn) hstopBtn.disabled = state !== 'running';
+  const hasFolder = !!_currentScanPath;
+  const folderBusy = state === 'running' || state === 'scanning';
   const rescanBtn = document.getElementById('rescanBtn');
-  if (rescanBtn) rescanBtn.disabled = !_currentScanPath || state === 'running';
+  if (rescanBtn) rescanBtn.disabled = !hasFolder || folderBusy;
+  const loadBtn = document.getElementById('loadBtn');
+  if (loadBtn) loadBtn.disabled = !hasFolder || folderBusy;
   const cleanupBtn = document.getElementById('cleanupBtn');
-  if (cleanupBtn) cleanupBtn.disabled = !_currentScanPath || state === 'running';
+  if (cleanupBtn) cleanupBtn.disabled = !hasFolder || folderBusy;
+  const analyseBtn = document.getElementById('analyseBtn');
+  if (analyseBtn) analyseBtn.disabled = !hasFolder || folderBusy;
+  const prepBtn = document.getElementById('prepBtn');
+  if (prepBtn) prepBtn.disabled = !hasFolder || folderBusy;
   const jumpBtn = document.getElementById('jumpToActiveBtn');
   if (jumpBtn) jumpBtn.classList.toggle('d-none', state !== 'running');
   if (state !== 'running') _lastAutoScrollPath = null;
-  // Modal action buttons — disable Prep and Cleanup when a job is running
-  const modalPrepBtn    = document.getElementById('modalPrepBtn');
-  const modalCleanupBtn = document.getElementById('modalCleanupBtn');
-  if (modalPrepBtn    && _selectedPath) modalPrepBtn.disabled    = state === 'running';
-  if (modalCleanupBtn && _selectedPath) modalCleanupBtn.disabled = state === 'running';
   const detailsCreateBtn = document.getElementById('detailsPreviewCreateBtn');
   const detailsPlayBtn = document.getElementById('detailsPreviewPlayBtn');
   const detailsDiscardBtn = document.getElementById('detailsPreviewDiscardBtn');
@@ -895,12 +898,10 @@ const DEMO_FILES = [
 ];
 
 function scanFolder(path) {
+  if (!path) return;
   _currentScanPath = path;
   localStorage.setItem('vc_last_folder', path);  // remember for re-scan and cleanup
-  const rescanBtn = document.getElementById('rescanBtn');
-  if (rescanBtn) rescanBtn.disabled = false;
-  const cleanupBtn2 = document.getElementById('cleanupBtn');
-  if (cleanupBtn2) cleanupBtn2.disabled = false;
+  document.getElementById('folderPath').textContent = path;
   _estCancelled  = true;   // stop any in-flight estimation from previous scan
   _estAutoPaused = false;
   _estRunning    = false;
@@ -3689,6 +3690,8 @@ document.addEventListener('DOMContentLoaded', function() {
   const ss = document.getElementById('sortSelect');
   if (ss) ss.value = _sortBy;
   _updateSortDirBtn();
+  const lastFolder = localStorage.getItem('vc_last_folder');
+  if (lastFolder) setCurrentFolder(lastFolder);
 });
 
 (function _applyStartupSettings() {
@@ -3735,10 +3738,7 @@ document.addEventListener('DOMContentLoaded', function() {
       const firstPath = (_files[0] || {}).full_path || '';
       const folderGuess = firstPath.replace(/[\\/][^\\/]+$/, '');
       if (folderGuess) {
-        _currentScanPath = folderGuess;
-        document.getElementById('folderPath').textContent = folderGuess;
-        const rb = document.getElementById('rescanBtn');
-        if (rb) rb.disabled = false;
+        setCurrentFolder(folderGuess);
       }
       setSortBy(_sortBy);
       updateStats(_files);
@@ -3759,6 +3759,16 @@ document.addEventListener('DOMContentLoaded', function() {
 // ============================================================
 // Re-scan current folder
 // ============================================================
+function setCurrentFolder(path) {
+  if (!path) return;
+  setCurrentFolder(path);
+  if (_appState === 'running' || _appState === 'scanning') {
+    setButtonStates(_appState);
+  } else {
+    setButtonStates('idle');
+  }
+}
+
 function _cancelProbeStream() {
   if (_scanEs) { _scanEs.close(); _scanEs = null; _scanStripHide(); }
 }
@@ -3844,8 +3854,9 @@ async function cleanupLegacyFolders(path = _currentScanPath) {
 let _selectedPath = null;
 let _modal = null;
 let _prepEstimateRoot = null; // set during estimate-only pass; triggers buildPrepQueue on done
+let _folderSelectContext = 'main';
 
-const _MODAL_ACTION_BTNS = ['confirmFolderBtn', 'modalLoadBtn', 'modalPrepBtn', 'modalAnalyseBtn', 'modalCleanupBtn'];
+const _MODAL_ACTION_BTNS = ['confirmFolderBtn'];
 
 function _resetModalButtons() {
   document.getElementById('selectedPathDisplay').textContent = 'No folder selected';
@@ -3855,7 +3866,8 @@ function _resetModalButtons() {
   });
 }
 
-function openBrowser() {
+function openBrowser(context = 'main') {
+  _folderSelectContext = context;
   _selectedPath = null;
   _resetModalButtons();
   _modal = new bootstrap.Modal(document.getElementById('folderModal'));
@@ -3863,9 +3875,9 @@ function openBrowser() {
   browseTo(localStorage.getItem('vc_last_folder') || '');
 }
 
-// Aliases — all just open the unified folder browser
-function openBrowserForPrep()     { openBrowser(); }
-function openBrowserForAnalysis() { openBrowser(); }
+// Aliases
+function openBrowserForPrep()     { openBrowser('main'); }
+function openBrowserForAnalysis() { openBrowser('analysis_root'); }
 
 function browseTo(path) {
   _selectedPath = null;
@@ -4025,36 +4037,47 @@ function selectFolder(path) {
 // Modal action handlers
 function confirmFolder() {
   if (!_selectedPath) return;
-  document.getElementById('folderPath').textContent = _selectedPath;
+  setCurrentFolder(_selectedPath);
   if (_modal) _modal.hide();
-  scanFolder(_selectedPath);
+
+  if (_folderSelectContext === 'analysis_root') {
+    const rootInput = document.getElementById('faRoot');
+    if (rootInput) rootInput.value = _selectedPath;
+  }
 }
 
-function modalActionAnalyse() {
-  if (!_selectedPath) return;
-  if (_modal) _modal.hide();
-  document.getElementById('faRoot').value = _selectedPath;
+function analyseSelectedFolder() {
+  if (!_currentScanPath) return;
+  document.getElementById('faRoot').value = _currentScanPath;
   const analysisModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('folderAnalysisModal'));
   analysisModal.show();
   runFolderAnalysis();
 }
 
+function prepSelectedFolder() {
+  if (!_currentScanPath) return;
+  startPrepEstimate(_currentScanPath);
+}
+
+async function loadSelectedFolder() {
+  if (!_currentScanPath) return;
+  await loadFromDb(_currentScanPath);
+}
+
+function modalActionAnalyse() {
+  analyseSelectedFolder();
+}
+
 function modalActionPrep() {
-  if (!_selectedPath) return;
-  if (_modal) _modal.hide();
-  startPrepEstimate(_selectedPath);
+  prepSelectedFolder();
 }
 
 function modalActionCleanup() {
-  if (!_selectedPath) return;
-  if (_modal) _modal.hide();
-  cleanupLegacyFolders(_selectedPath);
+  cleanupLegacyFolders();
 }
 
 async function modalActionLoad() {
-  if (!_selectedPath) return;
-  if (_modal) _modal.hide();
-  await loadFromDb(_selectedPath);
+  await loadSelectedFolder();
 }
 
 // ============================================================
@@ -4213,8 +4236,7 @@ async function startPrepEstimate(path) {
   addLog('Prep: ' + data.total + ' pending files found \u2014 starting estimate pass\u2026', 'info');
 
   // Populate the table so the user sees the files being estimated
-  _currentScanPath = path;
-  document.getElementById('folderPath').textContent = path;
+  setCurrentFolder(path);
   _files = data.files.map(f => Object.assign({}, f));
   _fileIndexByPath = {};
   _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });

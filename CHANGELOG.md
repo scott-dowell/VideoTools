@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #32 Right-align the queue table Output and Saved headers so they match their numeric column content.
 - #31 Prevent false DONE results on truncated outputs by validating video duration separately from audio/container duration, blocking source replacement until temp-output integrity checks pass, and automatically preserving failed temp artifacts for investigation.
 - Update the estimate step to use video-only samples from the middle of the first and last thirds, with non-video payload treated as passthrough for more stable anime-heavy predictions.
 - #30 Batch phase-3 probe-result DB writes in a single transaction path so scanning no longer commits probe metadata one file at a time.

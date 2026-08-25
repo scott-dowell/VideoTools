@@ -498,6 +498,13 @@ def walk(root: str) -> Generator[dict, None, None]:
             cached_bitrate = db_info.get("bitrate_kbps")  # None means never probed
             cached_codec   = db_info.get("codec") or ""
             cached_dur     = db_info.get("duration_secs")
+            has_cached_probe = (
+                cached_bitrate is not None
+                and cached_dur is not None
+                and db_info.get("video_track_count") is not None
+                and db_info.get("audio_track_count") is not None
+                and db_info.get("subtitle_track_count") is not None
+            )
 
             file_dict: dict = {
                 "full_path":       fp,
@@ -525,12 +532,22 @@ def walk(root: str) -> Generator[dict, None, None]:
 
             folder_files.append(file_dict)
             total_bytes += size_bytes
-            if (not db_info) or (db_status in ("pending", "queued")):
-                # No DB record (or stale pending shadow) — hash-check in Phase 2
-                # before deciding whether to probe.
-                to_hash_check.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
+            if not db_info:
+                # No DB record — hash-check in Phase 2 before deciding whether to probe.
+                to_hash_check.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes, "needs_probe": True})
+            elif db_status in ("pending", "queued"):
+                if has_cached_probe:
+                    # Cached probe metadata is complete; no hash/probe needed.
+                    rec_id = db_info.get("id")
+                    if rec_id:
+                        to_update_size.append((rec_id, size_bytes, size_bytes / (1024 * 1024)))
+                else:
+                    # Pending record without complete probe metadata (or stale pending shadow)
+                    # must hash-check first, then probe if no done hash match.
+                    to_hash_check.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes, "needs_probe": True})
             elif (
                 cached_bitrate is None
+                or cached_dur is None
                 or db_info.get("video_track_count") is None
                 or db_info.get("audio_track_count") is None
                 or db_info.get("subtitle_track_count") is None
@@ -636,7 +653,8 @@ def walk(root: str) -> Generator[dict, None, None]:
                 }
             else:
                 # No hash match — forward to Phase 3 for ffprobe
-                to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
+                if entry.get("needs_probe", True):
+                    to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
 
     # ----------------------------------------------------------------
     # Phase 3 — ffprobe each file, emit probe / remove events

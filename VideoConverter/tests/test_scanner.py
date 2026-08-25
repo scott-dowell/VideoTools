@@ -473,6 +473,36 @@ def test_walk_hash_phase_uses_batched_hash_lookup(tmp_path, fresh_db):
     assert batch_lookup.call_count >= 1
 
 
+def test_walk_pending_with_cached_probe_metadata_skips_reprobe(tmp_path, fresh_db):
+    """Pending files with complete cached probe metadata should not be probed again."""
+    dest = tmp_path / "h264_short.mkv"
+    shutil.copy(FIXTURES_DIR / "h264_short.mkv", dest)
+
+    mtime = dest.stat().st_mtime
+    size_bytes = dest.stat().st_size
+    size_mb = size_bytes / (1024 * 1024)
+    db.upsert_pending(str(dest), mtime, source_size_bytes=size_bytes, source_size_mb=size_mb, source_codec="H264")
+    db.save_probe_result(
+        str(dest),
+        mtime,
+        "H264",
+        1450,
+        120.0,
+        video_track_count=1,
+        audio_track_count=1,
+        subtitle_track_count=0,
+        source_size_bytes=size_bytes,
+        source_size_mb=size_mb,
+    )
+
+    probe_events = [
+        e for e in scanner.walk(str(tmp_path))
+        if e.get("type") == "probe" and (e.get("full_path") or "").replace("\\", "/").endswith("/h264_short.mkv")
+    ]
+
+    assert probe_events == []
+
+
 def test_walk_running_emits_warning(tmp_path, fresh_db):
     """File with status='running' in DB emits a warning and is not yielded."""
     dest = tmp_path / "h264_short.mkv"

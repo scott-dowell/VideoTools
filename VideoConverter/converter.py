@@ -1439,6 +1439,7 @@ def _verify_output(
     src_duration: float,
     src_path: str | None = None,
     log: Callable[[str], None] | None = None,
+    check_av_alignment: bool = True,
 ) -> tuple[bool, str]:
     """
     Sanity-check the encoded output via ffprobe.
@@ -1509,7 +1510,7 @@ def _verify_output(
             )
 
     # Guard against audio-only tails masking truncated video streams.
-    if out_video_duration > 0 and out_audio_duration > 0:
+    if check_av_alignment and out_video_duration > 0 and out_audio_duration > 0:
         av_diff_pct = abs(out_audio_duration - out_video_duration) / max(out_audio_duration, out_video_duration)
         if log is not None:
             log(
@@ -1522,6 +1523,13 @@ def _verify_output(
                 f"audio/video duration mismatch: audio={out_audio_duration:.1f}s "
                 f"video={out_video_duration:.1f}s ({av_diff_pct*100:.1f}% off)"
             )
+    elif not check_av_alignment and log is not None and out_video_duration > 0 and out_audio_duration > 0:
+        av_diff_pct = abs(out_audio_duration - out_video_duration) / max(out_audio_duration, out_video_duration)
+        log(
+            "Integrity duration check (A/V alignment): skipped "
+            f"audio={out_audio_duration:.1f}s video={out_video_duration:.1f}s "
+            f"diff={av_diff_pct*100:.2f}%"
+        )
 
     if src_compare > 0 and out_duration > 0:
         diff_pct = abs(out_duration - src_compare) / src_compare
@@ -1955,7 +1963,7 @@ def remux_to_mp4(
                         except OSError as _re:
                             log(f"WARNING: could not remove sidecar {Path(_sp).name}: {_re}")
                 log(f"Done. Subs merged → {_si_final}")
-                return True, "copy"
+                return True, "sub_inject"
             log("MP4 fast-path: already MP4 + AAC, no bitmap subs — compressing directly.")
             return compress_simple(
                 input_path, output_dir, log, stop_event,
@@ -3012,7 +3020,14 @@ def convert_video(
 
         out_name     = Path(input_path).stem + ".mp4"
         output_path  = os.path.join(output_dir, out_name)
-        ok_verify, reason = _verify_output(output_path, duration, src_path=input_path, log=log)
+        _check_av_alignment = encoder_used != "sub_inject"
+        ok_verify, reason = _verify_output(
+            output_path,
+            duration,
+            src_path=input_path,
+            log=log,
+            check_av_alignment=_check_av_alignment,
+        )
         if not ok_verify:
             if anime_mode and reason.startswith("duration mismatch:"):
                 retry_drops = sorted(set((dropped_streams or []) + _subtitle_stream_indices(input_path)))
@@ -3041,7 +3056,13 @@ def convert_video(
                         dropped_streams=retry_drops,
                     )
                     if ok_retry:
-                        ok_verify_retry, reason_retry = _verify_output(output_path, duration, src_path=input_path, log=log)
+                        ok_verify_retry, reason_retry = _verify_output(
+                            output_path,
+                            duration,
+                            src_path=input_path,
+                            log=log,
+                            check_av_alignment=_check_av_alignment,
+                        )
                         if ok_verify_retry:
                             log("Integrity check passed after subtitle-drop retry.")
                             out_size = os.path.getsize(output_path)

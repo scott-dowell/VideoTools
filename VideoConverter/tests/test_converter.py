@@ -329,6 +329,45 @@ def test_verify_output_rejects_short_video_with_full_audio(tmp_path):
     assert "video duration mismatch" in reason
 
 
+def test_verify_output_allows_shorter_audio_when_alignment_check_disabled(tmp_path):
+    """Subtitle-injection outputs may have shorter audio tails while video remains complete."""
+    src = tmp_path / "src.mp4"
+    out = tmp_path / "out.mp4"
+    src.write_bytes(b"s" * 4096)
+    out.write_bytes(b"o" * 2048)
+
+    src_probe = {
+        "streams": [
+            {"codec_type": "video", "duration": "1000.0"},
+            {"codec_type": "audio", "duration": "900.0"},
+        ],
+        "format": {"duration": "1000.0"},
+    }
+    out_probe = {
+        "streams": [
+            {"codec_type": "video", "duration": "1000.0"},
+            {"codec_type": "audio", "duration": "900.0"},
+        ],
+        "format": {"duration": "1000.0"},
+    }
+
+    def _fake_run(cmd, **kwargs):
+        target = cmd[-1]
+        payload = src_probe if os.path.normpath(target) == os.path.normpath(str(src)) else out_probe
+        return MagicMock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    with patch("subprocess.run", side_effect=_fake_run):
+        ok, reason = converter._verify_output(
+            str(out),
+            1000.0,
+            src_path=str(src),
+            check_av_alignment=False,
+        )
+
+    assert ok
+    assert reason == ""
+
+
 def test_compress_simple_does_not_replace_source_when_integrity_fails(tmp_path):
     """If temp-output integrity fails, source stays and artifact is preserved."""
     src = tmp_path / "source.mp4"

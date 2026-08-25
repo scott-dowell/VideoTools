@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -292,6 +293,72 @@ def test_verify_output_no_video_stream(tmp_path):
     ok, reason = converter._verify_output(out, 2.0)
     assert not ok
     assert "video" in reason.lower()
+
+
+def test_verify_output_rejects_short_video_with_full_audio(tmp_path):
+    """Reject outputs where audio looks complete but video is heavily truncated."""
+    src = tmp_path / "src.mp4"
+    out = tmp_path / "out.mp4"
+    src.write_bytes(b"s" * 4096)
+    out.write_bytes(b"o" * 2048)
+
+    src_probe = {
+        "streams": [
+            {"codec_type": "video", "duration": "1000.0"},
+            {"codec_type": "audio", "duration": "1000.0"},
+        ],
+        "format": {"duration": "1000.0"},
+    }
+    out_probe = {
+        "streams": [
+            {"codec_type": "video", "duration": "200.0"},
+            {"codec_type": "audio", "duration": "1000.0"},
+        ],
+        "format": {"duration": "1000.0"},
+    }
+
+    def _fake_run(cmd, **kwargs):
+        target = cmd[-1]
+        payload = src_probe if os.path.normpath(target) == os.path.normpath(str(src)) else out_probe
+        return MagicMock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    with patch("subprocess.run", side_effect=_fake_run):
+        ok, reason = converter._verify_output(str(out), 1000.0, src_path=str(src))
+
+    assert not ok
+    assert "video duration mismatch" in reason
+
+
+def test_compress_simple_does_not_replace_source_when_integrity_fails(tmp_path):
+    """If temp-output integrity fails, source stays and artifact is preserved."""
+    src = tmp_path / "source.mp4"
+    src.write_bytes(b"x" * 4096)
+    out_dir = str(tmp_path)
+    msgs, log = _logs()
+    stop = threading.Event()
+
+    def _fake_run_ffmpeg(cmd, *args, **kwargs):
+        tmp_out = cmd[-1]
+        Path(tmp_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(tmp_out).write_bytes(b"y" * 1024)
+        return True
+
+    with patch.object(converter, "_ffprobe_duration", return_value=100.0), \
+         patch.object(converter, "_ffprobe_source_fps", return_value=30.0), \
+         patch.object(converter, "_ffprobe_vcodec", return_value=("h264", "")), \
+         patch.object(converter, "_run_ffmpeg", side_effect=_fake_run_ffmpeg), \
+         patch.object(converter, "_verify_output", return_value=(False, "video duration mismatch: src=100.0s out_video=20.0s (80.0% off)")), \
+            patch.object(converter, "_preserve_failed_artifacts") as mock_preserve, \
+         patch("os.replace") as mock_replace:
+        ok, enc = converter.compress_simple(str(src), out_dir, log, stop)
+
+    assert not ok
+    assert enc == ""
+    assert src.exists()
+    assert src.stat().st_size == 4096
+    assert mock_replace.call_count == 0
+    assert mock_preserve.call_count == 1
+    assert any("integrity verification failed before replace" in m for m in msgs)
 
 
 # ---------------------------------------------------------------------------

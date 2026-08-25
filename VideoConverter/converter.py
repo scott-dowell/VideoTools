@@ -965,11 +965,21 @@ def compress_simple(
             os.remove(tmp_path)
             return False, "no_savings"
 
+        # Verify duration/stream integrity on the temp output before replacing
+        # the source so failures keep the original file intact for investigation.
+        ok_integrity, integrity_reason = _verify_output(tmp_path, duration, src_path=input_path, log=log)
+        if not ok_integrity:
+            log(f"ERROR: integrity verification failed before replace — preserving source: {integrity_reason}")
+            if conv_logger:
+                conv_logger.mark_fail_at(f"integrity check (pre-replace): {integrity_reason}")
+            _preserve_failed_artifacts([tmp_path], input_path, log)
+            return False, ""
+
         # Verify audio/subtitle tracks survived before atomically replacing source
         ok_tracks, track_reason = _verify_tracks_preserved(input_path, tmp_path, dropped_streams=dropped_streams)
         if not ok_tracks:
             log(f"ERROR: track verification failed — aborting to preserve source: {track_reason}")
-            os.remove(tmp_path)
+            _preserve_failed_artifacts([tmp_path], input_path, log)
             return False, ""
 
         os.makedirs(output_dir, exist_ok=True)
@@ -1384,6 +1394,22 @@ def _effective_av_duration_from_probe(data: dict) -> float:
     return _parse_duration_seconds((data.get("format") or {}).get("duration"))
 
 
+def _stream_duration_from_probe(data: dict, codec_type: str) -> float:
+    """Return max duration for the requested stream type from ffprobe JSON."""
+    streams = data.get("streams", []) or []
+    durations: list[float] = []
+    for s in streams:
+        if s.get("codec_type") != codec_type:
+            continue
+        d = _parse_duration_seconds(s.get("duration"))
+        if d <= 0:
+            tags = s.get("tags") or {}
+            d = _parse_duration_seconds(tags.get("DURATION") or tags.get("DURATION-eng"))
+        if d > 0:
+            durations.append(d)
+    return max(durations) if durations else 0.0
+
+
 def _probe_duration_for_compare(path: str) -> float:
     """Probe a file and return its effective A/V duration for integrity checks."""
     for attempt in range(3):
@@ -1465,6 +1491,38 @@ def _verify_output(
             src_compare = probed_src
 
     out_duration = _effective_av_duration_from_probe(data)
+    out_video_duration = _stream_duration_from_probe(data, "video")
+    out_audio_duration = _stream_duration_from_probe(data, "audio")
+
+    if src_compare > 0 and out_video_duration > 0:
+        video_diff_pct = abs(out_video_duration - src_compare) / src_compare
+        if log is not None:
+            log(
+                "Integrity duration check (video): "
+                f"src={src_compare:.1f}s out_video={out_video_duration:.1f}s "
+                f"diff={video_diff_pct*100:.2f}% threshold=5.00%"
+            )
+        if video_diff_pct > 0.05:
+            return False, (
+                f"video duration mismatch: src={src_compare:.1f}s "
+                f"out_video={out_video_duration:.1f}s ({video_diff_pct*100:.1f}% off)"
+            )
+
+    # Guard against audio-only tails masking truncated video streams.
+    if out_video_duration > 0 and out_audio_duration > 0:
+        av_diff_pct = abs(out_audio_duration - out_video_duration) / max(out_audio_duration, out_video_duration)
+        if log is not None:
+            log(
+                "Integrity duration check (A/V alignment): "
+                f"audio={out_audio_duration:.1f}s video={out_video_duration:.1f}s "
+                f"diff={av_diff_pct*100:.2f}% threshold=5.00%"
+            )
+        if av_diff_pct > 0.05:
+            return False, (
+                f"audio/video duration mismatch: audio={out_audio_duration:.1f}s "
+                f"video={out_video_duration:.1f}s ({av_diff_pct*100:.1f}% off)"
+            )
+
     if src_compare > 0 and out_duration > 0:
         diff_pct = abs(out_duration - src_compare) / src_compare
         if log is not None:

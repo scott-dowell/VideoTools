@@ -45,6 +45,9 @@ let _subtitleLikelyCache = {};     // key: "<full_path>|<stream_index>" -> detec
 let _subtitleLikelyPending = new Set();
 let _detailsProbePending = new Set();
 const _QUEUE_COL_COUNT = 18;
+let _scanPhase1LastUiAt = 0;
+let _scanPhase1LastFound = 0;
+let _scanPhase1LastFolder = '';
 
 // Estimation background task state
 let _estUserPaused  = false;  // user clicked the strip
@@ -917,6 +920,9 @@ function scanFolder(path) {
   _hashTotal  = 0;
   _hashDone   = 0;
   _hashRemoved = 0;
+  _scanPhase1LastUiAt = 0;
+  _scanPhase1LastFound = 0;
+  _scanPhase1LastFolder = '';
   _probePhaseTotal = 0;
   _probePhaseDone  = 0;
   _sessionSavedMB = null;
@@ -960,10 +966,10 @@ function scanFolder(path) {
       });
       _appendRows(msg.files, startIdx);
       updateStats(_files);
-      _scanStripPhase1(_files.length);
+      _scanStripPhase1(_files.length, msg.folder, true);
     } else if (msg.type === 'scan_progress') {
       const found = Number.isFinite(msg.found_files) ? msg.found_files : _files.length;
-      _scanStripPhase1(found);
+      _scanStripPhase1(found, msg.current_folder || '', false);
     } else if (msg.type === 'probe') {
       if (_probePhaseTotal === 0) {
         _scanStripPhase2();
@@ -1115,22 +1121,41 @@ function scanFolder(path) {
 // ============================================================
 // Scan strip helpers
 // ============================================================
-function _scanStripPhase1(count) {
+function _scanStripPhase1(count, currentFolder = '', force = false) {
   const strip = document.getElementById('scanStrip');
   const label = document.getElementById('scanStripLabel');
   const bar   = document.getElementById('scanBar');
   const icon  = document.getElementById('scanStripIcon');
   if (!strip) return;
+
+  const now = Date.now();
+  const folder = currentFolder || '';
+  const countNum = Number(count || 0);
+  const folderChanged = folder && folder !== _scanPhase1LastFolder;
+  const countJump = Math.abs(countNum - _scanPhase1LastFound) >= 25;
+  if (!force && !folderChanged && !countJump && (now - _scanPhase1LastUiAt) < 180) {
+    return;
+  }
+
   strip.classList.remove('d-none', 'scan-probing');
   icon.className = 'bi bi-folder2-open est-strip-icon';
-  label.textContent = count > 0 ? 'Scanning\u2026 ' + count + ' files found' : 'Scanning\u2026';
-  // Indeterminate: animate bar between 5% and 25% to show activity
-  bar.style.transition = 'none';
-  bar.style.width = '5%';
-  requestAnimationFrame(() => {
-    bar.style.transition = 'width 1.8s ease-in-out';
-    bar.style.width = '25%';
-  });
+  bar.classList.add('scan-bar-indeterminate');
+
+  const folderLabel = folder ? (' \u00b7 ' + _scanFolderLabel(folder)) : '';
+  label.textContent = countNum > 0
+    ? ('Scanning\u2026 ' + countNum + ' files found' + folderLabel)
+    : ('Scanning\u2026' + folderLabel);
+
+  _scanPhase1LastUiAt = now;
+  _scanPhase1LastFound = countNum;
+  _scanPhase1LastFolder = folder;
+}
+
+function _scanFolderLabel(folder) {
+  const clean = String(folder || '').replace(/\\/g, '/');
+  if (!clean) return '';
+  if (clean.length <= 52) return clean;
+  return '...' + clean.slice(clean.length - 49);
 }
 function _scanStripPhase2() {
   const strip = document.getElementById('scanStrip');
@@ -1172,6 +1197,8 @@ function _scanStripProbeProgress(phaseLabel) {
 function _scanStripHide() {
   const strip = document.getElementById('scanStrip');
   if (strip) strip.classList.add('d-none');
+  const bar = document.getElementById('scanBar');
+  if (bar) bar.classList.remove('scan-bar-indeterminate');
 }
 
 // ============================================================

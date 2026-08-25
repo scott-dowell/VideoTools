@@ -357,6 +357,9 @@ def walk(root: str) -> Generator[dict, None, None]:
 
     for dirpath, dirnames, filenames in walk_gen:
         dirnames.sort(key=str.lower)
+        rel_folder = os.path.relpath(dirpath, root)
+        if rel_folder == ".":
+            rel_folder = ""
 
         candidates = [
             f for f in filenames
@@ -389,6 +392,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                     "type": "scan_progress",
                     "scanned_files": phase1_scanned,
                     "found_files": phase1_found,
+                    "current_folder": rel_folder.replace("\\", "/"),
                 }
 
         if not stat_results:
@@ -399,10 +403,6 @@ def walk(root: str) -> Generator[dict, None, None]:
         known = db.get_latest_statuses_by_paths(folder_paths)
 
         folder_files: list[dict] = []
-        rel_folder = os.path.relpath(dirpath, root)
-        if rel_folder == ".":
-            rel_folder = ""
-
         for full_path, filename, mtime, size_bytes in stat_results:
             db_info   = known.get(full_path) or {}
             db_status = db_info.get("status")
@@ -573,6 +573,7 @@ def walk(root: str) -> Generator[dict, None, None]:
             "type": "scan_progress",
             "scanned_files": phase1_scanned,
             "found_files": phase1_found,
+            "current_folder": rel_folder.replace("\\", "/"),
         }
 
     # ----------------------------------------------------------------

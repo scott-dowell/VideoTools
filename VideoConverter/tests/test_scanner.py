@@ -208,6 +208,39 @@ def test_walk_emits_phase1_scan_progress(tmp_path):
     assert progress_seen, "Expected at least one phase-1 scan_progress event"
 
 
+def test_scan_progress_includes_current_folder(tmp_path):
+    """scan_progress events should include the relative folder currently being scanned."""
+    sub = tmp_path / "SeasonA"
+    sub.mkdir()
+    for i in range(55):
+        (sub / f"clip_{i:03d}.mkv").write_bytes(b"\x01")
+
+    fake_probe = {
+        "streams": [{
+            "codec_type": "video",
+            "codec_name": "h264",
+            "width": 1280,
+            "height": 720,
+            "r_frame_rate": "24/1",
+            "profile": "",
+            "pix_fmt": "yuv420p",
+            "bits_per_raw_sample": "8",
+        }],
+        "format": {"duration": "8.0", "bit_rate": "3000000"},
+    }
+
+    with patch("scanner._ffprobe", return_value=fake_probe):
+        seen_folder = False
+        for event in scanner.walk(str(tmp_path)):
+            if event.get("type") != "scan_progress":
+                continue
+            if event.get("current_folder") == "SeasonA":
+                seen_folder = True
+                break
+
+    assert seen_folder, "Expected scan_progress to report current_folder='SeasonA'"
+
+
 # ---------------------------------------------------------------------------
 # scanner.walk — folder event shape
 # ---------------------------------------------------------------------------

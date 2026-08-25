@@ -274,6 +274,39 @@ def _has_ocr_sidecar(path: str) -> bool:
     return False
 
 
+def _dir_sidecar_stems(dir_path: str, cache: dict[str, tuple[set[str], set[str]]]) -> tuple[set[str], set[str]]:
+    """Return cached sidecar stem sets for a directory.
+
+    Returns (any_sidecar_stems, ocr_sidecar_stems), both lowercase stem roots.
+    """
+    cached = cache.get(dir_path)
+    if cached is not None:
+        return cached
+
+    any_sidecar: set[str] = set()
+    ocr_sidecar: set[str] = set()
+    try:
+        for entry in os.scandir(dir_path):
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            name = entry.name.lower()
+            stem, ext = os.path.splitext(name)
+            if ext not in {".srt", ".ass", ".ssa"}:
+                continue
+            base = stem.split(".", 1)[0]
+            if base:
+                any_sidecar.add(base)
+            if ext == ".srt" and ".pgs" in stem:
+                ocr_base = stem.split(".pgs", 1)[0]
+                if ocr_base:
+                    ocr_sidecar.add(ocr_base)
+    except Exception:
+        pass
+
+    cache[dir_path] = (any_sidecar, ocr_sidecar)
+    return cache[dir_path]
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -309,6 +342,9 @@ def walk(root: str) -> Generator[dict, None, None]:
     to_probe: list[dict] = []       # files needing ffprobe (no cached bitrate)
     to_probe_done: list[dict] = []  # done files with no output bitrate — probe to fill gap
     to_update_size: list[tuple] = []  # (record_id, size_bytes, size_mb) — fill missing sizes
+    sidecar_cache: dict[str, tuple[set[str], set[str]]] = {}
+    phase1_scanned = 0
+    phase1_found = 0
 
     # ----------------------------------------------------------------
     # Phase 1 — fast folder scan (stat + one batch DB query per folder)
@@ -333,6 +369,7 @@ def walk(root: str) -> Generator[dict, None, None]:
         stat_results: list[tuple[str, str, float, int]] = []  # (full_path, filename, mtime, size)
         for filename in sorted(candidates, key=str.lower):
             full_path = os.path.join(dirpath, filename)
+            phase1_scanned += 1
             try:
                 st         = os.stat(full_path)
                 mtime      = st.st_mtime
@@ -345,6 +382,14 @@ def walk(root: str) -> Generator[dict, None, None]:
                        "message": "Empty file — skipping"}
                 continue
             stat_results.append((full_path.replace("\\", "/"), filename, mtime, size_bytes))
+
+            # Heartbeat so phase-1 scan feels alive in very large folders.
+            if phase1_scanned % 50 == 0:
+                yield {
+                    "type": "scan_progress",
+                    "scanned_files": phase1_scanned,
+                    "found_files": phase1_found,
+                }
 
         if not stat_results:
             continue
@@ -361,6 +406,7 @@ def walk(root: str) -> Generator[dict, None, None]:
         for full_path, filename, mtime, size_bytes in stat_results:
             db_info   = known.get(full_path) or {}
             db_status = db_info.get("status")
+            stem_lower = os.path.splitext(filename)[0].lower()
 
             # Cheap per-file fallbacks (no disk I/O):
             #   1. output_path match — file IS the converted output sitting in-place
@@ -388,32 +434,6 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "saved_pct":     fallback_rec.get("saved_pct"),
                     }
                     db.update_source_path(fallback_rec["id"], full_path)
-                elif db_status in ("pending", "queued"):
-                    file_hash = db.hash_file_head(full_path)
-                    if file_hash:
-                        hash_rec = db.get_record_by_hash(file_hash)
-                        if hash_rec:
-                            db_status = hash_rec["status"]
-                            db_info = {
-                                "id":            hash_rec["id"],
-                                "status":        db_status,
-                                "bitrate_kbps":  hash_rec.get("output_bitrate_kbps") or hash_rec.get("source_bitrate_kbps"),
-                                "codec":         hash_rec.get("source_codec"),
-                                "duration_secs": hash_rec.get("source_duration_secs"),
-                                "video_track_count": hash_rec.get("source_video_track_count"),
-                                "audio_track_count": hash_rec.get("source_audio_track_count"),
-                                "subtitle_track_count": hash_rec.get("source_subtitle_track_count"),
-                                "output_size_mb": hash_rec.get("output_size_mb"),
-                                "saved_mb":      hash_rec.get("saved_mb"),
-                                "saved_pct":     hash_rec.get("saved_pct"),
-                                "est_saving_pct": hash_rec.get("est_saving_pct"),
-                                "est_saving_mb": hash_rec.get("est_saving_mb"),
-                                "est_sample_cv_pct": hash_rec.get("est_sample_cv_pct"),
-                                "est_high_variance": hash_rec.get("est_high_variance"),
-                                "est_aggregation": hash_rec.get("est_aggregation"),
-                            }
-                            db.update_source_path(hash_rec["id"], full_path)
-                            db.delete_pending_records_by_path(full_path, keep_id=hash_rec["id"])
 
             if db_status in ("done", "low_savings", "no_saving"):
                 # If sidecar subtitle files exist alongside the file, reset to
@@ -424,14 +444,8 @@ def walk(root: str) -> Generator[dict, None, None]:
                 # Note: 'skipped' is an explicit manual skip — not overridden.
                 _SIDECAR_EXTS = {".srt", ".ass", ".ssa"}
                 _src_path = Path(full_path)
-                _stem_lower = _src_path.stem.lower()
-                _has_sidecars = any(
-                    p.suffix.lower() in _SIDECAR_EXTS and (
-                        p.stem.lower() == _stem_lower
-                        or p.stem.lower().startswith(_stem_lower + ".")
-                    )
-                    for p in _src_path.parent.iterdir()
-                )
+                any_sidecar_stems, _ = _dir_sidecar_stems(str(_src_path.parent), sidecar_cache)
+                _has_sidecars = stem_lower in any_sidecar_stems
                 if _has_sidecars:
                     record_id = db_info.get("id")
                     if record_id:
@@ -477,7 +491,7 @@ def walk(root: str) -> Generator[dict, None, None]:
                         "est_cv":       est_cv_val,
                         "est_high_variance": est_hv_val,
                         "est_aggregation": est_agg_val,
-                        "ocr_status":   "done" if _has_ocr_sidecar(full_path) else "",
+                        "ocr_status":   "done" if stem_lower in _dir_sidecar_stems(dirpath, sidecar_cache)[1] else "",
                     })
                     missing_track_meta = (
                         db_info.get("video_track_count") is None
@@ -523,13 +537,14 @@ def walk(root: str) -> Generator[dict, None, None]:
                 "est_cv":          db_info.get("est_sample_cv_pct"),
                 "est_high_variance": bool(db_info.get("est_high_variance", False)),
                 "est_aggregation": db_info.get("est_aggregation"),
-                "ocr_status":      "done" if _has_ocr_sidecar(full_path) else "",
+                "ocr_status":      "done" if stem_lower in _dir_sidecar_stems(dirpath, sidecar_cache)[1] else "",
             }
 
             folder_files.append(file_dict)
             total_bytes += size_bytes
-            if not db_info:
-                # No DB record — must hash-check in Phase 2 before deciding to probe
+            if (not db_info) or (db_status in ("pending", "queued")):
+                # No DB record (or stale pending shadow) — hash-check in Phase 2
+                # before deciding whether to probe.
                 to_hash_check.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
             elif (
                 cached_bitrate is None
@@ -546,11 +561,19 @@ def walk(root: str) -> Generator[dict, None, None]:
                     to_update_size.append((rec_id, size_bytes, size_bytes / (1024 * 1024)))
 
         if folder_files:
+            phase1_found += len(folder_files)
             yield {
                 "type":   "folder",
                 "folder": rel_folder.replace("\\", "/"),
                 "files":  folder_files,
             }
+
+        # Emit an end-of-folder heartbeat even for uneven folder sizes.
+        yield {
+            "type": "scan_progress",
+            "scanned_files": phase1_scanned,
+            "found_files": phase1_found,
+        }
 
     # ----------------------------------------------------------------
     # Phase 2 — hash check for files with no DB record
@@ -576,7 +599,25 @@ def walk(root: str) -> Generator[dict, None, None]:
             hash_rec = db.get_record_by_hash(file_hash)
             if hash_rec and hash_rec["status"] == "done":
                 db.update_source_path(hash_rec["id"], fp)
-                yield {"type": "remove", "full_path": fp, "reason": "already converted (hash match)"}
+                db.delete_pending_records_by_path(fp, keep_id=hash_rec["id"])
+                yield {
+                    "type": "hash_match_done",
+                    "full_path": fp,
+                    "codec": hash_rec.get("source_codec") or "",
+                    "duration": _format_duration(float(hash_rec.get("source_duration_secs") or 0.0)) if hash_rec.get("source_duration_secs") else "",
+                    "bitrate_kbps": hash_rec.get("source_bitrate_kbps") or hash_rec.get("output_bitrate_kbps") or 0,
+                    "video_track_count": hash_rec.get("source_video_track_count"),
+                    "audio_track_count": hash_rec.get("source_audio_track_count"),
+                    "subtitle_track_count": hash_rec.get("source_subtitle_track_count"),
+                    "output": str(round(hash_rec.get("output_size_mb"), 1)) if hash_rec.get("output_size_mb") else None,
+                    "saved": str(round(hash_rec.get("saved_mb"), 1)) if hash_rec.get("saved_mb") else None,
+                    "pct": str(hash_rec.get("saved_pct")) if hash_rec.get("saved_pct") is not None else None,
+                    "est_pct": hash_rec.get("est_saving_pct"),
+                    "est_mb": hash_rec.get("est_saving_mb"),
+                    "est_cv": hash_rec.get("est_sample_cv_pct"),
+                    "est_high_variance": bool(hash_rec.get("est_high_variance", False)),
+                    "est_aggregation": hash_rec.get("est_aggregation"),
+                }
             else:
                 # No hash match — forward to Phase 3 for ffprobe
                 to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})

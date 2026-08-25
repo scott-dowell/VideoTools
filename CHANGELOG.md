@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #25 Speed up phase-1 scanning by deferring hash reads to the hash phase, caching per-directory sidecar lookups, and emitting scan-progress heartbeat events so large-folder scans no longer appear to hang.
 - #24 Remove the duplicate inline "Use This Folder" action in the browse list, keep a single footer confirm action, and auto-select the current folder on browse load.
 - #23 Keep Controls-card folder actions enabled for remembered valid paths and disable them only when the selected path is missing or invalid.
 - #22 Make the folder browser modal selection-only and move Scan/Load/Clean up/Analyse/Prep actions into the Controls card so folder selection and execution are separated.

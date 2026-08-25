@@ -961,6 +961,9 @@ function scanFolder(path) {
       _appendRows(msg.files, startIdx);
       updateStats(_files);
       _scanStripPhase1(_files.length);
+    } else if (msg.type === 'scan_progress') {
+      const found = Number.isFinite(msg.found_files) ? msg.found_files : _files.length;
+      _scanStripPhase1(found);
     } else if (msg.type === 'probe') {
       if (_probePhaseTotal === 0) {
         _scanStripPhase2();
@@ -994,6 +997,37 @@ function scanFolder(path) {
       _probeDone = msg.done || 0;
       _hashDone = msg.done || 0;
       _scanStripHashProgress();
+    } else if (msg.type === 'hash_match_done') {
+      const idx = _fileIndexByPath[msg.full_path];
+      if (idx === undefined) return;
+      const f = _files[idx];
+      f.status = 'done';
+      if (msg.codec) f.codec = msg.codec;
+      if (msg.duration) f.duration = msg.duration;
+      if (msg.bitrate_kbps != null) f.bitrate_kbps = msg.bitrate_kbps;
+      if (msg.video_track_count != null) f.video_track_count = msg.video_track_count;
+      if (msg.audio_track_count != null) f.audio_track_count = msg.audio_track_count;
+      if (msg.subtitle_track_count != null) f.subtitle_track_count = msg.subtitle_track_count;
+      if (msg.output != null) f.output = msg.output;
+      if (msg.saved != null) f.saved = msg.saved;
+      if (msg.pct != null) f.pct = msg.pct;
+      if (msg.est_pct != null) f.est_pct = msg.est_pct;
+      if (msg.est_mb != null) f.est_mb = msg.est_mb;
+      if (msg.est_cv != null) f.est_cv = msg.est_cv;
+      if (msg.est_high_variance != null) f.est_high_variance = !!msg.est_high_variance;
+      if (msg.est_aggregation != null) f.est_aggregation = msg.est_aggregation;
+
+      _updateRowProbe(idx, f);
+      const row = document.getElementById('row-' + idx);
+      if (row) {
+        row.classList.remove('tr-failed', 'tr-converting');
+        row.classList.add('tr-done');
+        if (row.cells[7]) row.cells[7].innerHTML = _badgeHtml(f.status, f.force_sw, f.force_convert) + _droppedBadgeHtml(f) + _ocrBadgeHtml(f);
+        if (row.cells[12]) row.cells[12].textContent = f.output || '\u2014';
+        if (row.cells[13]) row.cells[13].textContent = f.saved || '\u2014';
+        if (row.cells[14]) row.cells[14].textContent = f.pct != null ? (f.pct + '%') : '\u2014';
+      }
+      updateStats(_files);
     } else if (msg.type === 'remove') {
       const _inHashPhase = _hashTotal > 0 && _hashDone < _hashTotal;
       const idx = _fileIndexByPath[msg.full_path];

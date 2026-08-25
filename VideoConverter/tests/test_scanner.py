@@ -11,6 +11,7 @@ import os
 import shutil
 import sqlite3
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -45,6 +46,31 @@ def _collect(root, **kwargs):
         t = event.get("type")
         if t == "folder":
             folders.append(event)
+        elif t == "hash_match_done":
+            target = (event.get("full_path") or "").replace("\\", "/")
+            for ev in folders:
+                for f in ev.get("files", []):
+                    if (f.get("full_path") or "").replace("\\", "/") == target:
+                        f["status"] = "done"
+                        if event.get("codec"):
+                            f["codec"] = event.get("codec")
+                        if event.get("duration"):
+                            f["duration"] = event.get("duration")
+                        if event.get("bitrate_kbps") is not None:
+                            f["bitrate_kbps"] = event.get("bitrate_kbps")
+                        if event.get("video_track_count") is not None:
+                            f["video_track_count"] = event.get("video_track_count")
+                        if event.get("audio_track_count") is not None:
+                            f["audio_track_count"] = event.get("audio_track_count")
+                        if event.get("subtitle_track_count") is not None:
+                            f["subtitle_track_count"] = event.get("subtitle_track_count")
+                        if event.get("output") is not None:
+                            f["output"] = event.get("output")
+                        if event.get("saved") is not None:
+                            f["saved"] = event.get("saved")
+                        if event.get("pct") is not None:
+                            f["pct"] = event.get("pct")
+                        break
         elif t == "done":
             done = event
         elif t == "warning":
@@ -151,6 +177,35 @@ def test_walk_done_event():
     assert done["type"] == "done"
     assert done["total_files"] == len(_all_files(folders))
     assert done["total_mb"] > 0
+
+
+def test_walk_emits_phase1_scan_progress(tmp_path):
+    """Large candidate sets should emit scan_progress heartbeats during phase 1."""
+    for i in range(55):
+        (tmp_path / f"clip_{i:03d}.mkv").write_bytes(b"\x00")
+
+    fake_probe = {
+        "streams": [{
+            "codec_type": "video",
+            "codec_name": "h264",
+            "width": 1920,
+            "height": 1080,
+            "r_frame_rate": "24/1",
+            "profile": "",
+            "pix_fmt": "yuv420p",
+            "bits_per_raw_sample": "8",
+        }],
+        "format": {"duration": "10.0", "bit_rate": "5000000"},
+    }
+
+    with patch("scanner._ffprobe", return_value=fake_probe):
+        progress_seen = False
+        for event in scanner.walk(str(tmp_path)):
+            if event.get("type") == "scan_progress":
+                progress_seen = True
+                break
+
+    assert progress_seen, "Expected at least one phase-1 scan_progress event"
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +346,21 @@ def test_walk_hash_matches_done_and_cleans_stale_pending(tmp_path, fresh_db):
         conn.close()
 
     assert [(row[0], row[1]) for row in rows] == [(rec_done, "done")]
+
+
+def test_walk_does_not_hash_before_scan_done(tmp_path, fresh_db):
+    """Phase-1 scan should avoid hash_file_head reads before scan_done is emitted."""
+    dest = tmp_path / "h264_short.mkv"
+    shutil.copy(FIXTURES_DIR / "h264_short.mkv", dest)
+
+    mtime = dest.stat().st_mtime
+    db.upsert_pending(str(dest), mtime)
+
+    with patch("scanner.db.hash_file_head", return_value=None) as mock_hash:
+        for event in scanner.walk(str(tmp_path)):
+            if event.get("type") == "scan_done":
+                assert mock_hash.call_count == 0
+                break
 
 
 def test_walk_running_emits_warning(tmp_path, fresh_db):

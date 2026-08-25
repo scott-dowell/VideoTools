@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #23 Keep Controls-card folder actions enabled for remembered valid paths and disable them only when the selected path is missing or invalid.
 - #22 Make the folder browser modal selection-only and move Scan/Load/Clean up/Analyse/Prep actions into the Controls card so folder selection and execution are separated.
 - #21 Retry anime-mode conversions without subtitle streams when muxing produces a truncated output, and add a regression test for the subtitle-drop fallback.
 - #20 Fix sidecar subtitle translation reliability by adding provider fallback and fail-fast checks so `.en.srt` generation no longer silently writes untranslated French output.

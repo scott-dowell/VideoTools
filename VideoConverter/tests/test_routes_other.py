@@ -204,6 +204,14 @@ def test_index_folder_modal_is_selection_only_and_actions_are_in_controls(client
     assert 'id="prepBtn"' in html
 
 
+def test_folder_actions_require_valid_path_gate():
+    """Folder actions must gate on path validity, not only path presence."""
+    js_path = Path(__file__).resolve().parents[1] / "static" / "app.js"
+    js = js_path.read_text(encoding="utf-8")
+    assert "let _currentScanPathValid = false;" in js
+    assert "const hasFolder = !!_currentScanPath && _currentScanPathValid;" in js
+
+
 # ---------------------------------------------------------------------------
 # /api/settings — GET
 # ---------------------------------------------------------------------------

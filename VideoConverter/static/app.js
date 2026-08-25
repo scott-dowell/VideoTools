@@ -24,6 +24,8 @@ let _dragSrcIndex = null;
 let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'path' | 'duration' | 'video_tracks' | 'audio_tracks' | 'subtitle_tracks' | 'est_saving' | 'est_saving_mb'
 let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
+let _currentScanPathValid = false;
+let _pathValidationSeq = 0;
 let _lastAutoScrollPath = null; // path of row last auto-scrolled to; prevents re-scroll on every poll
 let _sessionSavedMB = null;   // null = no run this session, number = realized MB saved this run
 let _sessionEstimatedMB = 0;  // projected extra MB from currently executing file
@@ -281,7 +283,7 @@ function setButtonStates(state) {
   document.getElementById('stopBtn').disabled   = !(state === 'running' || state === 'scanning');
   const hstopBtn = document.getElementById('hstopBtn');
   if (hstopBtn) hstopBtn.disabled = state !== 'running';
-  const hasFolder = !!_currentScanPath;
+  const hasFolder = !!_currentScanPath && _currentScanPathValid;
   const folderBusy = state === 'running' || state === 'scanning';
   const rescanBtn = document.getElementById('rescanBtn');
   if (rescanBtn) rescanBtn.disabled = !hasFolder || folderBusy;
@@ -900,6 +902,7 @@ const DEMO_FILES = [
 function scanFolder(path) {
   if (!path) return;
   _currentScanPath = path;
+  _currentScanPathValid = true;
   localStorage.setItem('vc_last_folder', path);  // remember for re-scan and cleanup
   document.getElementById('folderPath').textContent = path;
   _estCancelled  = true;   // stop any in-flight estimation from previous scan
@@ -3760,8 +3763,45 @@ document.addEventListener('DOMContentLoaded', function() {
 // Re-scan current folder
 // ============================================================
 function setCurrentFolder(path) {
-  if (!path) return;
-  setCurrentFolder(path);
+  if (!path) {
+    _currentScanPath = null;
+    _currentScanPathValid = false;
+    document.getElementById('folderPath').textContent = 'No folder selected';
+    setButtonStates(_appState === 'running' || _appState === 'scanning' ? _appState : 'idle');
+    return;
+  }
+  _currentScanPath = path;
+  _currentScanPathValid = true;
+  localStorage.setItem('vc_last_folder', path);
+  document.getElementById('folderPath').textContent = path;
+  _validateCurrentFolderPath(path);
+}
+
+function _normalizePathForCompare(path) {
+  if (!path) return '';
+  let norm = String(path).replace(/\\+/g, '/').trim();
+  if (/^[a-zA-Z]:\/$/.test(norm)) return norm.toLowerCase();
+  norm = norm.replace(/\/+$/, '');
+  return norm.toLowerCase();
+}
+
+function _validateCurrentFolderPath(path) {
+  const seq = ++_pathValidationSeq;
+  fetch('/api/browse?path=' + encodeURIComponent(path))
+    .then(r => r.json())
+    .then(data => {
+      if (seq !== _pathValidationSeq) return;
+      const requested = _normalizePathForCompare(path);
+      const resolved = _normalizePathForCompare((data && data.path) || '');
+      _currentScanPathValid = !!requested && requested === resolved;
+      setButtonStates(_appState === 'running' || _appState === 'scanning' ? _appState : 'idle');
+    })
+    .catch(() => {
+      if (seq !== _pathValidationSeq) return;
+      _currentScanPathValid = false;
+      setButtonStates(_appState === 'running' || _appState === 'scanning' ? _appState : 'idle');
+    });
+
   if (_appState === 'running' || _appState === 'scanning') {
     setButtonStates(_appState);
   } else {
@@ -4200,9 +4240,7 @@ async function loadFromDb(path) {
     return;
   }
 
-  _currentScanPath = path;
-  localStorage.setItem('vc_last_folder', path);
-  document.getElementById('folderPath').textContent = path;
+  setCurrentFolder(path);
 
   _files = data.files.map(f => Object.assign({}, f));
   _fileIndexByPath = {};

@@ -586,14 +586,34 @@ def walk(root: str) -> Generator[dict, None, None]:
 
     hash_total = len(to_hash_check)
     hash_done = 0
-    for entry in to_hash_check:
-        fp    = entry["full_path"]
-        mtime = entry["mtime"]
-        size_bytes = entry["size_bytes"]
-        file_hash = db.hash_file_head(fp)
-        if file_hash:
-            hash_rec = db.get_record_by_hash(file_hash)
-            if hash_rec and hash_rec["status"] == "done":
+    hash_batch_size = 64
+    hash_progress_step = 8
+    for i in range(0, hash_total, hash_batch_size):
+        batch_entries = to_hash_check[i:i + hash_batch_size]
+        hashed_batch: list[tuple[dict, str | None]] = []
+
+        for entry in batch_entries:
+            fp = entry["full_path"]
+            file_hash = db.hash_file_head(fp)
+            hashed_batch.append((entry, file_hash))
+            hash_done += 1
+            if (hash_done % hash_progress_step == 0) or (hash_done == hash_total):
+                yield {
+                    "type": "hash_progress",
+                    "done": hash_done,
+                    "total": hash_total,
+                }
+
+        batch_hashes = [h for _, h in hashed_batch if h]
+        done_by_hash = db.get_done_records_by_hashes(batch_hashes)
+
+        for entry, file_hash in hashed_batch:
+            fp = entry["full_path"]
+            mtime = entry["mtime"]
+            size_bytes = entry["size_bytes"]
+
+            hash_rec = done_by_hash.get(file_hash) if file_hash else None
+            if hash_rec:
                 db.update_source_path(hash_rec["id"], fp)
                 db.delete_pending_records_by_path(fp, keep_id=hash_rec["id"])
                 yield {
@@ -617,16 +637,6 @@ def walk(root: str) -> Generator[dict, None, None]:
             else:
                 # No hash match — forward to Phase 3 for ffprobe
                 to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
-        else:
-            # No hash available — forward to Phase 3 for ffprobe
-            to_probe.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes})
-
-        hash_done += 1
-        yield {
-            "type":  "hash_progress",
-            "done":  hash_done,
-            "total": hash_total,
-        }
 
     # ----------------------------------------------------------------
     # Phase 3 — ffprobe each file, emit probe / remove events

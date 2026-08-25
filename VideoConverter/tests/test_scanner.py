@@ -443,6 +443,36 @@ def test_walk_does_not_hash_before_scan_done(tmp_path, fresh_db):
                 break
 
 
+def test_walk_hash_phase_uses_batched_hash_lookup(tmp_path, fresh_db):
+    """Hash phase should resolve done matches via batched hash lookups."""
+    dest = tmp_path / "h264_short.mkv"
+    shutil.copy(FIXTURES_DIR / "h264_short.mkv", dest)
+
+    mtime = dest.stat().st_mtime
+    rec_id = db.upsert_pending(str(dest), mtime)
+    db.mark_running(rec_id, "2026-01-01T00:00:00Z")
+    db.mark_done(
+        rec_id,
+        str(tmp_path / "converted" / "h264_short.mp4"),
+        output_size_mb=0.5,
+        saved_mb=0.7,
+        saved_pct=58,
+        completed_at="2026-01-01T00:01:00Z",
+        output_hash=db.hash_file_head(str(dest)),
+    )
+
+    newer_mtime = mtime + 1.0
+    os.utime(str(dest), (newer_mtime, newer_mtime))
+    db.upsert_pending(str(dest), newer_mtime)
+
+    with patch("scanner.db.get_record_by_hash", wraps=db.get_record_by_hash) as per_file_lookup, \
+         patch("scanner.db.get_done_records_by_hashes", wraps=db.get_done_records_by_hashes) as batch_lookup:
+        list(scanner.walk(str(tmp_path)))
+
+    assert per_file_lookup.call_count == 0
+    assert batch_lookup.call_count >= 1
+
+
 def test_walk_running_emits_warning(tmp_path, fresh_db):
     """File with status='running' in DB emits a warning and is not yielded."""
     dest = tmp_path / "h264_short.mkv"

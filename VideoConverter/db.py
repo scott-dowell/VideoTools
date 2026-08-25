@@ -266,6 +266,44 @@ def get_record_by_hash(content_hash: str) -> dict | None:
     return dict(row) if row else None
 
 
+def get_done_records_by_hashes(content_hashes: list[str]) -> dict[str, dict]:
+    """Return a mapping of hash -> done conversion row for any matching source/output hash.
+
+    When multiple rows share a hash, the highest-id (latest) row wins.
+    """
+    hashes = [h for h in (content_hashes or []) if h]
+    if not hashes:
+        return {}
+
+    # Preserve first-seen order while deduplicating inputs.
+    dedup_hashes = list(dict.fromkeys(hashes))
+    placeholders = ",".join("?" * len(dedup_hashes))
+    params = dedup_hashes + dedup_hashes
+
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+              FROM conversions
+             WHERE status = 'done'
+               AND (source_hash IN ({placeholders}) OR output_hash IN ({placeholders}))
+             ORDER BY id DESC
+            """,
+            params,
+        ).fetchall()
+
+    out: dict[str, dict] = {}
+    for row in rows:
+        rec = dict(row)
+        s_hash = rec.get("source_hash")
+        o_hash = rec.get("output_hash")
+        if s_hash in dedup_hashes and s_hash not in out:
+            out[s_hash] = rec
+        if o_hash in dedup_hashes and o_hash not in out:
+            out[o_hash] = rec
+    return out
+
+
 def update_source_hash(record_id: int, source_hash: str) -> None:
     """Store the source file hash on an existing record."""
     with _connect() as conn:

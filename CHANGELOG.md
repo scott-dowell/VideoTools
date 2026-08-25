@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #28 Batch hash-phase DB lookups and coalesce hash progress/row UI updates so hash matching remains accurate without per-file DB round-trips and constant queue repaint churn.
 - #27 Add per-folder scan timing telemetry, remove phase-1 per-file output/fingerprint DB fallback lookups, and switch scan-strip indeterminate animation to a smooth shimmer to avoid bouncing during large-folder scans.
 - #26 Smooth phase-1 scan-strip updates by showing the currently scanned folder from scan-progress events and throttling label/animation resets to reduce jerky UI motion.
 - #25 Speed up phase-1 scanning by deferring hash reads to the hash phase, caching per-directory sidecar lookups, and emitting scan-progress heartbeat events so large-folder scans no longer appear to hang.

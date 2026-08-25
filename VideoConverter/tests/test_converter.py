@@ -352,7 +352,10 @@ def test_estimate_uses_trimmed_mean_and_sets_variance_metadata(tmp_path):
         out_path = Path(cmd[-1])
         idx = int(out_path.stem.rsplit("_", 1)[-1])
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(b"\x00" * sample_bytes[idx])
+        if "_est_src_" in out_path.stem:
+            out_path.write_bytes(b"\x00" * (10 * 1024 * 1024))
+        else:
+            out_path.write_bytes(b"\x00" * sample_bytes[idx])
         return MagicMock(returncode=0)
 
     orig_getsize = os.path.getsize
@@ -364,6 +367,8 @@ def test_estimate_uses_trimmed_mean_and_sets_variance_metadata(tmp_path):
         return orig_getsize(p)
 
     with patch.object(converter, "_ffprobe_duration", return_value=100.0), \
+         patch.object(converter.config, "ESTIMATE_SAMPLE_FRACTIONS", (1/6, 2/6, 3/6, 4/6, 5/6)), \
+         patch.object(converter.config, "ESTIMATE_CLIP_SECS", 10.0), \
          patch.object(converter.config, "LOCAL_TEMP_DIR", str(tmp_path)), \
          patch("subprocess.run", side_effect=_fake_run), \
          patch("os.path.getsize", side_effect=_fake_getsize):
@@ -378,6 +383,77 @@ def test_estimate_uses_trimmed_mean_and_sets_variance_metadata(tmp_path):
     assert result["estimated_output_mb"] == 42.0
     assert result["estimated_saving_mb"] == 58.0
     assert result["estimated_saving_pct"] == 58
+
+
+def test_estimate_defaults_to_two_15s_clips_in_first_and_last_third(tmp_path):
+    """Default estimate policy samples middle of first/last third with 15s clips."""
+    fake = tmp_path / "video.mkv"
+    fake.write_bytes(b"x")
+
+    seen_seeks: list[float] = []
+    seen_t: list[float] = []
+
+    def _fake_run(cmd, capture_output=True, timeout=120):
+        out_path = Path(cmd[-1])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if "_est_src_" in str(out_path):
+            ss_idx = cmd.index("-ss")
+            t_idx = cmd.index("-t")
+            seen_seeks.append(float(cmd[ss_idx + 1]))
+            seen_t.append(float(cmd[t_idx + 1]))
+            out_path.write_bytes(b"\x00" * (4 * 1024 * 1024))
+        elif "_est_enc_" in str(out_path):
+            out_path.write_bytes(b"\x00" * (2 * 1024 * 1024))
+        return MagicMock(returncode=0)
+
+    with patch.object(converter, "_ffprobe_duration", return_value=180.0), \
+         patch.object(converter.config, "LOCAL_TEMP_DIR", str(tmp_path)), \
+         patch("subprocess.run", side_effect=_fake_run), \
+         patch("os.path.isfile", return_value=True), \
+         patch("os.path.getsize", return_value=100 * 1024 * 1024):
+        result = converter.estimate(str(fake))
+
+    assert result["error"] is None
+    assert result["sample_count"] == 2
+    assert seen_t == [15.0, 15.0]
+    # Centers at 30s and 150s, with 15s clips => starts at 22.5s and 142.5s.
+    assert seen_seeks == [22.5, 142.5]
+
+
+def test_estimate_sample_commands_are_video_only(tmp_path):
+    """Estimator sample extract/encode should avoid audio/subtitle/data streams."""
+    fake = tmp_path / "video.mkv"
+    fake.write_bytes(b"x")
+
+    seen_extract = []
+    seen_encode = []
+
+    def _fake_run(cmd, capture_output=True, timeout=120):
+        out_path = Path(cmd[-1])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if "_est_src_" in str(out_path):
+            seen_extract.append(cmd)
+            out_path.write_bytes(b"\x00" * (8 * 1024 * 1024))
+        elif "_est_enc_" in str(out_path):
+            seen_encode.append(cmd)
+            out_path.write_bytes(b"\x00" * (4 * 1024 * 1024))
+        return MagicMock(returncode=0)
+
+    with patch.object(converter, "_ffprobe_duration", return_value=180.0), \
+         patch.object(converter.config, "LOCAL_TEMP_DIR", str(tmp_path)), \
+         patch("subprocess.run", side_effect=_fake_run), \
+         patch("os.path.isfile", return_value=True), \
+         patch("os.path.getsize", return_value=100 * 1024 * 1024):
+        result = converter.estimate(str(fake))
+
+    assert result["error"] is None
+    assert seen_extract, "expected extract commands"
+    assert seen_encode, "expected encode commands"
+    # Extraction must be video-only copy.
+    assert any("-map" in c and "0:v:0" in c for c in seen_extract)
+    assert all("-an" in c and "-sn" in c and "-dn" in c for c in seen_extract)
+    # Encode must remain video-only.
+    assert all("-an" in c and "-sn" in c and "-dn" in c for c in seen_encode)
 
 
 # ---------------------------------------------------------------------------

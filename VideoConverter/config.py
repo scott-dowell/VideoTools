@@ -23,6 +23,12 @@ KEEP_FAILED_INTERMEDIATES = False
 REENCODE_AV1 = True
 AV1_QSV_QUALITY = 27
 
+# Estimate sampling policy.
+# Fractions are clip centers in [0,1] of timeline position.
+# Default: middle of first third (1/6) and middle of last third (5/6).
+ESTIMATE_SAMPLE_FRACTIONS = (1 / 6, 5 / 6)
+ESTIMATE_CLIP_SECS = 15.0
+
 # Flask
 FLASK_PORT = 5001
 FLASK_DEBUG = False

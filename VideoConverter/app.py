@@ -1665,7 +1665,7 @@ def _queue_worker(
                         _job_log(
                             f"Estimate cache invalid (quality/version mismatch; cached q={_cached_quality}, v={_cached_version}, current q={quality}, v={_ESTIMATE_VERSION}) — recomputing."
                         )
-                    _step("estimate", "running", "sampling 10s clip\u2026")
+                    _step("estimate", "running", "sampling representative clips\u2026")
                     _est = converter.estimate(full_path, quality=quality)
                 if _est.get("error"):
                     # WMV, too short, etc. — skip estimate, proceed to encode normally

@@ -1085,8 +1085,13 @@ def _ffprobe_duration(input_path: str) -> float:
 
 def estimate(input_path: str, quality: int | None = None) -> dict:
     """
-    Encode multiple representative clips from input_path with hevc_qsv and
-    extrapolate the compression ratio to the full file.
+    Encode multiple representative video-only clips from input_path with
+    hevc_qsv and extrapolate the compression ratio to the full file.
+
+    Non-video payload (audio/subtitle/data) is treated as passthrough cost
+    for estimation purposes, which avoids intro-bias from non-video-heavy
+    sections and sidesteps unsupported subtitle/data stream muxing during
+    sample extraction.
 
     The sample points are spread across the file and aggregated with robust
     statistics so one unusual section is less likely to dominate the estimate.
@@ -1117,10 +1122,17 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
         # Too short to sample reliably — skip
         return {"error": "File too short to estimate"}
 
-    _SAMPLE_COUNT = 5
-    _CLIP_SECS = 10.0
+    sample_fracs = tuple(getattr(config, "ESTIMATE_SAMPLE_FRACTIONS", ()))
+    if not sample_fracs:
+        sample_fracs = tuple((i + 1) / 6.0 for i in range(5))
 
-    clip_secs = min(_CLIP_SECS, duration / 3.0)
+    # Keep only valid centers and preserve configured ordering.
+    centers = [duration * f for f in sample_fracs if 0.0 <= float(f) <= 1.0]
+    if not centers:
+        centers = [duration * ((i + 1) / 6.0) for i in range(5)]
+
+    clip_target_secs = float(getattr(config, "ESTIMATE_CLIP_SECS", 10.0))
+    clip_secs = min(clip_target_secs, duration / 3.0)
     if clip_secs <= 0:
         return {"error": "Duration calculation error"}
 
@@ -1130,14 +1142,14 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
     qsv_dec = _QSV_DECODERS.get(v_codec or "")
     hw_args = ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", qsv_dec] if qsv_dec else []
 
-    sample_centers = [duration * (i + 1) / (_SAMPLE_COUNT + 1) for i in range(_SAMPLE_COUNT)]
     sample_specs: list[tuple[int, float]] = []
-    for idx, center in enumerate(sample_centers, start=1):
+    for idx, center in enumerate(centers, start=1):
         seek = max(center - (clip_secs / 2.0), 0.0)
         sample_specs.append((idx, seek))
 
     try:
         sample_ratios: list[float] = []
+        sample_src_video_bps: list[float] = []
 
         for idx, seek in sample_specs:
             src_tmp = os.path.join(config.LOCAL_TEMP_DIR, f"_est_src_{Path(input_path).stem}_{idx}.mkv")
@@ -1149,15 +1161,19 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
                     try: os.remove(p)
                     except OSError: pass
 
-            # 1. Extract 10s source segment (copy mode)
-            # Use -map 0 to match the full stream set so size comparison is fair.
+            # 1. Extract source video-only segment (copy mode).
+            # Estimation treats non-video payload as passthrough and models
+            # compression behavior on video only.
             sp_result = subprocess.run([
                 "ffmpeg", "-y",
                 "-ss", str(seek),
                 "-t",  str(clip_secs),
                 "-i",  input_path,
-                "-map", "0",
-                "-c",   "copy",
+                "-map", "0:v:0",
+                "-c:v", "copy",
+                "-an",
+                "-sn",
+                "-dn",
                 "-f",   "matroska",
                 src_tmp
             ], capture_output=True, timeout=60)
@@ -1168,6 +1184,7 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
             src_seg_bytes = os.path.getsize(src_tmp)
             if src_seg_bytes == 0:
                 continue
+            sample_src_video_bps.append((src_seg_bytes * 8.0) / clip_secs)
 
             # 2. Encode extracted segment
             # We encode the segment file directly to ensure perfect alignment with what we measured.
@@ -1177,8 +1194,9 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
                 "-i",  src_tmp,
                 "-c:v", "hevc_qsv",
                 "-global_quality", str(quality),
-                "-c:a", "copy",
-                "-c:s", "copy",
+                "-an",
+                "-sn",
+                "-dn",
                 "-f", "matroska",
                 enc_tmp,
             ]
@@ -1218,7 +1236,14 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
 
         high_variance = sample_cv_pct >= 45.0
 
-        estimated_output_mb = src_mb * ratio
+        est_src_video_bytes = 0.0
+        if sample_src_video_bps:
+            est_src_video_bytes = mean(sample_src_video_bps) * duration / 8.0
+        est_src_video_bytes = max(0.0, min(float(src_size), est_src_video_bytes))
+        est_non_video_bytes = max(0.0, float(src_size) - est_src_video_bytes)
+
+        estimated_output_bytes = (est_src_video_bytes * ratio) + est_non_video_bytes
+        estimated_output_mb = estimated_output_bytes / 1024.0 / 1024.0
         estimated_saving_mb = src_mb - estimated_output_mb
         if estimated_saving_mb < 0:
             estimated_saving_mb = 0.0
@@ -1240,7 +1265,7 @@ def estimate(input_path: str, quality: int | None = None) -> dict:
     except Exception as e:
         return {"error": str(e)}
     finally:
-        for idx in range(1, _SAMPLE_COUNT + 1):
+        for idx, _ in sample_specs:
             for prefix in ("_est_src_", "_est_enc_", "_est_"):
                 tmp_path = os.path.join(
                     config.LOCAL_TEMP_DIR,

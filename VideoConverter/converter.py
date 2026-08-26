@@ -1434,6 +1434,92 @@ def _probe_duration_for_compare(path: str) -> float:
     return 0.0
 
 
+def _probe_video_stream_duration(path: str) -> float:
+    """Return the first video stream duration (or tag duration), else 0.0."""
+    for attempt in range(3):
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_streams",
+                    "-select_streams", "v:0",
+                    path,
+                ],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            )
+            if not result.stdout.strip():
+                raise ValueError(f"ffprobe returned empty output (rc={result.returncode})")
+            data = json.loads(result.stdout)
+            streams = data.get("streams", [])
+            if not streams:
+                return 0.0
+            s = streams[0]
+            dur = _parse_duration_seconds(s.get("duration"))
+            if dur <= 0:
+                tags = s.get("tags") or {}
+                dur = _parse_duration_seconds(tags.get("DURATION") or tags.get("DURATION-eng"))
+            return dur if dur > 0 else 0.0
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.5)
+    return 0.0
+
+
+def _pretrim_source_to_video_end(
+    input_path: str,
+    log: LogFn,
+    stop_event: threading.Event,
+    conv_logger: "_conv_log.ConversionLogger | None" = None,
+    pid_holder: list[int] | None = None,
+) -> str:
+    """Create a stream-copy pretrim artifact capped at detected video-stream end."""
+    vdur = _probe_video_stream_duration(input_path)
+    if vdur <= 0:
+        log("Pretrim skipped: could not determine video-stream duration.")
+        return input_path
+
+    pretrim_root = os.path.join(config.LOCAL_TEMP_DIR, "_pretrim")
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    keep_dir = os.path.join(pretrim_root, f"{Path(input_path).stem}_{stamp}")
+    os.makedirs(keep_dir, exist_ok=True)
+    trimmed_path = os.path.join(keep_dir, os.path.basename(input_path))
+
+    log(f"Pretrim: stream-copying to video end at {vdur:.3f}s")
+    trim_log = conv_logger.tee(log, "pretrim") if conv_logger else log
+    ok = _run_ffmpeg(
+        [
+            "ffmpeg", "-y",
+            "-stats_period", "1",
+            "-progress", "pipe:1",
+            "-fflags", "+discardcorrupt",
+            "-i", input_path,
+            "-map", "0",
+            "-c", "copy",
+            "-to", f"{vdur:.3f}",
+            trimmed_path,
+        ],
+        trim_log,
+        stop_event,
+        pid_holder=pid_holder,
+        output_path=trimmed_path,
+    )
+
+    if ok and os.path.exists(trimmed_path) and os.path.getsize(trimmed_path) > 0:
+        log(f"Pretrim artifact created: {trimmed_path}")
+        return trimmed_path
+
+    log("Pretrim failed; continuing with original source.")
+    try:
+        if os.path.exists(trimmed_path):
+            os.remove(trimmed_path)
+        if os.path.isdir(keep_dir) and not os.listdir(keep_dir):
+            os.rmdir(keep_dir)
+    except OSError:
+        pass
+    return input_path
+
+
 def _verify_output(
     output_path: str,
     src_duration: float,
@@ -2977,21 +3063,35 @@ def convert_video(
         log = lambda msg: None
 
     input_path = os.path.normpath(input_path)
-    src_size   = os.path.getsize(input_path)
-    src_mb     = src_size / (1024 * 1024)
-    duration   = _ffprobe_duration(input_path)
+    working_input = input_path
 
     clog = _conv_log.ConversionLogger(input_path)
+
+    if bool(getattr(config, "PRETRIM_TO_VIDEO_END", False)):
+        log("Pre-step enabled: trimming source container to video-stream end.")
+        working_input = _pretrim_source_to_video_end(
+            input_path,
+            log,
+            stop_event,
+            conv_logger=clog,
+            pid_holder=pid_holder,
+        )
+        if os.path.normpath(working_input) != os.path.normpath(input_path):
+            log(f"Using pretrimmed source for conversion: {working_input}")
+
+    src_size   = os.path.getsize(working_input)
+    src_mb     = src_size / (1024 * 1024)
+    duration   = _ffprobe_duration(working_input)
 
     if anime_mode:
         _artifact_holder: list[str] = [""]
         _anime_force_sw = force_sw
-        if is_hi10(input_path):
+        if is_hi10(working_input):
             log("Hi10 H.264 detected — QSV unsupported, will use libx265 software encoder.")
             _anime_force_sw = True
         log("Anime mode: compressing then remuxing to MP4.")
         ok, encoder_used = compress_and_remux(
-            input_path=input_path,
+            input_path=working_input,
             output_dir=output_dir,
             log=log,
             stop_event=stop_event,
@@ -3024,13 +3124,13 @@ def convert_video(
         ok_verify, reason = _verify_output(
             output_path,
             duration,
-            src_path=input_path,
+            src_path=working_input,
             log=log,
             check_av_alignment=_check_av_alignment,
         )
         if not ok_verify:
             if anime_mode and reason.startswith("duration mismatch:"):
-                retry_drops = sorted(set((dropped_streams or []) + _subtitle_stream_indices(input_path)))
+                retry_drops = sorted(set((dropped_streams or []) + _subtitle_stream_indices(working_input)))
                 if retry_drops:
                     log(
                         "Integrity check failed due to truncated anime-mode output; "
@@ -3042,7 +3142,7 @@ def convert_video(
                     except OSError:
                         pass
                     ok_retry, encoder_retry = compress_and_remux(
-                        input_path=input_path,
+                        input_path=working_input,
                         output_dir=output_dir,
                         log=log,
                         stop_event=stop_event,
@@ -3059,7 +3159,7 @@ def convert_video(
                         ok_verify_retry, reason_retry = _verify_output(
                             output_path,
                             duration,
-                            src_path=input_path,
+                            src_path=working_input,
                             log=log,
                             check_av_alignment=_check_av_alignment,
                         )
@@ -3124,12 +3224,12 @@ def convert_video(
         }
 
     # Normal mode
-    if not force_sw and is_hi10(input_path):
+    if not force_sw and is_hi10(working_input):
         log("Hi10 H.264 detected — QSV unsupported, forcing libx265 software encoder.")
         force_sw = True
 
     ok, encoder_used = compress_simple(
-        input_path  = input_path,
+        input_path  = working_input,
         output_dir  = output_dir,
         log         = log,
         stop_event  = stop_event,
@@ -3156,14 +3256,14 @@ def convert_video(
         }
 
     # Locate output file
-    suffix   = Path(input_path).suffix.lower()
+    suffix   = Path(working_input).suffix.lower()
     # .m4v uses the ipod muxer which doesn't support HEVC — treat as .mp4
     out_ext  = ".mp4" if suffix in (".mp4", ".m4v") else (".mkv" if suffix == ".mkv" else ".mkv")
-    out_name = Path(input_path).stem + out_ext
+    out_name = Path(working_input).stem + out_ext
     output_path = os.path.join(output_dir, out_name)
 
     # Integrity check
-    ok_verify, reason = _verify_output(output_path, duration, src_path=input_path, log=log)
+    ok_verify, reason = _verify_output(output_path, duration, src_path=working_input, log=log)
     if not ok_verify:
         log(f"Integrity check failed: {reason}")
         clog.mark_fail_at(f"integrity check: {reason}")

@@ -234,6 +234,7 @@ def test_settings_get_contains_default_keys(client):
     assert "qsv_quality" in data
     assert "sw_hevc_crf" in data
     assert "local_temp_dir" in data
+    assert "pretrim_to_video_end" in data
 
 
 def test_settings_get_default_qsv_quality_is_valid(client):
@@ -261,6 +262,11 @@ def test_settings_get_reflects_saved_value(client):
 def test_settings_post_persists_sw_hevc_crf(client):
     client.post("/api/settings", json={"sw_hevc_crf": 22})
     assert client.get("/api/settings").get_json()["sw_hevc_crf"] == 22
+
+
+def test_settings_post_persists_pretrim_toggle(client):
+    client.post("/api/settings", json={"pretrim_to_video_end": True})
+    assert client.get("/api/settings").get_json()["pretrim_to_video_end"] is True
 
 
 # ---------------------------------------------------------------------------

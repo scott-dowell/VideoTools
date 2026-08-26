@@ -18,6 +18,10 @@ LOCAL_TEMP_DIR = r"C:\Temp\vc_working"
 # LOCAL_TEMP_DIR\_failed_intermediates\<file>_<timestamp>\
 KEEP_FAILED_INTERMEDIATES = False
 
+# Optional pre-step: trim source container to detected video-stream end before
+# conversion. Useful for sources with padded subtitle/container tails.
+PRETRIM_TO_VIDEO_END = False
+
 # AV1 policy (anime mode): re-encode for meaningful size savings instead of
 # stream-copying the AV1 video into MP4.
 REENCODE_AV1 = True

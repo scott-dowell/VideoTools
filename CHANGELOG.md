@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #35 Add an opt-in pretrim-to-video-end repair step (settings/API + converter wiring + tests) so padded-tail sources can be stream-copied to real video end before conversion while keeping integrity validation strict.
 - #34 Avoid false failure on MP4 subtitle-injection outputs by keeping strict video-duration checks while skipping the audio-vs-video tail alignment rejection for valid sidecar subtitle merges.
 - #33 Keep cached pending rows in scanner hash reconciliation so stale in-place anime shadow rows collapse back to done instead of resurfacing as pending.
 - #32 Right-align the queue table Output and Saved headers so they match their numeric column content.

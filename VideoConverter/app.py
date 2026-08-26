@@ -1886,6 +1886,7 @@ _SETTINGS_DEFAULTS = {
     "sw_hevc_crf":               config.SW_HEVC_CRF,
     "local_temp_dir":            config.LOCAL_TEMP_DIR,
     "keep_failed_intermediates": config.KEEP_FAILED_INTERMEDIATES,
+    "pretrim_to_video_end":      config.PRETRIM_TO_VIDEO_END,
     "default_sort":              "bitrate",   # bitrate | size | name
     "anime_mode":                False,
     "low_savings_threshold_pct": 5,
@@ -2196,6 +2197,8 @@ def api_settings_post():
             data["low_savings_threshold_pct"] = max(0, min(100, int(data["low_savings_threshold_pct"])))
         if "keep_failed_intermediates" in data:
             data["keep_failed_intermediates"] = bool(data["keep_failed_intermediates"])
+        if "pretrim_to_video_end" in data:
+            data["pretrim_to_video_end"] = bool(data["pretrim_to_video_end"])
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid numeric value"}), 400
     _save_settings({**_load_settings(), **data})
@@ -2234,6 +2237,7 @@ def api_start():
     if temp_dir:
         config.LOCAL_TEMP_DIR = temp_dir
     config.KEEP_FAILED_INTERMEDIATES = bool(settings.get("keep_failed_intermediates", config.KEEP_FAILED_INTERMEDIATES))
+    config.PRETRIM_TO_VIDEO_END = bool(settings.get("pretrim_to_video_end", config.PRETRIM_TO_VIDEO_END))
 
     if not files:
         return jsonify({"error": "No files provided"}), 400

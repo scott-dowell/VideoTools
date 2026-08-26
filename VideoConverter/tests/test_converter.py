@@ -227,6 +227,34 @@ def test_convert_video_normal_mode_hi10_forces_sw(tmp_path):
     assert captured.get("force_sw") is True
 
 
+def test_convert_video_uses_pretrimmed_source_when_enabled(tmp_path):
+    """When pretrim is enabled, convert_video should pass repaired input to encoder."""
+    out_dir = str(tmp_path / "out")
+    stop = threading.Event()
+    captured = {}
+    repaired = str(tmp_path / "repair" / "h264_short.mkv")
+    Path(repaired).parent.mkdir(parents=True, exist_ok=True)
+    Path(repaired).write_bytes(b"trimmed")
+
+    def _fake_compress_simple(*args, **kwargs):
+        captured["input_path"] = kwargs.get("input_path")
+        return False, ""
+
+    with patch.object(converter.config, "PRETRIM_TO_VIDEO_END", True), \
+         patch.object(converter, "_pretrim_source_to_video_end", return_value=repaired), \
+         patch.object(converter, "compress_simple", side_effect=_fake_compress_simple):
+        _ = converter.convert_video(
+            input_path=str(FIXTURES / "h264_short.mkv"),
+            output_dir=out_dir,
+            anime_mode=False,
+            quality=None,
+            progress_cb=None,
+            stop_event=stop,
+        )
+
+    assert os.path.normpath(captured.get("input_path", "")) == os.path.normpath(repaired)
+
+
 # ---------------------------------------------------------------------------
 # _verify_output
 # ---------------------------------------------------------------------------

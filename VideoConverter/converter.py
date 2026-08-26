@@ -1820,6 +1820,7 @@ def remux_to_mp4(
     conv_logger: "_conv_log.ConversionLogger | None" = None,
     tmp_holder: list[str] | None = None,
     dropped_streams: list[int] | None = None,
+    subtitle_source_path: str | None = None,
 ) -> tuple[bool, str]:
     """
     Anime-mode remux into MP4.
@@ -1886,8 +1887,9 @@ def remux_to_mp4(
     # ------------------------------------------------------------------
     _EXT_SUB_EXTS = {".srt", ".ass", ".ssa"}
     ext_sub_paths: list[str] = []
-    _src_stem_lower = Path(input_path).stem.lower()
-    for _p in sorted(Path(input_path).parent.iterdir()):
+    _subtitle_scan_path = Path(subtitle_source_path or input_path)
+    _src_stem_lower = _subtitle_scan_path.stem.lower()
+    for _p in sorted(_subtitle_scan_path.parent.iterdir()):
         if _p.suffix.lower() not in _EXT_SUB_EXTS:
             continue
         _ps = _p.stem.lower()
@@ -2887,6 +2889,7 @@ def compress_and_remux(
                 conv_logger=conv_logger,
                 tmp_holder=tmp_holder,
                 dropped_streams=dropped_streams,
+                subtitle_source_path=input_path,
             )
 
     # AV1 handling:
@@ -2908,6 +2911,7 @@ def compress_and_remux(
                 conv_logger=conv_logger,
                 tmp_holder=tmp_holder,
                 dropped_streams=dropped_streams,
+                subtitle_source_path=input_path,
             )
 
         av1_quality = int(getattr(config, "AV1_QSV_QUALITY", 27))
@@ -3000,6 +3004,7 @@ def compress_and_remux(
         conv_logger=conv_logger,
         tmp_holder=tmp_holder,
         dropped_streams=dropped_streams,
+        subtitle_source_path=input_path,
     )
 
     # Keep the intermediate workspace alive until the caller finishes the

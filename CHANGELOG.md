@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #36 Preserve external subtitle sidecars from the original source folder during anime-mode MKV remux so .ass/.ssa/.srt files survive the temp-intermediate path.
 - #35 Add an opt-in pretrim-to-video-end repair step (settings/API + converter wiring + tests) so padded-tail sources can be stream-copied to real video end before conversion while keeping integrity validation strict.
 - #34 Avoid false failure on MP4 subtitle-injection outputs by keeping strict video-duration checks while skipping the audio-vs-video tail alignment rejection for valid sidecar subtitle merges.
 - #33 Keep cached pending rows in scanner hash reconciliation so stale in-place anime shadow rows collapse back to done instead of resurfacing as pending.

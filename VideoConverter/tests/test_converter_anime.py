@@ -290,6 +290,77 @@ def test_remux_deletes_batch_ocr_sidecars_after_success(tmp_path):
     assert any("Removed OCR sidecar" in m for m in msgs), f"Expected OCR cleanup log; got: {msgs}"
 
 
+@pytest.mark.parametrize("sidecar_ext", [".ass", ".ssa", ".srt"])
+def test_remux_uses_original_source_folder_for_sidecars(tmp_path, sidecar_ext):
+    """Temp MKV remuxes must still pick up sidecars from the original source folder."""
+    import json as _json
+
+    src_dir = tmp_path / "src"
+    out_dir = tmp_path / "out"
+    work_dir = tmp_path / "work"
+    src_dir.mkdir()
+    out_dir.mkdir()
+    work_dir.mkdir()
+
+    source = src_dir / "Episode 01.mkv"
+    source.write_bytes(b"source-bytes")
+    temp_input = work_dir / "Episode 01.mkv"
+    temp_input.write_bytes(b"temp-bytes")
+    sidecar = src_dir / f"Episode 01{sidecar_ext}"
+    sidecar.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+        encoding="utf-8",
+    )
+
+    probe_data = {
+        "streams": [
+            {"index": 0, "codec_type": "video", "codec_name": "h264"},
+            {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "jpn"}},
+        ]
+    }
+
+    captured_cmds = []
+
+    class _Proc:
+        def __init__(self, cmd):
+            captured_cmds.append(cmd)
+            self.stdout = iter([])
+            self.returncode = 0
+            self.pid = 4321
+            Path(cmd[-1]).write_bytes(b"muxed-output")
+
+        def wait(self):
+            return 0
+
+        def kill(self):
+            return None
+
+    msgs, log = _logs()
+    stop = threading.Event()
+
+    with patch("converter.subprocess.run", return_value=MagicMock(stdout=_json.dumps(probe_data), returncode=0)), \
+            patch("converter.subprocess.Popen", side_effect=lambda cmd, **kwargs: _Proc(cmd)), \
+         patch("converter._verify_output", return_value=(True, "")), \
+         patch("converter._verify_tracks_preserved", return_value=(True, "")), \
+         patch("converter._ffprobe_duration", return_value=60.0), \
+         patch("converter._ffprobe_source_fps", return_value=23.976):
+
+        ok, enc = converter.remux_to_mp4(
+            str(temp_input),
+            str(out_dir),
+            log,
+            stop,
+            hi10=True,
+            subtitle_source_path=str(source),
+        )
+
+    assert ok is True, f"Expected remux success; logs: {msgs}"
+    assert enc == "copy"
+    assert any(str(sidecar) in " ".join(cmd) for cmd in captured_cmds), (
+        f"Expected sidecar {sidecar} to be included in ffmpeg command; logs: {msgs}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # stop event during remux
 # ---------------------------------------------------------------------------

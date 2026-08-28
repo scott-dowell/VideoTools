@@ -3902,18 +3902,26 @@ function _validateCurrentFolderPath(path) {
       const requested = _normalizePathForCompare(path);
       const resolved = _normalizePathForCompare((data && data.path) || '');
       _currentScanPathValid = !!requested && requested === resolved;
-      setButtonStates(_appState === 'running' || _appState === 'scanning' ? _appState : 'idle');
+      if (_appState === 'running' || _appState === 'scanning') {
+        setButtonStates(_appState);
+      } else {
+        _refreshQueueStateFromFiles();
+      }
     })
     .catch(() => {
       if (seq !== _pathValidationSeq) return;
       _currentScanPathValid = false;
-      setButtonStates(_appState === 'running' || _appState === 'scanning' ? _appState : 'idle');
+      if (_appState === 'running' || _appState === 'scanning') {
+        setButtonStates(_appState);
+      } else {
+        _refreshQueueStateFromFiles();
+      }
     });
 
   if (_appState === 'running' || _appState === 'scanning') {
     setButtonStates(_appState);
   } else {
-    setButtonStates('idle');
+    _refreshQueueStateFromFiles();
   }
 }
 
@@ -4352,7 +4360,11 @@ async function loadFromDb(path) {
   _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });
   populateTable(_files);
   updateStats(_files);
-  setButtonStates('ready');
+  _refreshQueueStateFromFiles();
+
+  const hasRunnable = _files.some(f => f.status === 'pending' || f.status === 'failed');
+  const queueState = _files.length === 0 ? 'idle' : (hasRunnable ? 'ready' : 'done');
+  addLog('Load state: ' + queueState + ' (' + _files.length + ' files, path ' + (_currentScanPathValid ? 'valid' : 'invalid') + ').', 'info');
 
   const done    = _files.filter(f => f.status === 'done').length;
   const pending = _files.filter(f => f.status === 'pending' || f.status === 'failed').length;

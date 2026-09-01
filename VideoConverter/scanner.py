@@ -49,7 +49,7 @@ import db
 # Constants
 # ---------------------------------------------------------------------------
 
-VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".m2ts"}
+VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".m2ts", ".ogm", ".ogv"}
 
 _SKIP_CODECS: set[str] = set()  # AV1 is handled by stream-copy in the converter; nothing is skipped
 

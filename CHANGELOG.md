@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #38 Add .ogm and .ogv to the recognised video extension set so OGM/OGV files appear in the conversion queue after a scan.
 - #37 Keep Start Conversion enabled after DB Load by preserving queue-driven UI state during async folder-path validation and reusing the shared queue-state refresh in the Load flow.
 - #36 Preserve external subtitle sidecars from the original source folder during anime-mode MKV remux so .ass/.ssa/.srt files survive the temp-intermediate path.
 - #35 Add an opt-in pretrim-to-video-end repair step (settings/API + converter wiring + tests) so padded-tail sources can be stream-copied to real video end before conversion while keeping integrity validation strict.

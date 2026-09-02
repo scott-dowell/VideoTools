@@ -417,6 +417,14 @@ def walk(root: str) -> Generator[dict, None, None]:
             db_info   = known.get(full_path) or {}
             db_status = db_info.get("status")
             stem_lower = os.path.splitext(filename)[0].lower()
+            fp        = full_path.replace("\\", "/")
+
+            # Detect mtime mismatch: file has status='done' but filesystem mtime changed
+            mtime_mismatch = (
+                db_info
+                and db_status in ("done", "low_savings", "no_saving")
+                and db_info.get("source_mtime") != mtime
+            )
 
             if db_status in ("done", "low_savings", "no_saving"):
                 # If sidecar subtitle files exist alongside the file, reset to
@@ -435,12 +443,18 @@ def walk(root: str) -> Generator[dict, None, None]:
                         db.reset_done_to_pending(record_id)
                     db_status = "pending"
                     # fall through to normal pending handling below
+                elif mtime_mismatch:
+                    # Mtime changed but file is still marked done. Queue for hash verification
+                    # in Phase 2. If hash matches, we'll update the DB mtime so future scans
+                    # will find it via batch lookup without needing hash-check.
+                    to_hash_check.append({"full_path": fp, "mtime": mtime, "size_bytes": size_bytes, "needs_probe": True})
+                    total_bytes += size_bytes
+                    continue
                 elif db_status == "done":
                     # Include done files in the grid (read-only row, no re-encoding).
                     # If we don't have the output bitrate, queue for a one-time probe so
                     # the bitrate column is populated (and filterable) going forward.
                     size_mb = size_bytes / (1024 * 1024)
-                    fp      = full_path.replace("\\", "/")
                     cached_bitrate = db_info.get("bitrate_kbps")
                     cached_codec   = db_info.get("codec") or ""
                     cached_dur     = db_info.get("duration_secs")
@@ -635,6 +649,10 @@ def walk(root: str) -> Generator[dict, None, None]:
             hash_rec = done_by_hash.get(file_hash) if file_hash else None
             if hash_rec:
                 db.update_source_path(hash_rec["id"], fp)
+                # If mtime has changed since file was first recorded, update it now.
+                # This ensures future scans will match via batch lookup without needing hash-check.
+                if hash_rec.get("source_mtime") != mtime:
+                    db.update_mtime(hash_rec["id"], mtime)
                 db.delete_pending_records_by_path(fp, keep_id=hash_rec["id"])
                 yield {
                     "type": "hash_match_done",

@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #39 Hash-verify files with changed mtime to recognize re-downloaded files as done instead of showing as pending, and sync DB mtime on match so future scans find them directly without hash-check.
 - #38 Add .ogm and .ogv to the recognised video extension set so OGM/OGV files appear in the conversion queue after a scan.
 - #37 Keep Start Conversion enabled after DB Load by preserving queue-driven UI state during async folder-path validation and reusing the shared queue-state refresh in the Load flow.
 - #36 Preserve external subtitle sidecars from the original source folder during anime-mode MKV remux so .ass/.ssa/.srt files survive the temp-intermediate path.

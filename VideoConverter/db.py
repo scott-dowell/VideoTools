@@ -433,6 +433,20 @@ def update_source_path(record_id: int, new_source_path: str) -> None:
         )
 
 
+def update_mtime(record_id: int, new_mtime: float) -> None:
+    """Update source_mtime on a record whose file has been re-downloaded/touched.
+    
+    Used when hash-verification confirms a file with changed mtime is the same
+    file as an existing done record. Syncs the DB mtime to current filesystem value
+    so future scans will match directly without needing hash-check.
+    """
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE conversions SET source_mtime = ? WHERE id = ?",
+            (new_mtime, record_id),
+        )
+
+
 def move_path(old_path: str, new_path: str) -> dict:
     """Update any source_path/output_path references from old_path to new_path."""
     old_norm = _norm(old_path)

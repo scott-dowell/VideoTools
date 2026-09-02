@@ -50,7 +50,7 @@
   <!-- Stat cards -->
   <div class="row g-3 mb-3">
     <div class="col-6 col-md">
-      <div class="stat-card">
+      <div class="stat-card h-100 d-flex flex-column">
         <div class="d-flex justify-content-between align-items-start">
           <div>
             <div class="stat-value" id="statTotal">—</div>
@@ -63,7 +63,7 @@
       </div>
     </div>
     <div class="col-6 col-md">
-      <div class="stat-card">
+      <div class="stat-card h-100 d-flex flex-column">
         <div class="d-flex justify-content-between align-items-start">
           <div>
             <div class="stat-value" id="statDone" style="color:#3fb950">—</div>
@@ -76,7 +76,7 @@
       </div>
     </div>
     <div class="col-6 col-md">
-      <div class="stat-card">
+      <div class="stat-card h-100 d-flex flex-column">
         <div class="d-flex justify-content-between align-items-start">
           <div>
             <div class="stat-value" id="statSaved" style="color:#d29922">—</div>
@@ -89,7 +89,7 @@
       </div>
     </div>
     <div class="col-6 col-md">
-      <div class="stat-card">
+      <div class="stat-card h-100 d-flex flex-column">
         <div class="d-flex justify-content-between align-items-start">
           <div>
             <div class="stat-value" id="statSession" style="color:#58a6ff">—</div>
@@ -98,15 +98,15 @@
           <div class="text-end">
             <div id="statSessionElapsed" style="font-size:.8rem;font-weight:600;color:#58a6ff;opacity:.7;white-space:nowrap"></div>
             <div style="font-size:.65rem;color:#8b949e" id="statSessionElapsedLabel"></div>
+            <div style="font-size:.65rem;color:#8b949e;white-space:nowrap" id="statSessionMetaEst"></div>
           </div>
         </div>
         <div class="stat-sub" id="statSessionSub">No conversions yet</div>
-        <div class="stat-sub" id="statSessionEst"></div>
         <div class="stat-bar-track mt-2"><div class="stat-bar" id="statSessionBar" style="width:0%; background:#58a6ff"></div></div>
       </div>
     </div>
     <div class="col-6 col-md">
-      <div class="stat-card">
+      <div class="stat-card h-100 d-flex flex-column">
         <div class="d-flex justify-content-between align-items-start">
           <div>
             <div class="stat-value" id="statFailed" style="color:#f85149">—</div>

@@ -720,7 +720,7 @@ function _fileMatchesFilter(f) {
 function _updateSessionCard() {
   const el = document.getElementById('statSession');
   const sub = document.getElementById('statSessionSub');
-  const est = document.getElementById('statSessionEst');
+  const est = document.getElementById('statSessionMetaEst');
   const bar = document.getElementById('statSessionBar');
   if (!el) return;
   if (_sessionSavedMB === null) {

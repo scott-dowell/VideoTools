@@ -118,12 +118,13 @@ span.badge.badge-paused {
 .log-ok    { color: #3fb950; }
 .log-warn  { color: #d29922; }
 .log-err   { color: #f85149; }
-.stat-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px 18px; }
+.stat-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px 18px; height:100%; }
 .stat-value { font-size: 1.6rem; font-weight:700; color:#58a6ff; line-height:1.1; }
 .stat-label { color:#8b949e; font-size:0.78rem; margin-top:2px; }
 .stat-sub   { color:#8b949e; font-size:0.72rem; margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .stat-icon  { font-size:1.4rem; opacity:.18; margin-top:2px; }
 .stat-bar-track { height:3px; background:rgba(255,255,255,.08); border-radius:2px; overflow:hidden; }
+.stat-card .stat-bar-track { margin-top:auto !important; }
 .stat-bar       { height:3px; border-radius:2px; background:#58a6ff; transition:width .5s ease; }
 .stat-bar-done  { background:#3fb950; }
 .stat-bar-saved { background:#d29922; }

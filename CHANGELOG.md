@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #40 Keep stat cards equal height by using full-height card layout and move Session card in-progress estimate text into the right-side meta stack so card line-count stays consistent.
 - #39 Include source_mtime in the scanner's batch DB status lookup, then hash-verify only true mtime-mismatch files and sync DB mtime on match so re-downloaded files resolve as done without repeated hash passes.
 - #38 Add .ogm and .ogv to the recognised video extension set so OGM/OGV files appear in the conversion queue after a scan.
 - #37 Keep Start Conversion enabled after DB Load by preserving queue-driven UI state during async folder-path validation and reusing the shared queue-state refresh in the Load flow.

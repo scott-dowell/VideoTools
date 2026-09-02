@@ -315,7 +315,7 @@ def update_source_hash(record_id: int, source_hash: str) -> None:
 
 def get_latest_statuses_by_paths(paths: list) -> dict:
     """
-    Return {source_path: {"id", "status", "bitrate_kbps", "codec", "duration_secs", "dropped_streams"}} for
+    Return {source_path: {"id", "status", "source_mtime", "bitrate_kbps", "codec", "duration_secs", "dropped_streams"}} for
     the most recent DB record per path.  Only paths with an existing record are included.
 
     For done records, bitrate_kbps is the output (post-conversion) bitrate:
@@ -331,7 +331,7 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
         placeholders = ",".join("?" * len(normed))
         rows = conn.execute(
             f"""
-            SELECT c.id, c.source_path, c.status,
+                        SELECT c.id, c.source_path, c.source_mtime, c.status,
                    c.source_bitrate_kbps, c.source_codec, c.source_duration_secs,
                      c.source_video_track_count, c.source_audio_track_count,
                      c.source_subtitle_track_count,
@@ -367,6 +367,7 @@ def get_latest_statuses_by_paths(paths: list) -> dict:
         result[row["source_path"]] = {
             "id":             row["id"],
             "status":         status,
+            "source_mtime":   row["source_mtime"],
             "bitrate_kbps":   bitrate,
             "codec":          row["source_codec"],
             "duration_secs":  row["source_duration_secs"],

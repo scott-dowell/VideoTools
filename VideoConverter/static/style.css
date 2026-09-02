@@ -51,7 +51,7 @@ span.badge.badge-ocr-done, span.badge.badge-ocr-skip {
   background: #0d1117;
   border: 1px solid #30363d;
   border-radius: 6px;
-  min-height: 120px;
+  min-height: 0;
   flex: 1 1 0;
   overflow-y: auto;
   font-family: 'Cascadia Code', Consolas, monospace;

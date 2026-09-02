@@ -3699,6 +3699,14 @@ function toggleTheme() {
   const DEFAULT_H   = 260;
   const MIN_H       = 80;
 
+  function getMaxJobHeight() {
+    return Math.max(MIN_H, window.innerHeight * 0.72);
+  }
+
+  function clampJobHeight(px) {
+    return Math.max(MIN_H, Math.min(getMaxJobHeight(), px));
+  }
+
   function init() {
     const splitter = document.getElementById('rightSplitter');
     const jobCard  = document.getElementById('currentJobCard');
@@ -3706,7 +3714,16 @@ function toggleTheme() {
 
     // Restore persisted height
     const saved = parseInt(localStorage.getItem(STORAGE_KEY), 10);
-    if (saved >= MIN_H) jobCard.style.height = saved + 'px';
+    const initial = Number.isFinite(saved) ? saved : DEFAULT_H;
+    jobCard.style.height = clampJobHeight(initial) + 'px';
+
+    window.addEventListener('resize', function() {
+      const current = jobCard.getBoundingClientRect().height || DEFAULT_H;
+      const clamped = clampJobHeight(current);
+      if (Math.abs(clamped - current) >= 1) {
+        jobCard.style.height = clamped + 'px';
+      }
+    });
 
     splitter.addEventListener('mousedown', function(e) {
       e.preventDefault();
@@ -3717,8 +3734,7 @@ function toggleTheme() {
       document.body.style.userSelect = 'none';
 
       function onMove(e) {
-        const maxH = window.innerHeight * 0.72;
-        const newH = Math.max(MIN_H, Math.min(maxH, startH + (e.clientY - startY)));
+        const newH = clampJobHeight(startH + (e.clientY - startY));
         jobCard.style.height = newH + 'px';
       }
       function onUp() {

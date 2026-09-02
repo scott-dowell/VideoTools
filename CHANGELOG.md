@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #43 Normalize queue path keys so done rows do not remain pending when the browser receives later scan/hash updates with different slash or case variants for the same file.
 - #42 Add subtle bottom padding to the main dashboard content wrapper so the lower card edges do not feel flush with the viewport border.
 - #41 Prevent queue-card bottom clipping by stabilizing right-panel split layout: reduce hard minimum height pressure, and clamp restored/resized Current Job panel height to viewport bounds.
 - #40 Keep stat cards equal height by using full-height card layout and move Session card in-progress estimate text into the right-side meta stack so card line-count stays consistent.

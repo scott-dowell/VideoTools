@@ -52,6 +52,11 @@ let _hashUiLastAt = 0;
 let _hashMatchQueue = [];
 let _hashMatchFlushPending = false;
 
+function _normalizePathKey(path) {
+  if (!path) return '';
+  return String(path).replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
 // Estimation background task state
 let _estUserPaused  = false;  // user clicked the strip
 let _estAutoPaused  = false;  // conversion is running
@@ -967,7 +972,7 @@ function scanFolder(path) {
     if (msg.type === 'folder') {
       const startIdx = _files.length;
       msg.files.forEach((f, i) => {
-        _fileIndexByPath[f.full_path] = startIdx + i;
+        _fileIndexByPath[_normalizePathKey(f.full_path)] = startIdx + i;
         _files.push(f);
       });
       _appendRows(msg.files, startIdx);
@@ -991,7 +996,7 @@ function scanFolder(path) {
         // Probe denominator excludes the hashing stage and files removed there.
         _probePhaseTotal = Math.max(0, _probeTotal - _hashTotal - _hashRemoved);
       }
-      const idx = _fileIndexByPath[msg.full_path];
+      const idx = _fileIndexByPath[_normalizePathKey(msg.full_path)];
       if (idx === undefined) {
         _probeDone++;
         _probePhaseDone++;
@@ -1026,12 +1031,12 @@ function scanFolder(path) {
       _queueHashMatchUpdate(msg);
     } else if (msg.type === 'remove') {
       const _inHashPhase = _hashTotal > 0 && _hashDone < _hashTotal;
-      const idx = _fileIndexByPath[msg.full_path];
+      const idx = _fileIndexByPath[_normalizePathKey(msg.full_path)];
       if (idx === undefined) return;
       _files.splice(idx, 1);
       // Rebuild index map after removal
       _fileIndexByPath = {};
-      _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });
+      _files.forEach((f, i) => { _fileIndexByPath[_normalizePathKey(f.full_path)] = i; });
       const tr = document.getElementById('row-' + idx);
       if (tr) tr.remove();
       // Re-index remaining row id attributes
@@ -1203,7 +1208,7 @@ function _flushHashMatchUpdates() {
   const batch = _hashMatchQueue.splice(0, 48);
   let changed = false;
   for (const msg of batch) {
-    const idx = _fileIndexByPath[msg.full_path];
+    const idx = _fileIndexByPath[_normalizePathKey(msg.full_path)];
     if (idx === undefined) continue;
     const f = _files[idx];
     f.status = 'done';
@@ -1620,10 +1625,10 @@ function _pollStatus() {
       if (s.files) {
         let _statusChanged = false;
         const statusByPath = {};
-        s.files.forEach(sf => { if (sf.full_path) statusByPath[sf.full_path] = sf; });
+        s.files.forEach(sf => { if (sf.full_path) statusByPath[_normalizePathKey(sf.full_path)] = sf; });
 
         _files.forEach((f, idx) => {
-          const sf = statusByPath[f.full_path];
+          const sf = statusByPath[_normalizePathKey(f.full_path)];
           if (!sf) return;
           const _prevStatus = f.status || '';
           if ((f.status || '') !== (sf.status || '')) _statusChanged = true;
@@ -4373,7 +4378,7 @@ async function loadFromDb(path) {
 
   _files = data.files.map(f => Object.assign({}, f));
   _fileIndexByPath = {};
-  _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });
+  _files.forEach((f, i) => { _fileIndexByPath[_normalizePathKey(f.full_path)] = i; });
   populateTable(_files);
   updateStats(_files);
   _refreshQueueStateFromFiles();
@@ -4410,7 +4415,7 @@ async function startPrepEstimate(path) {
   setCurrentFolder(path);
   _files = data.files.map(f => Object.assign({}, f));
   _fileIndexByPath = {};
-  _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });
+  _files.forEach((f, i) => { _fileIndexByPath[_normalizePathKey(f.full_path)] = i; });
   populateTable(_files);
   updateStats(_files);
 
@@ -4464,7 +4469,7 @@ async function buildPrepQueue(root) {
   // Replace the table with the selected representative files
   _files = data.files.map(f => Object.assign({}, f));
   _fileIndexByPath = {};
-  _files.forEach((f, i) => { _fileIndexByPath[f.full_path] = i; });
+  _files.forEach((f, i) => { _fileIndexByPath[_normalizePathKey(f.full_path)] = i; });
   populateTable(_files);
   updateStats(_files);
 

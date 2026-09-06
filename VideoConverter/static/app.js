@@ -3777,6 +3777,7 @@ function openSettings() {
       document.getElementById('swCrfVal').textContent = s.sw_hevc_crf;
       document.getElementById('settingsTempDir').value      = s.local_temp_dir;
       document.getElementById('settingsKeepFailedIntermediates').checked = !!s.keep_failed_intermediates;
+      document.getElementById('settingsPretrimToVideoEnd').checked = !!s.pretrim_to_video_end;
       document.getElementById('settingsDefaultSort').value  = s.default_sort || 'bitrate';
       const thr = s.low_savings_threshold_pct !== undefined ? s.low_savings_threshold_pct : 5;
       document.getElementById('settingsLowSavingsThreshold').value = thr;
@@ -3793,6 +3794,7 @@ function saveSettings() {
     sw_hevc_crf:               parseInt(document.getElementById('swCrf').value, 10),
     local_temp_dir:            document.getElementById('settingsTempDir').value.trim(),
     keep_failed_intermediates: !!document.getElementById('settingsKeepFailedIntermediates').checked,
+    pretrim_to_video_end:      !!document.getElementById('settingsPretrimToVideoEnd').checked,
     default_sort:              document.getElementById('settingsDefaultSort').value,
     low_savings_threshold_pct: parseInt(document.getElementById('settingsLowSavingsThreshold').value, 10),
   };

@@ -341,6 +341,9 @@ tr.drag-over > td { background-color: rgba(29,109,224,.15) !important;
   list-style: none;
   padding: 0;
   margin: .5rem 0 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .3rem 0.6rem;
 }
 .step-list li {
   display: flex;

@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #44 Compress step-progress indicators to 2-column grid layout so the Current Job card height stays within viewport bounds and the bottom progress strip remains visible without scrolling.
 - #43 Normalize queue path keys so done rows do not remain pending when the browser receives later scan/hash updates with different slash or case variants for the same file.
 - #42 Add subtle bottom padding to the main dashboard content wrapper so the lower card edges do not feel flush with the viewport border.
 - #41 Prevent queue-card bottom clipping by stabilizing right-panel split layout: reduce hard minimum height pressure, and clamp restored/resized Current Job panel height to viewport bounds.

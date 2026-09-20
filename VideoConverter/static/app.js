@@ -197,8 +197,14 @@ function _fileBitrate(f) {
   return secs > 0 ? Math.round(mb * 8192 / secs) : 0;
 }
 
+function _fileDisplayBitrateKbps(f) {
+  const raw = Number(f && f.bitrate_kbps);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return _fileBitrate(f);
+}
+
 function _fileDisplayBitrateBucketKbps(f) {
-  const kbps = _fileBitrate(f);
+  const kbps = _fileDisplayBitrateKbps(f);
   if (kbps >= 1000) {
     // Match the table display precision: (kbps/1000).toFixed(1) Mbps.
     return Math.round(kbps / 100) * 100;

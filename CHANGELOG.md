@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #46 Make Bitrate + Duration grouping use the same rounded bitrate bucket shown in the queue (for example 2.4 Mbps), then apply shortest-duration-first within each visible bucket.
 - #45 Commit pending workspace batch: add fixed Bitrate + Duration queue sort (highest bitrate then shortest duration with locked direction), wire pretrim setting updates, and include mtime-mismatch investigation scripts/tests/docs.
 - Add pretrim_to_video_end toggle to the Settings dialog so users can enable 'Remove trailing padding after video ends' (stream-copy to video endpoint) directly in the UI instead of editing settings.json.
 - Enable pretrim_to_video_end by default in settings to remove trailing padding and junk after video stream ends, improving source file reliability before conversion.

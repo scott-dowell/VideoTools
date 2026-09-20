@@ -17,7 +17,9 @@ def test_app_js_uses_fixed_bitrate_duration_order_and_locks_direction_button():
     js_path = Path(__file__).resolve().parents[1] / "static" / "app.js"
     js = js_path.read_text(encoding="utf-8")
 
-    assert "const brDelta = _fileBitrate(b) - _fileBitrate(a);" in js
+    assert "function _fileDisplayBitrateBucketKbps(f)" in js
+    assert "return Math.round(kbps / 100) * 100;" in js
+    assert "const brDelta = _fileDisplayBitrateBucketKbps(b) - _fileDisplayBitrateBucketKbps(a);" in js
     assert "const durDelta = _durationSecs(a) - _durationSecs(b);" in js
     assert "if (_sortBy === 'bitrate_duration') {" in js
     assert "btn.disabled = true;" in js

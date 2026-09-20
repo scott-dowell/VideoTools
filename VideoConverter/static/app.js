@@ -197,6 +197,15 @@ function _fileBitrate(f) {
   return secs > 0 ? Math.round(mb * 8192 / secs) : 0;
 }
 
+function _fileDisplayBitrateBucketKbps(f) {
+  const kbps = _fileBitrate(f);
+  if (kbps >= 1000) {
+    // Match the table display precision: (kbps/1000).toFixed(1) Mbps.
+    return Math.round(kbps / 100) * 100;
+  }
+  return kbps;
+}
+
 function _trackCountText(n) {
   return (n === 0 || n) ? String(n) : '—';
 }
@@ -219,7 +228,7 @@ function _sortFiles(files) {
   if (_sortBy === 'bitrate') arr.sort((a, b) => (_fileBitrate(b) - _fileBitrate(a)) * mul);
   else if (_sortBy === 'bitrate_duration') {
     arr.sort((a, b) => {
-      const brDelta = _fileBitrate(b) - _fileBitrate(a);
+      const brDelta = _fileDisplayBitrateBucketKbps(b) - _fileDisplayBitrateBucketKbps(a);
       if (brDelta !== 0) return brDelta;
       // Within equal bitrate groups, shortest duration first.
       const durDelta = _durationSecs(a) - _durationSecs(b);

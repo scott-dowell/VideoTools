@@ -6,8 +6,9 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
-- Add pretrim_to_video_end toggle to the Settings dialog so users can enable 'Auto-pad short audio tracks to video end' directly in the UI instead of editing settings.json.
-- Enable pretrim_to_video_end by default in settings to auto-pad short audio tracks to video end, fixing Fate kaleid liner Prisma Illya Special episodes that have audio shorter than video (16% duration mismatch).
+- #45 Commit pending workspace batch: add fixed Bitrate + Duration queue sort (highest bitrate then shortest duration with locked direction), wire pretrim setting updates, and include mtime-mismatch investigation scripts/tests/docs.
+- Add pretrim_to_video_end toggle to the Settings dialog so users can enable 'Remove trailing padding after video ends' (stream-copy to video endpoint) directly in the UI instead of editing settings.json.
+- Enable pretrim_to_video_end by default in settings to remove trailing padding and junk after video stream ends, improving source file reliability before conversion.
 - #44 Compress step-progress indicators to 2-column grid layout so the Current Job card height stays within viewport bounds and the bottom progress strip remains visible without scrolling.
 - #43 Normalize queue path keys so done rows do not remain pending when the browser receives later scan/hash updates with different slash or case variants for the same file.
 - #42 Add subtle bottom padding to the main dashboard content wrapper so the lower card edges do not feel flush with the viewport border.

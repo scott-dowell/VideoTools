@@ -21,7 +21,7 @@ let _filterDurMin  = ''; let _filterDurMax  = '';
 let _filterCodec   = '';
 let _appState     = 'idle';  // idle | scanning | ready | running | done | stopped
 let _dragSrcIndex = null;
-let _sortBy       = 'bitrate'; // 'bitrate' | 'size' | 'name' | 'path' | 'duration' | 'video_tracks' | 'audio_tracks' | 'subtitle_tracks' | 'est_saving' | 'est_saving_mb'
+let _sortBy       = 'bitrate'; // 'bitrate' | 'bitrate_duration' | 'size' | 'name' | 'path' | 'duration' | 'video_tracks' | 'audio_tracks' | 'subtitle_tracks' | 'est_saving' | 'est_saving_mb'
 let _sortDir      = 'desc';    // 'desc' | 'asc'
 let _currentScanPath = null;  // last successfully scanned folder path
 let _currentScanPathValid = false;
@@ -215,7 +215,18 @@ function _sortFiles(files) {
     const n = Number(v);
     return Number.isFinite(n) ? n : 0;
   };
+  const _durationSecs = f => _parseDuration(f.duration);
   if (_sortBy === 'bitrate') arr.sort((a, b) => (_fileBitrate(b) - _fileBitrate(a)) * mul);
+  else if (_sortBy === 'bitrate_duration') {
+    arr.sort((a, b) => {
+      const brDelta = _fileBitrate(b) - _fileBitrate(a);
+      if (brDelta !== 0) return brDelta;
+      // Within equal bitrate groups, shortest duration first.
+      const durDelta = _durationSecs(a) - _durationSecs(b);
+      if (durDelta !== 0) return durDelta;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+  }
   else if (_sortBy === 'size') arr.sort((a, b) => ((parseFloat((b.size||'0').replace(/,/g,''))||0) - (parseFloat((a.size||'0').replace(/,/g,''))||0)) * mul);
   else if (_sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name) * mul);
   else if (_sortBy === 'path') arr.sort((a, b) => (a.full_path || '').localeCompare(b.full_path || '') * mul);
@@ -231,6 +242,13 @@ function _sortFiles(files) {
 function _updateSortDirBtn() {
   const btn = document.getElementById('sortDirBtn');
   if (!btn) return;
+  if (_sortBy === 'bitrate_duration') {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-lock"></i>';
+    btn.title = 'Bitrate + Duration uses a fixed order: highest bitrate, shortest duration';
+    return;
+  }
+  btn.disabled = false;
   if (_sortDir === 'desc') {
     btn.innerHTML = '<i class="bi bi-sort-down"></i>';
     btn.title = 'Descending — click for ascending';

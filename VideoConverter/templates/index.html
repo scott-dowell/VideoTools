@@ -136,6 +136,7 @@
           </div>
           <select class="form-select form-select-sm" style="max-width:160px" onchange="setSortBy(this.value)" id="sortSelect">
             <option value="bitrate" selected>⇅ Bitrate (smart)</option>
+            <option value="bitrate_duration">⇅ Bitrate + Duration</option>
             <option value="size">⇅ File size</option>
             <option value="duration">⇅ Duration</option>
             <option value="video_tracks">⇅ V tracks</option>
@@ -658,6 +659,7 @@
           <label class="form-label">Default sort order</label>
           <select class="form-select form-select-sm" id="settingsDefaultSort">
             <option value="bitrate">Bitrate (smart) — highest compression opportunity first</option>
+            <option value="bitrate_duration">Bitrate + Duration — shortest first within each bitrate bucket</option>
             <option value="size">File size — largest first</option>
             <option value="duration">Duration — longest first</option>
             <option value="video_tracks">V tracks — highest first</option>
@@ -694,9 +696,9 @@
         <div class="form-check mt-3">
           <input class="form-check-input" type="checkbox" id="settingsPretrimToVideoEnd">
           <label class="form-check-label" for="settingsPretrimToVideoEnd">
-            Auto-pad short audio tracks to video end
+            Trim container to video stream end before convert (pretrim)
           </label>
-          <div class="form-text">When enabled, audio tracks shorter than video are padded with silence before conversion, preventing integrity check failures on sources with mismatched A/V durations.</div>
+          <div class="form-text">When enabled, the source is stream-copied to the first video stream endpoint before conversion. This removes trailing container tails while preserving streams for the actual encode/remux step.</div>
         </div>
 
       </div>

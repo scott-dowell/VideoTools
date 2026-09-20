@@ -2851,6 +2851,7 @@ def compress_and_remux(
     artifact_holder: list[str] | None = None,
     force_sw: bool = False,
     dropped_streams: list[int] | None = None,
+    subtitle_source_path: str | None = None,
 ) -> tuple[bool, str]:
     """
     Anime normal-H.264 path: compress with QSV/SW first, then remux the
@@ -2860,6 +2861,7 @@ def compress_and_remux(
     codec decision, then remux_to_mp4 handles the container conversion.
     """
     import tempfile
+    sidecar_source_path = subtitle_source_path or input_path
 
     # Fast-exit: if source is already an MP4 and has sidecar subtitle files,
     # skip compression entirely — just inject the subs via stream-copy.
@@ -2867,7 +2869,7 @@ def compress_and_remux(
     # wouldn't have the sidecars next to it, so inject would never fire.
     if Path(input_path).suffix.lower() == ".mp4":
         _EXT_SUB_EXTS = {".srt", ".ass", ".ssa"}
-        _src = Path(input_path)
+        _src = Path(sidecar_source_path)
         _stem_lower = _src.stem.lower()
         _has_sidecars = any(
             p.suffix.lower() in _EXT_SUB_EXTS and (
@@ -2889,7 +2891,7 @@ def compress_and_remux(
                 conv_logger=conv_logger,
                 tmp_holder=tmp_holder,
                 dropped_streams=dropped_streams,
-                subtitle_source_path=input_path,
+                subtitle_source_path=sidecar_source_path,
             )
 
     # AV1 handling:
@@ -2911,7 +2913,7 @@ def compress_and_remux(
                 conv_logger=conv_logger,
                 tmp_holder=tmp_holder,
                 dropped_streams=dropped_streams,
-                subtitle_source_path=input_path,
+                subtitle_source_path=sidecar_source_path,
             )
 
         av1_quality = int(getattr(config, "AV1_QSV_QUALITY", 27))
@@ -3004,7 +3006,7 @@ def compress_and_remux(
         conv_logger=conv_logger,
         tmp_holder=tmp_holder,
         dropped_streams=dropped_streams,
-        subtitle_source_path=input_path,
+        subtitle_source_path=sidecar_source_path,
     )
 
     # Keep the intermediate workspace alive until the caller finishes the
@@ -3108,6 +3110,7 @@ def convert_video(
             artifact_holder=_artifact_holder,
             force_sw=_anime_force_sw,
             dropped_streams=dropped_streams,
+            subtitle_source_path=input_path,
         )
 
         if not ok:
@@ -3159,6 +3162,7 @@ def convert_video(
                         artifact_holder=_artifact_holder,
                         force_sw=_anime_force_sw,
                         dropped_streams=retry_drops,
+                        subtitle_source_path=input_path,
                     )
                     if ok_retry:
                         ok_verify_retry, reason_retry = _verify_output(

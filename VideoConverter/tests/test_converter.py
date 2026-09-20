@@ -255,6 +255,37 @@ def test_convert_video_uses_pretrimmed_source_when_enabled(tmp_path):
     assert os.path.normpath(captured.get("input_path", "")) == os.path.normpath(repaired)
 
 
+def test_convert_video_anime_pretrim_passes_original_subtitle_source(tmp_path):
+    """Anime pretrim should encode temp input but scan sidecars next to original source."""
+    out_dir = str(tmp_path / "out")
+    stop = threading.Event()
+    captured = {}
+    repaired = str(tmp_path / "repair" / "h264_short.mkv")
+    Path(repaired).parent.mkdir(parents=True, exist_ok=True)
+    Path(repaired).write_bytes(b"trimmed")
+    original = str(FIXTURES / "h264_short.mkv")
+
+    def _fake_compress_and_remux(*args, **kwargs):
+        captured["input_path"] = kwargs.get("input_path")
+        captured["subtitle_source_path"] = kwargs.get("subtitle_source_path")
+        return False, "mocked"
+
+    with patch.object(converter.config, "PRETRIM_TO_VIDEO_END", True), \
+         patch.object(converter, "_pretrim_source_to_video_end", return_value=repaired), \
+         patch.object(converter, "compress_and_remux", side_effect=_fake_compress_and_remux):
+        _ = converter.convert_video(
+            input_path=original,
+            output_dir=out_dir,
+            anime_mode=True,
+            quality=None,
+            progress_cb=None,
+            stop_event=stop,
+        )
+
+    assert os.path.normpath(captured.get("input_path", "")) == os.path.normpath(repaired)
+    assert os.path.normpath(captured.get("subtitle_source_path", "")) == os.path.normpath(original)
+
+
 # ---------------------------------------------------------------------------
 # _verify_output
 # ---------------------------------------------------------------------------

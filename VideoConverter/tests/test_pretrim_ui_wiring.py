@@ -9,8 +9,8 @@ def test_settings_ui_has_pretrim_checkbox():
     html_content = html_path.read_text(encoding='utf-8')
     
     assert 'id="settingsPretrimToVideoEnd"' in html_content, "Missing checkbox input element"
-    assert 'Auto-pad short audio tracks to video end' in html_content, "Missing label text"
-    assert 'audio tracks shorter than video are padded' in html_content, "Missing help text"
+    assert 'Trim container to video stream end before convert (pretrim)' in html_content, "Missing label text"
+    assert 'stream-copied to the first video stream endpoint before conversion' in html_content, "Missing help text"
 
 
 def test_app_js_loads_and_saves_pretrim():

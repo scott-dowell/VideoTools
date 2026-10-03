@@ -636,61 +636,95 @@ function populateTable(files) {
   applyFilter();
 }
 
-function updateStats(files) {
-  const totalMB  = files.reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
-  const doneAll   = files.filter(f => f.status === 'done').length;
+function _mbFromString(v) {
+  return parseFloat((v || '0').toString().replace(/,/g, '')) || 0;
+}
+
+function _fmtCount(v) {
+  return Number(v || 0).toLocaleString();
+}
+
+function _fmtGB(mb) {
+  return mb > 0 ? (mb / 1024).toFixed(1) + ' GB' : '—';
+}
+
+function _setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
+function _aggregateStats(files) {
+  const totalMB = files.reduce((s, f) => s + _mbFromString(f.size), 0);
+  const doneAll = files.filter(f => f.status === 'done').length;
   const doneSession = files.filter(f => f.status === 'done' && f.session_done).length;
-  const done      = doneAll - doneSession;
-  const failed    = files.filter(f => f.status === 'failed').length;
-  const noSaving  = files.filter(f => f.status === 'no_saving').length;
-  const skipped    = files.filter(f => f.status === 'skipped').length;
-  const pending   = files.filter(f => f.status === 'pending' || f.status === 'ocr').length;
-  const savedMB  = files.reduce((s, f) => s + (f.saved  ? parseFloat(f.saved.replace(/,/g, ''))  || 0 : 0), 0);
-  const origMB   = files.filter(f => f.status === 'done')
-                        .reduce((s, f) => s + (parseFloat(f.size.replace(/,/g, '')) || 0), 0);
-  const donePct  = files.length ? Math.round(doneAll / files.length * 100) : 0;
-  const failPct  = files.length ? Math.round(failed / files.length * 100) : 0;
-  const origTotalMB = origMB + savedMB; // output size + saved = original size
+  const done = doneAll - doneSession;
+  const failed = files.filter(f => f.status === 'failed').length;
+  const noSaving = files.filter(f => f.status === 'no_saving').length;
+  const skipped = files.filter(f => f.status === 'skipped').length;
+  const pending = files.filter(f => f.status === 'pending' || f.status === 'ocr' || f.status === 'converting').length;
+  const lowSavings = files.filter(f => f.status === 'low_savings').length;
+  const savedMB = files.reduce((s, f) => s + (f.saved ? _mbFromString(f.saved) : 0), 0);
+  const origMB = files.filter(f => f.status === 'done').reduce((s, f) => s + _mbFromString(f.size), 0);
+  const donePct = files.length ? Math.round(doneAll / files.length * 100) : 0;
+  const failPct = files.length ? Math.round(failed / files.length * 100) : 0;
+  const overallPct = files.length ? Math.round((doneAll + failed) / files.length * 100) : 0;
+  const origTotalMB = origMB + savedMB;
   const avgRatio = origTotalMB > 0 ? Math.round(savedMB / origTotalMB * 100) : 0;
+  return { totalMB, doneAll, doneSession, done, failed, noSaving, skipped, pending, lowSavings, savedMB, donePct, failPct, overallPct, avgRatio, count: files.length };
+}
+
+function updateStats(files) {
+  const filteredFiles = files.filter(f => _fileMatchesFilter(f));
+  const total = _aggregateStats(files);
+  const filtered = _aggregateStats(filteredFiles);
 
   // Values
-  document.getElementById('statTotal').textContent  = files.length;
-  document.getElementById('statDone').textContent   = doneAll;
-  document.getElementById('statFailed').textContent = failed;
-  document.getElementById('statSaved').textContent  = savedMB > 0 ? (savedMB / 1024).toFixed(1) + ' GB' : '—';
+  _setText('statTotal', _fmtCount(filtered.count));
+  _setText('statTotalAll', _fmtCount(total.count));
+  _setText('statDone', _fmtCount(filtered.doneAll));
+  _setText('statDoneAll', _fmtCount(total.doneAll));
+  _setText('statFailed', _fmtCount(filtered.failed));
+  _setText('statFailedAll', _fmtCount(total.failed));
+  _setText('statSaved', _fmtGB(filtered.savedMB));
+  _setText('statSavedAll', _fmtGB(total.savedMB));
 
   // Sub-labels
-  document.getElementById('statTotalSub').textContent  = totalMB > 0 ? (totalMB / 1024).toFixed(1) + ' GB · ' + pending + ' remaining' : '—';
-  document.getElementById('statDoneSub').textContent   = donePct  > 0 ? donePct  + '% of queue complete' : '—';
-  document.getElementById('statSavedSub').textContent  = avgRatio > 0 ? 'avg ' + avgRatio + '% savings' : '—';
-  document.getElementById('statFailedSub').textContent = failed   > 0 ? failPct + '% failure rate' : 'No failures';
+  _setText('statTotalSub', filtered.totalMB > 0 ? _fmtGB(filtered.totalMB) + ' · ' + filtered.pending + ' remaining' : '—');
+  _setText('statTotalAllSub', total.totalMB > 0 ? _fmtGB(total.totalMB) + ' · ' + total.pending + ' remaining' : '—');
+  _setText('statDoneSub', filtered.count > 0 ? filtered.donePct + '% complete' : '—');
+  _setText('statDoneAllSub', total.count > 0 ? total.donePct + '% complete' : '—');
+  _setText('statSavedSub', filtered.avgRatio > 0 ? 'avg ' + filtered.avgRatio + '% savings' : '—');
+  _setText('statSavedAllSub', total.avgRatio > 0 ? 'avg ' + total.avgRatio + '% savings' : '—');
+  _setText('statFailedSub', filtered.failed > 0 ? filtered.failPct + '% failure rate' : 'No failures');
+  _setText('statFailedAllSub', total.failed > 0 ? total.failPct + '% failure rate' : 'No failures');
 
   // Progress strips
-  document.getElementById('statTotalBar').style.width  = files.length ? '100%'       : '0%';
-  document.getElementById('statDoneBar').style.width   = donePct + '%';
-  document.getElementById('statSavedBar').style.width  = avgRatio + '%';
-  document.getElementById('statFailedBar').style.width = failPct  + '%';
+  document.getElementById('statTotalBar').style.width  = total.count ? '100%' : '0%';
+  document.getElementById('statDoneBar').style.width   = total.donePct + '%';
+  document.getElementById('statSavedBar').style.width  = total.avgRatio + '%';
+  document.getElementById('statFailedBar').style.width = total.failPct + '%';
 
   // Right panel
-  const overallPct = files.length ? Math.round((doneAll + failed) / files.length * 100) : 0;
   const overallPctEl = document.getElementById('overallPct');
   const overallBarEl = document.getElementById('overallBar');
-  if (overallPctEl) overallPctEl.textContent = overallPct + '%';
-  if (overallBarEl) overallBarEl.style.width = overallPct + '%';
-  document.getElementById('totalSizeLabel').textContent = (totalMB / 1024).toFixed(1) + ' GB total';
-  const lowSavings = files.filter(f => f.status === 'low_savings').length;
+  if (overallPctEl) overallPctEl.textContent = total.overallPct + '%';
+  if (overallBarEl) overallBarEl.style.width = total.overallPct + '%';
+  document.getElementById('totalSizeLabel').textContent = (total.totalMB / 1024).toFixed(1) + ' GB total';
+
   // Filter chip counts
-  document.getElementById('chipCount-pending').textContent      = pending;
+  document.getElementById('chipCount-pending').textContent      = total.pending;
   const dseEl = document.getElementById('chipCount-done_session');
-  if (dseEl) dseEl.textContent = doneSession;
-  document.getElementById('chipCount-done').textContent         = done;
-  document.getElementById('chipCount-failed').textContent       = failed;
+  if (dseEl) dseEl.textContent = total.doneSession;
+  document.getElementById('chipCount-done').textContent         = total.done;
+  document.getElementById('chipCount-failed').textContent       = total.failed;
   const nsEl = document.getElementById('chipCount-no-saving');
-  if (nsEl) nsEl.textContent = noSaving;
+  if (nsEl) nsEl.textContent = total.noSaving;
   const skEl = document.getElementById('chipCount-skipped');
-  if (skEl) skEl.textContent = skipped;
+  if (skEl) skEl.textContent = total.skipped;
   const lsEl = document.getElementById('chipCount-low_savings');
-  if (lsEl) lsEl.textContent = lowSavings;
+  if (lsEl) lsEl.textContent = total.lowSavings;
+
+  _updateSessionCard();
 }
 
 function _refreshQueueStateFromFiles() {
@@ -756,19 +790,34 @@ function _fileMatchesFilter(f) {
 }
 
 function _updateSessionCard() {
-  const el = document.getElementById('statSession');
-  const sub = document.getElementById('statSessionSub');
+  const filteredEl = document.getElementById('statSession');
+  const totalEl = document.getElementById('statSessionAll');
+  const filteredSub = document.getElementById('statSessionSub');
+  const totalSub = document.getElementById('statSessionAllSub');
   const est = document.getElementById('statSessionMetaEst');
   const bar = document.getElementById('statSessionBar');
-  if (!el) return;
+  if (!filteredEl) return;
+
+  const filteredSessionDone = _files.filter(f => !!f.session_done && _fileMatchesFilter(f));
+  const filteredSessionSavedMB = filteredSessionDone.reduce((s, f) => s + (f.saved ? _mbFromString(f.saved) : 0), 0);
+
   if (_sessionSavedMB === null) {
-    el.textContent  = '—';
-    if (sub) sub.textContent = 'No conversions yet';
+    filteredEl.textContent = '—';
+    if (totalEl) totalEl.textContent = '—';
+    if (filteredSub) filteredSub.textContent = 'No conversions yet';
+    if (totalSub) totalSub.textContent = 'No conversions yet';
     if (est) est.textContent = '';
     if (bar) bar.style.width = '0%';
   } else {
-    el.textContent = _fmtSavedShort(_sessionSavedMB);
-    if (sub) {
+    filteredEl.textContent = _fmtSavedShort(filteredSessionSavedMB);
+    if (totalEl) totalEl.textContent = _fmtSavedShort(_sessionSavedMB);
+
+    if (filteredSub) {
+      const filteredLabel = filteredSessionDone.length === 1 ? '1 file · realized' : filteredSessionDone.length + ' files · realized';
+      filteredSub.textContent = filteredLabel;
+    }
+
+    if (totalSub) {
       const fileLabel = _sessionProcessed === 1 ? '1 file' : _sessionProcessed + ' files';
       let _avgSpeed = '';
       const sessionDone = _files.filter(f => !!f.session_done);
@@ -776,22 +825,19 @@ function _updateSessionCard() {
       const totalConv = sessionDone.reduce((sum, f) => sum + (Number(f.conv_secs || 0)), 0);
       const avgX = _conversionSpeedX(totalDur, totalConv);
       if (avgX > 0) _avgSpeed = ' · avg ' + _formatSpeedX(avgX);
-      sub.textContent = (_sessionProcessed > 0 ? fileLabel + ' processed · realized' : 'this run · realized') + _avgSpeed;
+      totalSub.textContent = (_sessionProcessed > 0 ? fileLabel + ' processed · realized' : 'this run · realized') + _avgSpeed;
     }
+
     if (est) {
       est.textContent = _sessionEstimatedMB > 0
         ? ('In-progress est: +' + _fmtSavedShort(_sessionEstimatedMB))
         : 'In-progress est: —';
     }
-    // Bar: proportional to total saved card's bar (cap at 100%)
-    // Use ratio vs total saved for relative sense, or just show fill capped at bar width
+
+    // Bar: total session realized vs overall realized space saved.
     if (bar) {
-      const totalEl  = document.getElementById('statSaved');
-      const totalTxt = totalEl ? totalEl.textContent : '';
-      const totalMB  = totalTxt.endsWith('GB')
-        ? parseFloat(totalTxt) * 1024
-        : parseFloat(totalTxt) || 0;
-      bar.style.width = (totalMB > 0 ? Math.min(100, Math.round(_sessionSavedMB / totalMB * 100)) : 0) + '%';
+      const totalSavedMB = _files.reduce((s, f) => s + (f.saved ? _mbFromString(f.saved) : 0), 0);
+      bar.style.width = (totalSavedMB > 0 ? Math.min(100, Math.round(_sessionSavedMB / totalSavedMB * 100)) : 0) + '%';
     }
   }
 }
@@ -863,6 +909,7 @@ function applyFilter() {
       ? `· ${matching.length} / ${total}`
       : '';
   }
+  updateStats(_files);
 }
 
 function toggleFilterBar() {

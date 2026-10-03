@@ -118,18 +118,34 @@ span.badge.badge-paused {
 .log-ok    { color: #3fb950; }
 .log-warn  { color: #d29922; }
 .log-err   { color: #f85149; }
-.stat-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px 18px; height:100%; }
-.stat-value { font-size: 1.6rem; font-weight:700; color:#58a6ff; line-height:1.1; }
+.stat-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px 18px; height:100%; min-height:168px; }
+.stat-head { display:flex; align-items:flex-start; justify-content:space-between; gap:.5rem; }
+.stat-split {
+  display:grid;
+  grid-template-columns: 1fr 1fr;
+  gap:.65rem;
+  margin-top:.35rem;
+}
+.stat-half {
+  min-width:0;
+  padding:.3rem .4rem .35rem;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:6px;
+}
+.stat-half-label { color:#8b949e; font-size:.62rem; letter-spacing:.03em; text-transform:uppercase; }
+.stat-value { font-size: 1.2rem; font-weight:700; color:#58a6ff; line-height:1.1; margin-top:.18rem; font-variant-numeric: tabular-nums; }
+.stat-value-total { opacity:.9; }
 .stat-label { color:#8b949e; font-size:0.78rem; margin-top:2px; }
-.stat-sub   { color:#8b949e; font-size:0.72rem; margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.stat-sub   { color:#8b949e; font-size:0.68rem; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .stat-icon  { font-size:1.4rem; opacity:.18; margin-top:2px; }
 .stat-bar-track { height:3px; background:rgba(255,255,255,.08); border-radius:2px; overflow:hidden; }
-.stat-card .stat-bar-track { margin-top:auto !important; }
+.stat-card .stat-bar-track { margin-top:.6rem !important; }
 .stat-bar       { height:3px; border-radius:2px; background:#58a6ff; transition:width .5s ease; }
 .stat-bar-done  { background:#3fb950; }
 .stat-bar-saved { background:#d29922; }
 .stat-bar-failed{ background:#f85149; }
 [data-bs-theme="light"] .stat-bar-track { background:rgba(0,0,0,.08); }
+[data-bs-theme="light"] .stat-half { border-color: rgba(0,0,0,.10); }
 /* Drag and drop */
 .drag-handle { color:#8b949e; font-size:.9rem; cursor:grab; opacity:0.15;
   transition:opacity .15s; display:block; text-align:center; }
@@ -257,6 +273,10 @@ tr.drag-over > td { background-color: rgba(29,109,224,.15) !important;
 @media (max-width: 768px) {
   .details-kv-grid {
     grid-template-columns: 1fr;
+  }
+  .stat-split {
+    grid-template-columns: 1fr;
+    gap:.4rem;
   }
 }
 .details-codec-badge { display:inline-block; padding:.15rem .45rem; border-radius:.25rem;

@@ -51,70 +51,106 @@
   <div class="row g-3 mb-3">
     <div class="col-6 col-md">
       <div class="stat-card h-100 d-flex flex-column">
-        <div class="d-flex justify-content-between align-items-start">
-          <div>
-            <div class="stat-value" id="statTotal">—</div>
-            <div class="stat-label"><i class="bi bi-files me-1"></i>Total files</div>
-          </div>
+        <div class="stat-head">
+          <div class="stat-label"><i class="bi bi-files me-1"></i>Total files</div>
           <i class="bi bi-collection stat-icon"></i>
         </div>
-        <div class="stat-sub" id="statTotalSub">—</div>
+        <div class="stat-split">
+          <div class="stat-half">
+            <div class="stat-half-label">Filtered</div>
+            <div class="stat-value" id="statTotal">—</div>
+            <div class="stat-sub" id="statTotalSub">—</div>
+          </div>
+          <div class="stat-half">
+            <div class="stat-half-label">Total</div>
+            <div class="stat-value stat-value-total" id="statTotalAll">—</div>
+            <div class="stat-sub" id="statTotalAllSub">—</div>
+          </div>
+        </div>
         <div class="stat-bar-track mt-2"><div class="stat-bar" id="statTotalBar" style="width:0%"></div></div>
       </div>
     </div>
     <div class="col-6 col-md">
       <div class="stat-card h-100 d-flex flex-column">
-        <div class="d-flex justify-content-between align-items-start">
-          <div>
-            <div class="stat-value" id="statDone" style="color:#3fb950">—</div>
-            <div class="stat-label"><i class="bi bi-check-circle me-1"></i>Converted</div>
-          </div>
+        <div class="stat-head">
+          <div class="stat-label"><i class="bi bi-check-circle me-1"></i>Converted</div>
           <i class="bi bi-check-circle-fill stat-icon" style="color:#3fb950"></i>
         </div>
-        <div class="stat-sub" id="statDoneSub">—</div>
+        <div class="stat-split">
+          <div class="stat-half">
+            <div class="stat-half-label">Filtered</div>
+            <div class="stat-value" id="statDone" style="color:#3fb950">—</div>
+            <div class="stat-sub" id="statDoneSub">—</div>
+          </div>
+          <div class="stat-half">
+            <div class="stat-half-label">Total</div>
+            <div class="stat-value stat-value-total" id="statDoneAll" style="color:#3fb950">—</div>
+            <div class="stat-sub" id="statDoneAllSub">—</div>
+          </div>
+        </div>
         <div class="stat-bar-track mt-2"><div class="stat-bar stat-bar-done" id="statDoneBar" style="width:0%"></div></div>
       </div>
     </div>
     <div class="col-6 col-md">
       <div class="stat-card h-100 d-flex flex-column">
-        <div class="d-flex justify-content-between align-items-start">
-          <div>
-            <div class="stat-value" id="statSaved" style="color:#d29922">—</div>
-            <div class="stat-label"><i class="bi bi-arrow-down-circle me-1"></i>Space saved</div>
-          </div>
+        <div class="stat-head">
+          <div class="stat-label"><i class="bi bi-arrow-down-circle me-1"></i>Space saved</div>
           <i class="bi bi-hdd stat-icon" style="color:#d29922"></i>
         </div>
-        <div class="stat-sub" id="statSavedSub">—</div>
+        <div class="stat-split">
+          <div class="stat-half">
+            <div class="stat-half-label">Filtered</div>
+            <div class="stat-value" id="statSaved" style="color:#d29922">—</div>
+            <div class="stat-sub" id="statSavedSub">—</div>
+          </div>
+          <div class="stat-half">
+            <div class="stat-half-label">Total</div>
+            <div class="stat-value stat-value-total" id="statSavedAll" style="color:#d29922">—</div>
+            <div class="stat-sub" id="statSavedAllSub">—</div>
+          </div>
+        </div>
         <div class="stat-bar-track mt-2"><div class="stat-bar stat-bar-saved" id="statSavedBar" style="width:0%"></div></div>
       </div>
     </div>
     <div class="col-6 col-md">
       <div class="stat-card h-100 d-flex flex-column">
-        <div class="d-flex justify-content-between align-items-start">
-          <div>
+        <div class="stat-head">
+          <div class="stat-label"><i class="bi bi-stopwatch me-1"></i>Session savings</div>
+          <i class="bi bi-stopwatch-fill stat-icon" style="color:#58a6ff"></i>
+        </div>
+        <div class="stat-split">
+          <div class="stat-half">
+            <div class="stat-half-label">Filtered</div>
             <div class="stat-value" id="statSession" style="color:#58a6ff">—</div>
-            <div class="stat-label"><i class="bi bi-stopwatch me-1"></i>Session savings</div>
+            <div class="stat-sub" id="statSessionSub">No conversions yet</div>
           </div>
-          <div class="text-end">
-            <div id="statSessionElapsed" style="font-size:.8rem;font-weight:600;color:#58a6ff;opacity:.7;white-space:nowrap"></div>
-            <div style="font-size:.65rem;color:#8b949e" id="statSessionElapsedLabel"></div>
-            <div style="font-size:.65rem;color:#8b949e;white-space:nowrap" id="statSessionMetaEst"></div>
+          <div class="stat-half">
+            <div class="stat-half-label">Total</div>
+            <div class="stat-value stat-value-total" id="statSessionAll" style="color:#58a6ff">—</div>
+            <div class="stat-sub" id="statSessionAllSub">No conversions yet</div>
           </div>
         </div>
-        <div class="stat-sub" id="statSessionSub">No conversions yet</div>
         <div class="stat-bar-track mt-2"><div class="stat-bar" id="statSessionBar" style="width:0%; background:#58a6ff"></div></div>
       </div>
     </div>
     <div class="col-6 col-md">
       <div class="stat-card h-100 d-flex flex-column">
-        <div class="d-flex justify-content-between align-items-start">
-          <div>
-            <div class="stat-value" id="statFailed" style="color:#f85149">—</div>
-            <div class="stat-label"><i class="bi bi-x-circle me-1"></i>Failed</div>
-          </div>
+        <div class="stat-head">
+          <div class="stat-label"><i class="bi bi-x-circle me-1"></i>Failed</div>
           <i class="bi bi-x-octagon stat-icon" style="color:#f85149"></i>
         </div>
-        <div class="stat-sub" id="statFailedSub">—</div>
+        <div class="stat-split">
+          <div class="stat-half">
+            <div class="stat-half-label">Filtered</div>
+            <div class="stat-value" id="statFailed" style="color:#f85149">—</div>
+            <div class="stat-sub" id="statFailedSub">—</div>
+          </div>
+          <div class="stat-half">
+            <div class="stat-half-label">Total</div>
+            <div class="stat-value stat-value-total" id="statFailedAll" style="color:#f85149">—</div>
+            <div class="stat-sub" id="statFailedAllSub">—</div>
+          </div>
+        </div>
         <div class="stat-bar-track mt-2"><div class="stat-bar stat-bar-failed" id="statFailedBar" style="width:0%"></div></div>
       </div>
     </div>

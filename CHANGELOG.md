@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- #48 Split dashboard stat cards into side-by-side Filtered vs Total values (Total files, Converted, Space saved, Session savings, Failed), wire live dual-scope updates on filter/search changes, and align card spacing/icon treatment for consistent header-to-progress layout.
 - #47 Make Bitrate + Duration bucketing use the exact bitrate source shown in queue rows (`source_bitrate_kbps` when present, fallback computed bitrate) so visible bitrate groups sort shortest-first consistently.
 - #46 Make Bitrate + Duration grouping use the same rounded bitrate bucket shown in the queue (for example 2.4 Mbps), then apply shortest-duration-first within each visible bucket.
 - #45 Commit pending workspace batch: add fixed Bitrate + Duration queue sort (highest bitrate then shortest duration with locked direction), wire pretrim setting updates, and include mtime-mismatch investigation scripts/tests/docs.

@@ -1,23 +1,48 @@
-# run.ps1 — Stop any running instance and start the Flask dev server
-$venv = "$PSScriptRoot\.venv\Scripts"
-$app  = "$PSScriptRoot\VideoConverter\app.py"
+$ErrorActionPreference = 'Stop'
 
-# Kill any python process holding port 5001
-$procs = Get-NetTCPConnection -LocalPort 5001 -ErrorAction SilentlyContinue |
-         Select-Object -ExpandProperty OwningProcess -Unique
-if ($procs) {
-    Write-Host "Stopping process(es) on port 5001: $procs" -ForegroundColor Yellow
-    $procs | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Milliseconds 400
-} else {
-    Write-Host "Port 5001 is free." -ForegroundColor Green
+$repoRoot = $PSScriptRoot
+$appDir = Join-Path $repoRoot 'VideoConverter'
+$appEntry = Join-Path $appDir 'app.py'
+$pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
+$port = 5001
+
+if (-not (Test-Path $pythonExe)) {
+    throw "Missing virtualenv Python: $pythonExe"
 }
 
-Write-Host "Starting Flask..." -ForegroundColor Cyan
-$logDir = "$PSScriptRoot\VideoConverter\logs"
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$crashLog = "$logDir\flask_crash.log"
-# Launch in a new window so output is visible and stderr goes to flask_crash.log
-Start-Process -FilePath "cmd.exe" `
-    -ArgumentList "/k `"`"$venv\python.exe`" `"$app`" 2>>`"$crashLog`"`"" `
-    -WindowStyle Normal
+if (-not (Test-Path $appEntry)) {
+    throw "Missing app entrypoint: $appEntry"
+}
+
+$listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+if ($listener) {
+    Write-Host "VideoConverter already listening on http://127.0.0.1:$port (LISTEN socket detected)."
+    exit 0
+}
+
+New-Item -ItemType Directory -Force -Path (Join-Path $appDir 'logs') | Out-Null
+
+Start-Process -FilePath $pythonExe `
+    -ArgumentList @("$appEntry") `
+    -WorkingDirectory $appDir `
+    -WindowStyle Hidden
+
+$deadline = (Get-Date).AddSeconds(20)
+do {
+    Start-Sleep -Milliseconds 250
+    $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+} while (-not $listener -and (Get-Date) -lt $deadline)
+
+if (-not $listener) {
+    throw "VideoConverter did not begin listening on port $port within 20 seconds."
+}
+
+Write-Host "VideoConverter started hidden on http://127.0.0.1:$port"
+Try {
+    $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -Method Get -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
+    Write-Host "Reachable: HTTP $($response.StatusCode)"
+}
+Catch {
+    throw "VideoConverter is listening on port $port but did not answer HTTP requests on localhost."
+}
+

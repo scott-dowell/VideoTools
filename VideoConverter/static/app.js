@@ -45,6 +45,7 @@ let _subtitleLikelyCache = {};     // key: "<full_path>|<stream_index>" -> detec
 let _subtitleLikelyPending = new Set();
 let _detailsProbePending = new Set();
 const _QUEUE_COL_COUNT = 18;
+const _AUTO_SCAN_STORAGE_KEY = 'vc_auto_scan_new';
 let _scanPhase1LastUiAt = 0;
 let _scanPhase1LastFound = 0;
 let _scanPhase1LastFolder = '';
@@ -339,6 +340,8 @@ function setButtonStates(state) {
   if (analyseBtn) analyseBtn.disabled = !hasFolder || folderBusy;
   const prepBtn = document.getElementById('prepBtn');
   if (prepBtn) prepBtn.disabled = !hasFolder || folderBusy;
+  const autoScanToggle = document.getElementById('autoScanNewToggle');
+  if (autoScanToggle) autoScanToggle.disabled = !hasFolder || folderBusy;
   const jumpBtn = document.getElementById('jumpToActiveBtn');
   if (jumpBtn) jumpBtn.classList.toggle('d-none', state !== 'running');
   if (state !== 'running') _lastAutoScrollPath = null;
@@ -1703,6 +1706,22 @@ function _pollStatus() {
       // s.files only contains the SUBMITTED (pending/failed) subset — match by
       // full_path so we never clobber done/skipped rows that weren't submitted.
       if (s.files) {
+        const newlySeen = [];
+        s.files.forEach(sf => {
+          const pathKey = _normalizePathKey(sf.full_path);
+          if (pathKey && _fileIndexByPath[pathKey] === undefined) {
+            const nf = Object.assign({}, sf);
+            if (!nf.status) nf.status = 'pending';
+            _fileIndexByPath[pathKey] = _files.length;
+            _files.push(nf);
+            newlySeen.push(nf);
+          }
+        });
+        if (newlySeen.length > 0) {
+          _appendRows(newlySeen, _files.length - newlySeen.length);
+          addLog('Auto-scan discovered ' + newlySeen.length + ' new file(s) and queued them.', 'info');
+        }
+
         let _statusChanged = false;
         const statusByPath = {};
         s.files.forEach(sf => { if (sf.full_path) statusByPath[_normalizePathKey(sf.full_path)] = sf; });
@@ -1863,7 +1882,12 @@ function startConversion() {
   fetch('/api/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ files: pendingFiles, anime_mode: anime }),
+    body: JSON.stringify({
+      files: pendingFiles,
+      anime_mode: anime,
+      auto_scan_new: !!(document.getElementById('autoScanNewToggle') || {}).checked,
+      auto_scan_root: _currentScanPath || '',
+    }),
   })
   .then(r => r.json())
   .then(d => {
@@ -3906,6 +3930,13 @@ document.addEventListener('DOMContentLoaded', function() {
   _updateSortDirBtn();
   const lastFolder = localStorage.getItem('vc_last_folder');
   if (lastFolder) setCurrentFolder(lastFolder);
+  const autoScanToggle = document.getElementById('autoScanNewToggle');
+  if (autoScanToggle) {
+    autoScanToggle.checked = localStorage.getItem(_AUTO_SCAN_STORAGE_KEY) === '1';
+    autoScanToggle.addEventListener('change', function() {
+      localStorage.setItem(_AUTO_SCAN_STORAGE_KEY, this.checked ? '1' : '0');
+    });
+  }
 });
 
 (function _applyStartupSettings() {
@@ -3948,6 +3979,11 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!s.files || s.files.length === 0 || s.state === 'idle') return;
       // Restore the file list from the persisted job state
       _files = s.files.map(f => Object.assign({}, f));
+      const autoScanToggle = document.getElementById('autoScanNewToggle');
+      if (autoScanToggle && s.auto_scan_new !== undefined) {
+        autoScanToggle.checked = !!s.auto_scan_new;
+        localStorage.setItem(_AUTO_SCAN_STORAGE_KEY, autoScanToggle.checked ? '1' : '0');
+      }
       // Guess the root folder from the first file path
       const firstPath = (_files[0] || {}).full_path || '';
       const folderGuess = firstPath.replace(/[\\/][^\\/]+$/, '');

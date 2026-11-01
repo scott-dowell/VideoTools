@@ -6,6 +6,8 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- Add an "Auto-scan for new files" folder-action toggle that can append newly discovered stable files between queue items during an active conversion run without resetting pending work.
+- Use a shared conversion DB path across checkouts/worktrees by default, with optional `VC_DB_PATH` override and legacy DB migration, and harden startup ffmpeg/ffprobe bin resolution via optional `VC_FFMPEG_BIN_DIR`.
 - Add hidden detached local Windows startup for the Flask app with a LISTEN-only port guard and user Run-key registration, without any Cloudflare tunnel or public hosting config.
 - #48 Split dashboard stat cards into side-by-side Filtered vs Total values (Total files, Converted, Space saved, Session savings, Failed), wire live dual-scope updates on filter/search changes, and align card spacing/icon treatment for consistent header-to-progress layout.
 - #47 Make Bitrate + Duration bucketing use the exact bitrate source shown in queue rows (`source_bitrate_kbps` when present, fallback computed bitrate) so visible bitrate groups sort shortest-first consistently.

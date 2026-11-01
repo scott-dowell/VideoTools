@@ -20,15 +20,169 @@ import config
 import converter
 import db
 import scanner
-app = Flask(__name__)
-
 BASE_DIR    = os.path.dirname(__file__)
-DB_PATH     = os.path.join(BASE_DIR, "conversions.db")
+
+
+def _resolve_ffmpeg_bin_dir() -> str | None:
+    """Find a directory containing both ffmpeg.exe and ffprobe.exe.
+
+    Priority:
+      1) VC_FFMPEG_BIN_DIR environment override
+      2) Existing PATH discovery (where ffmpeg / where ffprobe)
+      3) Common local install locations
+    """
+    candidates: list[str] = []
+
+    override = os.environ.get("VC_FFMPEG_BIN_DIR", "").strip()
+    if override:
+        candidates.append(os.path.abspath(os.path.expanduser(override)))
+
+    for exe in ("ffmpeg", "ffprobe"):
+        try:
+            out = _sp.check_output(["where", exe], text=True, stderr=_sp.DEVNULL).splitlines()
+            for line in out:
+                p = line.strip().strip('"')
+                if p:
+                    candidates.append(os.path.dirname(p))
+        except Exception:
+            pass
+
+    user_home = os.path.expanduser("~")
+    candidates.extend([
+        os.path.join(user_home, "OneDrive", "Documents", "ffmpeg", "bin"),
+        os.path.join(user_home, "Documents", "ffmpeg", "bin"),
+        os.path.join(BASE_DIR, "ffmpeg", "bin"),
+        os.path.join(os.path.dirname(BASE_DIR), "ffmpeg", "bin"),
+    ])
+
+    seen: set[str] = set()
+    for d in candidates:
+        if not d:
+            continue
+        nd = os.path.normpath(d)
+        key = nd.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ffmpeg_exe = os.path.join(nd, "ffmpeg.exe")
+        ffprobe_exe = os.path.join(nd, "ffprobe.exe")
+        if os.path.isfile(ffmpeg_exe) and os.path.isfile(ffprobe_exe):
+            return nd
+    return None
+
+
+def _ensure_ffmpeg_tools_on_path() -> str | None:
+    """Ensure ffmpeg/ffprobe are invokable by name in this process."""
+    bin_dir = _resolve_ffmpeg_bin_dir()
+    if not bin_dir:
+        return None
+    path_parts = (os.environ.get("PATH") or "").split(os.pathsep)
+    if not any(os.path.normcase(p) == os.path.normcase(bin_dir) for p in path_parts if p):
+        os.environ["PATH"] = bin_dir + os.pathsep + (os.environ.get("PATH") or "")
+    return bin_dir
+
+
+_FFMPEG_BIN_DIR = _ensure_ffmpeg_tools_on_path()
+
+
+def _infer_main_checkout_root(repo_root: str) -> str | None:
+    """Best-effort: resolve the primary checkout root when running in a worktree."""
+    git_ref = os.path.join(repo_root, ".git")
+    if not os.path.isfile(git_ref):
+        return None
+    try:
+        with open(git_ref, "r", encoding="utf-8") as fh:
+            line = fh.readline().strip()
+    except OSError:
+        return None
+    if not line.lower().startswith("gitdir:"):
+        return None
+    gitdir_raw = line.split(":", 1)[1].strip()
+    gitdir_base = gitdir_raw if os.path.isabs(gitdir_raw) else os.path.join(repo_root, gitdir_raw)
+    gitdir = os.path.normpath(gitdir_base)
+    marker = f"{os.sep}.git{os.sep}worktrees{os.sep}"
+    lower_gitdir = gitdir.lower()
+    idx = lower_gitdir.find(marker.lower())
+    if idx < 0:
+        return None
+    return os.path.normpath(gitdir[:idx])
+
+
+def _read_conversion_count(path: str) -> int | None:
+    """Return conversions row count for an existing DB, or None if unreadable."""
+    try:
+        con = sqlite3.connect(path)
+        try:
+            row = con.execute("SELECT COUNT(*) FROM conversions").fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            con.close()
+    except Exception:
+        return None
+
+
+def _resolve_db_path() -> str:
+    """Return a shared DB path so all worktrees use the same conversion cache."""
+    override = os.environ.get("VC_DB_PATH", "").strip()
+    if override:
+        db_path = os.path.abspath(os.path.expanduser(override))
+    else:
+        local_app_data = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        db_dir = os.path.join(local_app_data, "VideoConverter")
+        db_path = os.path.join(db_dir, "conversions.db")
+
+    db_dirname = os.path.dirname(db_path)
+    if db_dirname:
+        os.makedirs(db_dirname, exist_ok=True)
+
+    existing_rows: int | None = None
+    if os.path.exists(db_path):
+        existing_rows = _read_conversion_count(db_path)
+        if existing_rows is not None and existing_rows > 0:
+            return db_path
+
+    candidates: list[tuple[int, int, str]] = []
+    local_legacy = os.path.join(BASE_DIR, "conversions.db")
+    if os.path.exists(local_legacy) and os.path.normcase(local_legacy) != os.path.normcase(db_path):
+        size = os.path.getsize(local_legacy)
+        rows = _read_conversion_count(local_legacy)
+        if size > 0 and rows is not None and rows > 0:
+            candidates.append((rows, size, local_legacy))
+
+    repo_root = os.path.dirname(BASE_DIR)
+    main_checkout_root = _infer_main_checkout_root(repo_root)
+    if main_checkout_root:
+        main_legacy = os.path.join(main_checkout_root, os.path.basename(BASE_DIR), "conversions.db")
+        if os.path.exists(main_legacy) and os.path.normcase(main_legacy) != os.path.normcase(db_path):
+            size = os.path.getsize(main_legacy)
+            rows = _read_conversion_count(main_legacy)
+            if size > 0 and rows is not None and rows > 0:
+                candidates.append((rows, size, main_legacy))
+
+    if candidates:
+        if existing_rows is None:
+            existing_rows = 0
+        source_rows, _, source = max(candidates, key=lambda x: (x[0], x[1]))
+        if source_rows <= existing_rows:
+            return db_path
+        try:
+            shutil.copy2(source, db_path)
+        except OSError:
+            pass
+    return db_path
+
+
+app = Flask(
+    __name__,
+    template_folder=os.path.join(BASE_DIR, "templates"),
+    static_folder=os.path.join(BASE_DIR, "static"),
+)
+DB_PATH     = _resolve_db_path()
 db.init_db(DB_PATH)
 
 # Disable power-throttling for ffmpeg so E-cores don't cause FP overflows
 try:
-    ffmpeg_exe = _sp.check_output(["where", "ffmpeg"], text=True).split()[0].strip()
+    ffmpeg_exe = os.path.join(_FFMPEG_BIN_DIR, "ffmpeg.exe") if _FFMPEG_BIN_DIR else _sp.check_output(["where", "ffmpeg"], text=True).split()[0].strip()
     _sp.run(
         ["powercfg", "/powerthrottling", "disable", "/path", ffmpeg_exe],
         capture_output=True, timeout=5,
@@ -63,11 +217,16 @@ _job: dict = {
     "steps":           [],          # per-file step checklist
     "ffmpeg_status":   "",          # single live status line (no history)
     "ffmpeg_status_at": 0.0,         # unix timestamp of last status update
+    "auto_scan_new":   False,
+    "auto_scan_root":  "",
 }
 
 _PROCESS_ALL_ACCESS = 0x1F0FFF
 _session_started_at: float = 0.0   # set when /api/start is called
 _ESTIMATE_VERSION = 3  # bump when estimate methodology/output semantics change
+_AUTOSCAN_MIN_INTERVAL_SECS = 20
+_AUTOSCAN_STABLE_WINDOW_SECS = 8
+_AUTOSCAN_QUEUE_STATUSES = {"pending", "failed", "queued"}
 
 # Batch preview worker state keyed by plan id.
 _batch_preview_lock = threading.Lock()
@@ -117,6 +276,85 @@ def _status_savings_fields(data: dict) -> dict:
         "current_file_saved_mb": round(current_saved_mb, 1),
         "current_file_est_mb": round(current_est_mb, 1),
     }
+
+
+def _collect_autoscan_candidates(root_path: str) -> list[dict]:
+    """Collect phase-1 scan rows that are still queue candidates.
+
+    This intentionally stops after scanner phase-1 (scan_done) to avoid the
+    heavier hash/probe phases between conversion files.
+    """
+    candidates: list[dict] = []
+    for event in scanner.walk(root_path):
+        et = event.get("type")
+        if et == "folder":
+            for file_info in event.get("files", []):
+                status = (file_info.get("status") or "pending").lower()
+                if status in _AUTOSCAN_QUEUE_STATUSES:
+                    candidates.append(dict(file_info))
+        elif et == "scan_done":
+            break
+        elif et == "error":
+            break
+    return candidates
+
+
+def _discover_stable_new_files(
+    root_path: str,
+    known_paths: set[str],
+    seen_candidates: dict[str, dict[str, float]],
+    stable_window_secs: float,
+) -> list[dict]:
+    """Return newly discovered files that remained unchanged for a short window."""
+    now = time.time()
+    discovered = _collect_autoscan_candidates(root_path)
+    visible_paths: set[str] = set()
+    stable_new: list[dict] = []
+
+    for file_info in discovered:
+        full_path = (file_info.get("full_path") or "").replace("\\", "/")
+        if not full_path:
+            continue
+        visible_paths.add(full_path)
+        if full_path in known_paths:
+            seen_candidates.pop(full_path, None)
+            continue
+
+        try:
+            st = os.stat(full_path)
+        except OSError:
+            continue
+        if st.st_size <= 0:
+            continue
+
+        prev = seen_candidates.get(full_path)
+        if (
+            prev
+            and prev.get("size_bytes") == st.st_size
+            and prev.get("mtime") == st.st_mtime
+            and (now - prev.get("first_seen_at", now)) >= stable_window_secs
+        ):
+            file_info["status"] = "pending"
+            stable_new.append(file_info)
+            seen_candidates.pop(full_path, None)
+            continue
+
+        if (
+            not prev
+            or prev.get("size_bytes") != st.st_size
+            or prev.get("mtime") != st.st_mtime
+        ):
+            seen_candidates[full_path] = {
+                "size_bytes": float(st.st_size),
+                "mtime": float(st.st_mtime),
+                "first_seen_at": now,
+            }
+
+    for path in list(seen_candidates.keys()):
+        if path in known_paths or path not in visible_paths:
+            seen_candidates.pop(path, None)
+
+    return stable_new
 
 
 def _suspend_ffmpeg() -> None:
@@ -1128,9 +1366,67 @@ def _queue_worker(
     low_savings_threshold_pct: int = 5,
     estimate_only: bool = False,
     force_reestimate: bool = False,
+    auto_scan_new: bool = False,
+    auto_scan_root: str | None = None,
 ) -> None:
     """Runs in a daemon thread; processes the file queue sequentially."""
     total_saved = 0.0
+    known_paths: set[str] = {
+        (fi.get("full_path") or "").replace("\\", "/")
+        for fi in files
+        if fi.get("full_path")
+    }
+    seen_new_candidates: dict[str, dict[str, float]] = {}
+    next_auto_scan_at = 0.0
+    auto_scan_root_norm = os.path.normpath(auto_scan_root) if auto_scan_root else None
+    if auto_scan_new and auto_scan_root_norm and not os.path.isdir(auto_scan_root_norm):
+        _job_log(f"Auto-scan disabled: folder is unavailable ({auto_scan_root_norm}).")
+        auto_scan_new = False
+    elif auto_scan_new and auto_scan_root_norm:
+        _job_log(
+            f"Auto-scan enabled for {auto_scan_root_norm} "
+            f"(cooldown {_AUTOSCAN_MIN_INTERVAL_SECS}s, stable window {_AUTOSCAN_STABLE_WINDOW_SECS}s)."
+        )
+
+    def _maybe_autoscan_between_files() -> None:
+        nonlocal next_auto_scan_at
+        if (
+            not auto_scan_new
+            or not auto_scan_root_norm
+            or _stop_event.is_set()
+            or _soft_stop_event.is_set()
+        ):
+            return
+        now = time.time()
+        if now < next_auto_scan_at:
+            return
+        next_auto_scan_at = now + _AUTOSCAN_MIN_INTERVAL_SECS
+        try:
+            stable_new = _discover_stable_new_files(
+                auto_scan_root_norm,
+                known_paths,
+                seen_new_candidates,
+                _AUTOSCAN_STABLE_WINDOW_SECS,
+            )
+        except Exception as exc:
+            _job_log(f"Auto-scan failed: {exc}")
+            return
+        if not stable_new:
+            return
+        appended: list[dict] = []
+        for nf in stable_new:
+            nf_path = (nf.get("full_path") or "").replace("\\", "/")
+            if not nf_path or nf_path in known_paths:
+                continue
+            known_paths.add(nf_path)
+            appended.append(dict(nf))
+        if not appended:
+            return
+        files.extend(appended)
+        with _job_lock:
+            _job["files"].extend([dict(nf) for nf in appended])
+            _job["total"] = len(_job["files"])
+        _job_log(f"Auto-scan: added {len(appended)} new file(s) to the queue.")
 
     # ------------------------------------------------------------------
     # OCR batch pre-pass (anime mode only)
@@ -1385,7 +1681,6 @@ def _queue_worker(
     for idx, file_info in enumerate(files):
         if _stop_event.is_set() or _soft_stop_event.is_set():
             break
-
         _sidecar_reset = False  # set True when re-queuing a done/low_savings file for sub-inject only
         full_path = file_info["full_path"].replace("\\", "/")
 
@@ -1419,6 +1714,7 @@ def _queue_worker(
                 with _job_lock:
                     _job["files"][idx]["status"] = db_status
                     _job["current_index"] = idx
+                _maybe_autoscan_between_files()
                 continue
             # Sidecar(s) found — reset DB and flag that this is a sub-inject
             # operation (no re-encode).  The estimate step will be skipped.
@@ -1460,6 +1756,7 @@ def _queue_worker(
             _job_log(f"Skipped {full_path}: {exc}")
             with _job_lock:
                 _job["files"][idx]["status"] = "failed"
+            _maybe_autoscan_between_files()
             continue
 
         # Ensure a DB record exists for this file
@@ -1496,6 +1793,7 @@ def _queue_worker(
             with _job_lock:
                 _job["files"][idx]["status"] = "failed"
                 _job["files"][idx]["error_tail"] = "OCR batch pre-flight failed"
+            _maybe_autoscan_between_files()
             continue
 
         # Now set the badge to 'converting'.
@@ -1700,6 +1998,7 @@ def _queue_worker(
                         db.mark_low_savings(rec_id, _est_pct, _threshold, _utcnow())
                         with _job_lock:
                             _job["files"][idx]["status"] = "low_savings"
+                        _maybe_autoscan_between_files()
                         continue
                     else:
                         if _est_pct < _threshold and force_convert:
@@ -1714,6 +2013,7 @@ def _queue_worker(
                             db.reset_done_to_pending(rec_id)  # revert running → pending
                             with _job_lock:
                                 _job["files"][idx]["status"] = "pending"
+                            _maybe_autoscan_between_files()
                             continue
 
         _conv_start = time.time()
@@ -1744,6 +2044,7 @@ def _queue_worker(
             if _is_fatal_device_error(exc):
                 _job_log("FATAL DEVICE ERROR — halting queue to prevent further damage.")
                 _stop_event.set()
+            _maybe_autoscan_between_files()
             continue
 
         _conv_secs = max(0, int(time.time() - _conv_start))
@@ -1862,6 +2163,7 @@ def _queue_worker(
                     _job_log("FATAL DEVICE ERROR detected in ffmpeg output — halting queue.")
                     _stop_event.set()
 
+        _maybe_autoscan_between_files()
         with _job_lock:
             _job["saved_mb"] = total_saved
 
@@ -2229,6 +2531,8 @@ def api_start():
     anime     = bool(data.get("anime_mode", False))
     estimate_only = bool(data.get("estimate_only", False))
     force_reestimate = bool(data.get("force_reestimate", False))
+    auto_scan_new = bool(data.get("auto_scan_new", False))
+    auto_scan_root = (data.get("auto_scan_root") or "").strip()
     settings  = _load_settings()
     quality   = int(settings.get("qsv_quality", config.QSV_QUALITY))
     threshold = int(settings.get("low_savings_threshold_pct", 5))
@@ -2265,6 +2569,8 @@ def api_start():
             "steps":         [],
             "ffmpeg_status": "",
             "ffmpeg_status_at": 0.0,
+            "auto_scan_new": auto_scan_new,
+            "auto_scan_root": auto_scan_root,
         })
 
     def _worker_safe():
@@ -2276,6 +2582,8 @@ def api_start():
                 threshold,
                 estimate_only,
                 force_reestimate,
+                auto_scan_new,
+                auto_scan_root,
             )
         except Exception as exc:
             import traceback
